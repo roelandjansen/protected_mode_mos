@@ -1,5 +1,11 @@
 # This is the home of PC-MOS/386; based off the last released commercial version (v5.01), development now continues under a GPLv3 license in the hope that it will be both an educational and useful project.
 
+Active development -- protected mode support, the Linux-native build toolchain, and everything that goes with it -- now happens in a separate repo:
+
+https://github.com/roelandjansen/proteted_mode_mos
+
+Builds there target openSUSE Leap 15.x, Leap 16.x, and Tumbleweed only, C and bash only (no Perl, no Python), no sudo in scripts, small self-contained commits. See that repo's docs for the full tooling policy. This tree stays as the v5.01 source release itself.
+
 This tree:
 
 * includes sources
