@@ -18,16 +18,19 @@ ARGS=()
 
 #
 # If ci_prereq.sh has already set up the native UASM/Open Watcom
-# toolchain, put it on PATH. Nothing below consumes it yet -- the
-# actual build still goes through dosemu2 until the module-by-module
-# port described in the Linux-native-build note is validated. This
-# is just so build.sh doesn't need editing again once that lands.
+# toolchain, source its env file. Nothing below consumes it yet --
+# the actual build still goes through dosemu2 until the module-by-
+# module port described in the Linux-native-build note is validated.
+# This is just so build.sh doesn't need editing again once that
+# lands.
 #
 
 use_native_toolchain_if_present() {
-	if [ -d "$TOOLCHAIN_DIR" ]; then
-		PATH="$TOOLCHAIN_DIR/bin:$TOOLCHAIN_DIR/open-watcom/binl64:$PATH"
-		export PATH
+	local ENV_FILE="$TOOLCHAIN_DIR/env.sh"
+
+	if [ -f "$ENV_FILE" ]; then
+		# shellcheck disable=SC1090
+		source "$ENV_FILE"
 	fi
 }
 
