@@ -61,6 +61,12 @@ identifiable, non-PC-MOS ownership on a large fraction of them:
 | `ASM86.86`, `LINK86.86`, `LIB86.86` | **Intel Corp.** (1980) |
 | `RCD.SYS` | **Iomega Corporation** (1985–1990) |
 | `LIB/LLIBCE.LIB`, `SLIBCE.LIB`, `MLIBCE.LIB`, `CLIBCE.LIB`, and the associated `.OBJ` startup files | Microsoft C runtime libraries (companion to the MS compiler above) |
+| `TS.COM` | **The Periscope Company, Inc.** ("TABLESIZE (TS) Version 5.31, Copyright 1986-1991... All rights reserved" — found while inventorying the live build; it's called from `KERNEL.MAK` itself, post-link, to trim the `.MAP` file's symbol table. Only touches the debug map, not the actual kernel binary, so skippable without affecting build correctness) |
+
+`PUBLIC.COM` (also called from the live build, before every `masm`
+invocation) turned out to be a non-issue on inspection — its own strings
+say "Public domain utility - from the Periscope Company," explicitly, no
+rights-reserved notice. No concern there, unlike its sibling `TS.COM`.
 
 `TURBO.TPL` (Borland Turbo Pascal library) and the `MAILER`, `OMBUDSMN.ASP`
 files I couldn't attribute from embedded strings — worth a closer look
@@ -97,9 +103,12 @@ runtime depends on, so those can go without a sequencing concern.
 - **Remove once the toolchain migration lands, not before:** `MASM.EXE`,
   `LINK.EXE`, `CL.EXE`/`C1.EXE`/`C2.EXE`/`C3.EXE`, `ILINK.EXE`, `LIB.EXE`,
   `EXEHDR.EXE`, `EXEMOD.EXE`, `EXEPACK.EXE`, `MAKE.EXE`, `EXE2BIN.EXE`,
-  `DEBUG.COM`, `CV.EXE`/`CVPACK.EXE`, and the `LIB/` Microsoft runtime
-  libraries/`.OBJ` files — these are exactly what the Linux-native-build
-  note's UASM/Open Watcom plan is meant to replace.
+  `DEBUG.COM`, `CV.EXE`/`CVPACK.EXE`, the `LIB/` Microsoft runtime
+  libraries/`.OBJ` files, and — new from the stage 1 inventory —
+  `TS.COM`, which `KERNEL.MAK` genuinely calls post-link (removing it now
+  would break `build.sh`, even though it only touches the debug `.MAP`
+  file, not the kernel binary itself). These are exactly what the
+  Linux-native-build note's UASM/Open Watcom plan is meant to replace.
 - **Check before deciding:** `TURBO.TPL`, `MAILER`, `OMBUDSMN.ASP`,
   `INCLUDE/*.H`, and — new from the PKWARE-removal sweep — `LIST.COM`,
   `AS.EXE`, `MAKESFX.COM` (each references pkzip/zip2exe internally,
