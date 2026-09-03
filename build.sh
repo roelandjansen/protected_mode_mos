@@ -11,7 +11,25 @@ set -euo pipefail
 MIN_REV=3684
 SYNTAX_CHANGE_REV=5709
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain"
+
 ARGS=()
+
+#
+# If ci_prereq.sh has already set up the native UASM/Open Watcom
+# toolchain, put it on PATH. Nothing below consumes it yet -- the
+# actual build still goes through dosemu2 until the module-by-module
+# port described in the Linux-native-build note is validated. This
+# is just so build.sh doesn't need editing again once that lands.
+#
+
+use_native_toolchain_if_present() {
+	if [ -d "$TOOLCHAIN_DIR" ]; then
+		PATH="$TOOLCHAIN_DIR/bin:$TOOLCHAIN_DIR/open-watcom/binl64:$PATH"
+		export PATH
+	fi
+}
 
 #
 # Confirms the installed dosemu2 is new enough. Bails with a clear
@@ -52,6 +70,7 @@ run_build() {
 	dosemu -td -ks "${ARGS[@]}" 'path=%D\bin;%O'
 }
 
+use_native_toolchain_if_present
 check_dosemu_version
 set_build_args
 run_build
