@@ -1,0 +1,81 @@
+# PC-MOS/386: Third-Party Copyrighted Material in the Tree
+
+Not legal advice — I'm not a lawyer, and this is a factual inventory, not a
+clearance opinion. But the evidence below is unambiguous: this tree bundles
+a substantial amount of other companies' proprietary DOS-era software, none
+of which is covered by the GPLv3 relicensing (the README is explicit that
+the GPL only applies to "the PC-MOS/386/The Software Link inc/CDROM code,"
+not helper files).
+
+## What I checked
+
+`BORLANDC/` and `BRIEF/` turned out to be non-issues on inspection — both
+are just a `README.md` pointing at where to get the real package plus a
+`FILESTRUCT.md` that's literally an `unzip -l` listing for reference. No
+actual Borland C++ 3.1 or Brief 3.1 binaries are present. Nothing to remove
+there — the concern was already handled by whoever set the tree up this way
+originally.
+
+`BIN/` and `LIB/` are a different story. Extracting embedded copyright
+strings from the binaries (`strings <file> | grep -i copyright`) turns up
+identifiable, non-PC-MOS ownership on a large fraction of them:
+
+| File(s) | Confirmed owner (embedded string) |
+|---|---|
+| `MASM.EXE`, `LINK.EXE`, `CV.EXE`, `CVPACK.EXE`, `CL.EXE`, `C1.EXE`/`C2.EXE`/`C3.EXE`, `ILINK.EXE`, `LIB.EXE`, `EXEHDR.EXE`, `EXEMOD.EXE`, `EXEPACK.EXE`, `MAKE.EXE`, `EXE2BIN.EXE`, `DEBUG.COM`, `SMARTDRV.EXE`, `MOUSE.COM`, `UNDEL.EXE`, `MAIL.EXE`, `MSD.EXE` | **Microsoft Corp.** ("MS Run-Time Library — Copyright (c) 19xx, Microsoft Corp" / explicit Microsoft Corp copyright notices) |
+| `NU.EXE`, `NCD.EXE` | **Peter Norton** (pre-Symantec-acquisition Norton Utilities) |
+| `SPEEDISK.EXE` | **Symantec Corporation** (1991) |
+| `NDD.EXE` | Norton Disk Doctor — no embedded copyright string found directly, but same Norton Utilities suite as `NU.EXE`/`NCD.EXE`; same category |
+| `PKZIP.EXE`, `PKZIPFIX.EXE`, `PKZ110.EXE`, `PUTAV.EXE`, `ZIP2EXE.EXE` | **PKWARE, Inc.** — and `BIN/LICENSE.DOC` is literally PKWARE's own license document, which states plainly "It is the policy of PKWARE, Inc. not to release source code of its products" and restricts redistribution/repackaging to third parties without a paid distribution license |
+| `ASM86.86`, `LINK86.86`, `LIB86.86` | **Intel Corp.** (1980) |
+| `RCD.SYS` | **Iomega Corporation** (1985–1990) |
+| `LIB/LLIBCE.LIB`, `SLIBCE.LIB`, `MLIBCE.LIB`, `CLIBCE.LIB`, and the associated `.OBJ` startup files | Microsoft C runtime libraries (companion to the MS compiler above) |
+
+`TURBO.TPL` (Borland Turbo Pascal library) and the `MAILER`, `OMBUDSMN.ASP`
+files I couldn't attribute from embedded strings — worth a closer look
+rather than assuming either way.
+
+`INCLUDE/` (standard C headers — `STDIO.H`, `STRING.H`, etc.) is likely
+also Microsoft's own header set shipped with the compiler above, though I
+didn't verify each file individually.
+
+`IMAGES/`, `SHIPMOS/`, and `CDLINK/` are a different, cleaner category —
+these are PC-MOS's own shipping disk/boot images and the CD-ROM driver
+source explicitly credited to Rod Roark in the README, i.e. exactly the
+material the GPLv3 relicensing agreement with Gary Robertson and Rod Roark
+covers. No concern there.
+
+## The complication: some of this is still load-bearing
+
+`MASM.EXE`, `LINK.EXE`, `CL.EXE`/`C1.EXE`/`C2.EXE`, `ILINK.EXE`, `LIB.EXE`
+are the toolchain the *current* `dosemu2`-based build actually uses (see
+the Linux-native-build note). Pulling them now would break `build.sh` until
+the UASM/Open Watcom migration is far enough along to not need them. The
+Norton/PKWARE/Intel/Iomega tools, by contrast, aren't part of any build
+path I found — they look like bundled DOS-session conveniences (disk
+utilities, a zip tool, mail) rather than anything MOS's own build or
+runtime depends on, so those can go without a sequencing concern.
+
+## Recommendation
+
+- **Remove now, no dependency concern:** the Norton/Symantec set
+  (`NU.EXE`, `NCD.EXE`, `SPEEDISK.EXE`, `NDD.EXE`), the PKWARE set
+  (`PKZIP.EXE`, `PKZIPFIX.EXE`, `PKZ110.EXE`, `PUTAV.EXE`, `ZIP2EXE.EXE`,
+  and `BIN/LICENSE.DOC` which only exists to license those), Intel's
+  `ASM86.86`/`LINK86.86`/`LIB86.86`, Iomega's `RCD.SYS`, and Microsoft's
+  `UNDEL.EXE`/`MAIL.EXE`/`MSD.EXE`/`SMARTDRV.EXE`/`MOUSE.COM`.
+- **Remove once the toolchain migration lands, not before:** `MASM.EXE`,
+  `LINK.EXE`, `CL.EXE`/`C1.EXE`/`C2.EXE`/`C3.EXE`, `ILINK.EXE`, `LIB.EXE`,
+  `EXEHDR.EXE`, `EXEMOD.EXE`, `EXEPACK.EXE`, `MAKE.EXE`, `EXE2BIN.EXE`,
+  `DEBUG.COM`, `CV.EXE`/`CVPACK.EXE`, and the `LIB/` Microsoft runtime
+  libraries/`.OBJ` files — these are exactly what the Linux-native-build
+  note's UASM/Open Watcom plan is meant to replace.
+- **Check before deciding:** `TURBO.TPL`, `MAILER`, `OMBUDSMN.ASP`,
+  `INCLUDE/*.H` — I didn't get a clean attribution on these from embedded
+  strings alone.
+
+I'd treat the "remove now" list as a genuinely small, self-contained
+change (one clear category, no build dependency) and the "remove once
+migrated" list as something to track and do as part of the toolchain work
+itself, rather than as a separate change that temporarily breaks the
+existing build.
