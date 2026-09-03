@@ -85,14 +85,15 @@ function_name() {
 }
 ```
 
-- **No `sudo` inside project scripts.** The current `ci_prereq.sh` fails
-  this on two counts, not one: it uses `sudo apt`/`add-apt-repository` to
-  install `dosemu2` — `sudo` violates this rule, and `apt` violates §0
-  (Debian-only tooling on a SUSE-only project). Both predate this policy.
-  It needs replacing with a `zypper`-based, `sudo`-free equivalent (e.g. a
-  pre-provisioned CI image, or a documented one-time setup step run with
-  the necessary privileges outside the script itself) — not patched to swap
-  `apt` for `zypper` while keeping `sudo`.
+- **No `sudo` inside project scripts.** `ci_prereq.sh` used to fail this on
+  two counts — `sudo apt`/`add-apt-repository`, i.e. `sudo` plus Debian
+  tooling on a SUSE-only project (§0). It's been rewritten: `zypper`,
+  no `sudo`, and it now refuses to run and explains why if it isn't
+  already root, rather than escalating itself. Package/repo availability
+  for dosemu2 differs by target (Tumbleweed carries it directly at time of
+  writing; Leap may need the OBS repo the script falls back to) — worth
+  re-checking that fallback URL periodically rather than trusting it
+  indefinitely.
 
 ## 4. Change size
 
