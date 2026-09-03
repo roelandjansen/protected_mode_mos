@@ -83,10 +83,16 @@ check_build_exists() {
 
 #
 # Builds a throwaway boot floppy from the template plus the current
-# build output.
+# build output -- kernel, shell, and every other built utility/
+# driver (.COM/.EXE/.SYS), which comfortably fits: the full build
+# output is ~656K against the floppy's 1.44MB, well under its
+# 224-entry root-directory limit too.
 #
 
 build_boot_floppy() {
+	local F
+	local NAME
+
 	if [ ! -f "$TEMPLATE_IMAGE" ]; then
 		printf 'Boot floppy template not found: %s\n' "$TEMPLATE_IMAGE" >&2
 		exit 1
@@ -97,7 +103,17 @@ build_boot_floppy() {
 
 	mcopy -i "$RUN_IMAGE" "$KERNEL_IMAGE" '::$$MOS.SYS'
 	mcopy -i "$RUN_IMAGE" "$SHELL_IMAGE" '::$$SHELL.SYS'
-	mcopy -i "$RUN_IMAGE" "$BOOTDIR/COMMAND.COM" '::COMMAND.COM'
+
+	shopt -s nocaseglob
+	for F in "$BOOTDIR"/*.COM "$BOOTDIR"/*.SYS "$BOOTDIR"/*.EXE; do
+		[ -e "$F" ] || continue
+		NAME="$(basename "$F")"
+		case "$NAME" in
+		'$$MOS.SYS' | '$$SHELL.SYS' | __SHELL.SYS) continue ;;
+		esac
+		mcopy -i "$RUN_IMAGE" "$F" "::$NAME"
+	done
+	shopt -u nocaseglob
 
 	printf 'smpsize=16\r\ncache=16\r\n' | mcopy -i "$RUN_IMAGE" - '::CONFIG.SYS'
 }
