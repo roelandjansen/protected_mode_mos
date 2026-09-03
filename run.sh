@@ -7,13 +7,27 @@ set -euo pipefail
 # command-line drive-mounting syntax (--Fdrive_c specifically, which
 # no longer exists) doesn't do what this needs on a current install.
 #
+# IMPORTANT: openSUSE's own "dosbox" package -- on Tumbleweed, Leap
+# 15.6, and Leap 16.0 alike, confirmed via its own packaged man page
+# -- is actually DOSBox Staging, not classic DOSBox. That matters
+# here: Staging's "boot -l a" command is unreliable (a known open
+# issue upstream), so this script detects which one is actually
+# installed and uses Staging's own documented, more reliable method
+# instead (see run_dosbox below) rather than assuming classic
+# DOSBox's behaviour, which is what most guidance elsewhere assumes.
+#
 # DOSBox can't just mount a directory and boot it the way dosemu2's
 # old --Fdrive_c did -- booting needs an actual disk image with a
 # boot sector. IMAGES/template/empty-bootable.img (already in the
 # repo, prepared by MSYS from mos501src) provides that; this script
 # copies it fresh each run and populates it with the current build
-# output via mtools. Verified end to end: boots to PC-MOS's real
-# startup banner, then a live, responsive [A:\] command prompt.
+# output via mtools. Verified end to end on classic DOSBox 0.74:
+# boots to PC-MOS's real startup banner, then a live, responsive
+# [A:\] command prompt. The Staging-specific path below is not
+# independently verified the same way -- built from Staging's own
+# documented behaviour and a matching upstream bug report, not from
+# an actual test run, since classic DOSBox was what was available
+# to test against.
 #
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,11 +103,21 @@ build_boot_floppy() {
 }
 
 #
-# Boots the floppy interactively.
+# Boots the floppy interactively. Classic DOSBox and DOSBox Staging
+# need different invocations here: classic wants an explicit
+# "boot -l a <img>" command; Staging's "boot -l a" is unreliable for
+# this (a known open issue -- dosbox-staging/dosbox-staging#522) but
+# it has its own documented, more reliable behaviour: passing a
+# bootable .IMG as the plain positional argument auto-boots it.
 #
 
 run_dosbox() {
-	dosbox -c "cycles=max" -c "boot -l a $RUN_IMAGE"
+	if dosbox --version 2>&1 | grep -qi staging; then
+		dosbox -c "cycles=max" "$RUN_IMAGE"
+	else
+		dosbox -c "cycles=max" -c "boot -l a $RUN_IMAGE"
+	fi
+
 	rm -f "$RUN_IMAGE"
 }
 
