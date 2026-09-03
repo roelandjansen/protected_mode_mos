@@ -120,13 +120,31 @@ build_uasm() {
 		# -Wno-error=int-conversion: macho64.c does
 		# "mm.header.flags = NULL;" where flags is a uint32_t --
 		# harmless (NULL is 0), just badly typed.
-		# All four are functionally harmless (correct values/calling
-		# convention, nothing actually miscompiled), which is why old
-		# gcc only warned; gcc 14+ makes all four errors by default.
-		# Same class of fix the Gentoo package for UASM carries for a
-		# subset of these (its issues #143 and #197) -- extended here
-		# to the two more that its older gcc apparently didn't hit.
-		make -f gccLinux64.mak CFLAGS='-std=gnu17 -fcommon -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types -Wno-error=int-conversion'
+		# -Wno-discarded-qualifiers: UASM's source routinely returns/
+		# assigns "const char*" where plain "char*" is expected (its
+		# own macro tables, string literals passed around loosely) --
+		# harmless, high-volume noise, not worth patching upstream
+		# source for. Verified this flag actually silences it (via
+		# -fdiagnostics-show-option) without affecting error count or
+		# the resulting binary.
+		#
+		# Two more warning classes exist (a harmless "alloca redefined"
+		# from memalloc.h vs stdlib.h, and a "so large it is unsigned"
+		# note on a 64-bit FNV hash constant) but neither is tied to an
+		# individually toggleable -W flag in this gcc -- confirmed via
+		# -fdiagnostics-show-option showing no [-Wxxx] tag on either,
+		# and several plausible flag names (-Wno-macro-redefined,
+		# -Wno-redefined, -Wno-cpp, -Wno-overflow) all silently no-op.
+		# Only "-w" (disable all warnings outright) would kill these
+		# too, not worth it for two cosmetic messages.
+		# All four -Wno-error flags are functionally harmless (correct
+		# values/calling convention, nothing actually miscompiled),
+		# which is why old gcc only warned; gcc 14+ makes the first
+		# three errors by default. Same class of fix the Gentoo
+		# package for UASM carries for a subset of these (its issues
+		# #143 and #197), extended here to what its older gcc
+		# apparently didn't hit.
+		make -f gccLinux64.mak CFLAGS='-std=gnu17 -fcommon -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-discarded-qualifiers'
 	)
 
 	cp "$BUILD_DIR/GccUnixR/uasm" "$TOOLCHAIN_DIR/bin/uasm"
