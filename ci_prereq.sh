@@ -2,19 +2,21 @@
 set -euo pipefail
 
 #
-# Installs everything the build needs: dosemu2 for the existing
-# DOS-era build path, and the gcc/UASM/Open Watcom toolchain for the
+# Installs everything the build needs: dosbox for the DOS-era build
+# path (build.sh), and the gcc/UASM/Open Watcom toolchain for the
 # native-Linux build path it's migrating to. See the tooling policy
 # and Linux-native-build notes. Targets openSUSE Leap 15.x, Leap
 # 16.x, and Tumbleweed only.
+#
+# NOTE: run.sh (boots the built OS, as opposed to building it) still
+# depends on dosemu2, not dosbox -- that switch hasn't been made or
+# validated. This script no longer installs dosemu2, so run.sh's own
+# prerequisite isn't covered here until that's sorted out.
 #
 # Package installs need root; nothing else here does. Does not use
 # sudo anywhere -- run this as root already (e.g. inside a root CI
 # container image), or as root manually.
 #
-
-DOSEMU2_REPO_ALIAS="dosemu2"
-DOSEMU2_REPO_URL="https://download.opensuse.org/repositories/home:/mnhauke:/dosemu2/openSUSE_Tumbleweed/"
 
 UASM_REPO_URL="https://github.com/Terraspace/UASM.git"
 UASM_PATCH_DBGCV_URL="https://github.com/clouds56/UASM/commit/806d54cf778246c96dcbe61a4649bf0aebcb0eba.patch"
@@ -38,26 +40,18 @@ require_root() {
 }
 
 #
-# Installs dosemu2 if it isn't already present. Tries the default
-# repos first; falls back to adding the OBS repo only if needed.
+# Installs dosbox if it isn't already present. Standard Factory-
+# derived package on Tumbleweed and Leap 15.x -- unlike dosemu2, no
+# OBS fallback repo needed.
 #
 
-install_dosemu2() {
-	if command -v dosemu >/dev/null 2>&1; then
-		printf 'dosemu2 already installed, skipping.\n'
+install_dosbox() {
+	if command -v dosbox >/dev/null 2>&1; then
+		printf 'dosbox already installed, skipping.\n'
 		return 0
 	fi
 
-	if zypper --non-interactive install dosemu; then
-		return 0
-	fi
-
-	printf 'dosemu2 not found in default repos, adding OBS repo.\n'
-	printf 'Verify %s still matches your distro/version before relying on this in CI.\n' "$DOSEMU2_REPO_URL" >&2
-
-	zypper --non-interactive addrepo --refresh "$DOSEMU2_REPO_URL" "$DOSEMU2_REPO_ALIAS"
-	zypper --non-interactive --gpg-auto-import-keys refresh "$DOSEMU2_REPO_ALIAS"
-	zypper --non-interactive install dosemu
+	zypper --non-interactive install dosbox
 }
 
 #
@@ -263,7 +257,7 @@ SCRIPT_EOF
 }
 
 require_root
-install_dosemu2
+install_dosbox
 install_build_tools
 build_uasm
 install_open_watcom
