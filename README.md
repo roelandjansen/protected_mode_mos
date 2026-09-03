@@ -2,7 +2,7 @@
 
 Active development -- protected mode support, the Linux-native build toolchain, and everything that goes with it -- now happens in a separate repo:
 
-https://github.com/roelandjansen/proteted_mode_mos
+https://github.com/roelandjansen/protected_mode_mos
 
 Builds there target openSUSE Leap 15.x, Leap 16.x, and Tumbleweed only. Languages are x86 assembly (MASM dialect, the OS itself), C (host-side helper tools, compiled with gcc), and bash (scripting) -- no Perl, no Python. No sudo in scripts, small self-contained commits. See that repo's docs for the full tooling policy. This tree stays as the v5.01 source release itself.
 
