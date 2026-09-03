@@ -1,0 +1,34 @@
+#
+# Local toolchain -- built/fetched by ci_prereq.sh (UASM, Open
+# Watcom). Never committed; regenerate it locally instead.
+#
+
+/toolchain/
+
+#
+# DOS-era build byproducts (MASM/LINK), left in place among the
+# sources by the original build layout rather than in a separate
+# build directory -- these are what build.sh regenerates, not
+# shipped artifacts. Does not affect files already tracked, e.g.
+# the intentional reference objects under SOURCES/src/ulib/ref/.
+#
+
+*.OBJ
+*.obj
+*.LST
+*.lst
+*.MAP
+*.map
+*.CRF
+*.crf
+$*.SYS
+$*.sys
+$$*.*
+
+#
+# Native (UASM/Open Watcom) build byproducts, once that path is
+# live -- see the Linux-native-build note.
+#
+
+*.o
+*.err
