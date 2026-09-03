@@ -7,6 +7,37 @@ of which is covered by the GPLv3 relicensing (the README is explicit that
 the GPL only applies to "the PC-MOS/386/The Software Link inc/CDROM code,"
 not helper files).
 
+## Status: PKWARE batch removed
+
+Update to what's below: the PKWARE set has actually been removed, and one
+part of the original assessment in this doc was wrong — `PKZIP.EXE` and
+`ZIP2EXE.EXE` were *not* dependency-free like the rest of that batch.
+`SOURCES/src/MAKEALL.BAT` and `SOURCES/src/cdlink/PACKMOS.BAT` (plus the
+duplicate `CDLINK/cdlink_src/` copies) call `pkzip`/`zip2exe` directly.
+Neither is part of `build.sh`'s actual path, though — `MAKEMOS.BAT` doesn't
+call either of them — so removal was done anyway, accepting that those two
+packaging scripts (not the build itself) are now broken until someone
+rewrites them for a native host `zip`, or they're retired.
+
+Removed: `PKZIP.EXE`, `ZIP2EXE.EXE`, `PKZIPFIX.EXE`, `PKZ110.EXE`,
+`PUTAV.EXE`, `BIN/LICENSE.DOC`, and — found during the same sweep, all
+turned out to be PKWARE's own bundled documentation rather than PC-MOS's —
+`ADDENDUM.DOC`, `README.DOC`, `MANUAL.DOC`, `ORDER.DOC`, `WHATSNEW.110`.
+
+**Held back, different category:** `APPNOTE.TXT` is PKWARE's ZIP *file
+format* specification, not tool documentation — a spec doc for an open,
+widely-used format rather than proprietary software docs. Worth a separate
+call rather than bundling it into the same removal.
+
+**New, not yet audited:** the sweep for lingering references turned up
+embedded strings inside three *other* binaries that reference pkzip/zip2exe
+by name — `LIST.COM` ("Y/C PKZIP /C ARCA", likely archive-format
+recognition in a file viewer), `AS.EXE` (its own PKZIP-availability check
+text), `MAKESFX.COM` (embedded help text mentioning `ZIP2EXE`). These are
+separate proprietary tools with their own undetermined ownership, not
+something the PKWARE removal touches — add to the "check before deciding"
+list below.
+
 ## What I checked
 
 `BORLANDC/` and `BRIEF/` turned out to be non-issues on inspection — both
@@ -59,11 +90,10 @@ runtime depends on, so those can go without a sequencing concern.
 ## Recommendation
 
 - **Remove now, no dependency concern:** the Norton/Symantec set
-  (`NU.EXE`, `NCD.EXE`, `SPEEDISK.EXE`, `NDD.EXE`), the PKWARE set
-  (`PKZIP.EXE`, `PKZIPFIX.EXE`, `PKZ110.EXE`, `PUTAV.EXE`, `ZIP2EXE.EXE`,
-  and `BIN/LICENSE.DOC` which only exists to license those), Intel's
+  (`NU.EXE`, `NCD.EXE`, `SPEEDISK.EXE`, `NDD.EXE`), Intel's
   `ASM86.86`/`LINK86.86`/`LIB86.86`, Iomega's `RCD.SYS`, and Microsoft's
-  `UNDEL.EXE`/`MAIL.EXE`/`MSD.EXE`/`SMARTDRV.EXE`/`MOUSE.COM`.
+  `UNDEL.EXE`/`MAIL.EXE`/`MSD.EXE`/`SMARTDRV.EXE`/`MOUSE.COM`. (The PKWARE
+  set is done — see Status above.)
 - **Remove once the toolchain migration lands, not before:** `MASM.EXE`,
   `LINK.EXE`, `CL.EXE`/`C1.EXE`/`C2.EXE`/`C3.EXE`, `ILINK.EXE`, `LIB.EXE`,
   `EXEHDR.EXE`, `EXEMOD.EXE`, `EXEPACK.EXE`, `MAKE.EXE`, `EXE2BIN.EXE`,
@@ -71,8 +101,10 @@ runtime depends on, so those can go without a sequencing concern.
   libraries/`.OBJ` files — these are exactly what the Linux-native-build
   note's UASM/Open Watcom plan is meant to replace.
 - **Check before deciding:** `TURBO.TPL`, `MAILER`, `OMBUDSMN.ASP`,
-  `INCLUDE/*.H` — I didn't get a clean attribution on these from embedded
-  strings alone.
+  `INCLUDE/*.H`, and — new from the PKWARE-removal sweep — `LIST.COM`,
+  `AS.EXE`, `MAKESFX.COM` (each references pkzip/zip2exe internally,
+  ownership not yet checked) and `APPNOTE.TXT` (PKWARE's ZIP format spec,
+  arguably a different category from tool docs/binaries).
 
 I'd treat the "remove now" list as a genuinely small, self-contained
 change (one clear category, no build dependency) and the "remove once
