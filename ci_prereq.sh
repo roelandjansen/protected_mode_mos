@@ -2,16 +2,11 @@
 set -euo pipefail
 
 #
-# Installs everything the build needs: dosbox for the DOS-era build
-# path (build.sh), and the gcc/UASM/Open Watcom toolchain for the
-# native-Linux build path it's migrating to. See the tooling policy
-# and Linux-native-build notes. Targets openSUSE Leap 15.x, Leap
-# 16.x, and Tumbleweed only.
-#
-# NOTE: run.sh (boots the built OS, as opposed to building it) still
-# depends on dosemu2, not dosbox -- that switch hasn't been made or
-# validated. This script no longer installs dosemu2, so run.sh's own
-# prerequisite isn't covered here until that's sorted out.
+# Installs everything the build needs: dosbox and mtools for the
+# DOS-era build/boot path (build.sh/run.sh), and the gcc/UASM/Open
+# Watcom toolchain for the native-Linux build path it's migrating
+# to. See the tooling policy and Linux-native-build notes. Targets
+# openSUSE Leap 15.x, Leap 16.x, and Tumbleweed only.
 #
 # Package installs need root; nothing else here does. Does not use
 # sudo anywhere -- run this as root already (e.g. inside a root CI
@@ -52,6 +47,21 @@ install_dosbox() {
 	fi
 
 	zypper --non-interactive install dosbox
+}
+
+#
+# Installs mtools if it isn't already present. run.sh needs mcopy
+# to assemble the boot floppy from IMAGES/template/empty-bootable.img
+# plus the current build output.
+#
+
+install_mtools() {
+	if command -v mcopy >/dev/null 2>&1; then
+		printf 'mtools already installed, skipping.\n'
+		return 0
+	fi
+
+	zypper --non-interactive install mtools
 }
 
 #
@@ -258,6 +268,7 @@ SCRIPT_EOF
 
 require_root
 install_dosbox
+install_mtools
 install_build_tools
 build_uasm
 install_open_watcom

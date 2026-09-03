@@ -21,8 +21,14 @@
 *.map
 *.CRF
 *.crf
-$*.SYS
-$*.sys
+*.SYS
+*.sys
+*.COM
+*.com
+*.EXE
+*.exe
+*.PUB
+*.pub
 $$*.*
 
 #
