@@ -83,10 +83,17 @@ check_build_exists() {
 
 #
 # Builds a throwaway boot floppy from the template plus the current
-# build output -- kernel, shell, and every other built utility/
-# driver (.COM/.EXE/.SYS), which comfortably fits: the full build
-# output is ~656K against the floppy's 1.44MB, well under its
+# build output -- kernel, shell, every other built utility/driver
+# (.COM/.EXE/.SYS), and HELP.SRC, which comfortably fits: the full
+# build output is ~656K against the floppy's 1.44MB, well under its
 # 224-entry root-directory limit too.
+#
+# HELP.SRC needs including explicitly since it's a data file, not a
+# build output the .COM/.SYS/.EXE glob below would catch -- HELPGEN.EXE
+# hard-fails ("Cannot open HELP.SRC") without it, confirmed from its
+# own source (helpgen.c). ED.EXE's similar companion files (ED.KEY,
+# DEFKEYS.ED) are NOT included: checked ed.c too, and those are opened
+# conditionally there, tolerated as missing rather than required.
 #
 
 build_boot_floppy() {
@@ -104,6 +111,10 @@ build_boot_floppy() {
 	mcopy -i "$RUN_IMAGE" "$KERNEL_IMAGE" '::$$MOS.SYS'
 	mcopy -i "$RUN_IMAGE" "$SHELL_IMAGE" '::$$SHELL.SYS'
 
+	if [ -f "$BOOTDIR/HELP.SRC" ]; then
+		mcopy -i "$RUN_IMAGE" "$BOOTDIR/HELP.SRC" '::HELP.SRC'
+	fi
+
 	shopt -s nocaseglob
 	for F in "$BOOTDIR"/*.COM "$BOOTDIR"/*.SYS "$BOOTDIR"/*.EXE; do
 		[ -e "$F" ] || continue
@@ -119,22 +130,51 @@ build_boot_floppy() {
 }
 
 #
-# Boots the floppy interactively. Classic DOSBox and DOSBox Staging
-# need different invocations here: classic wants an explicit
-# "boot -l a <img>" command; Staging's "boot -l a" is unreliable for
-# this (a known open issue -- dosbox-staging/dosbox-staging#522) but
-# it has its own documented, more reliable behaviour: passing a
-# bootable .IMG as the plain positional argument auto-boots it.
+# Boots the floppy interactively, via a throwaway config file rather
+# than -c flags -- windowresolution specifically doesn't reliably
+# apply when set through -c (DOSBox reads it at startup, before -c
+# commands run; a real, documented quirk, not a guess). output=opengl
+# is required too: classic DOSBox's default output=surface doesn't
+# scale the window at all regardless of windowresolution, confirmed
+# by testing -- with it, an explicit size is honoured exactly.
+# windowresolution's relative small/medium/large keywords are a
+# Staging-only feature (confirmed: "large" had zero effect on classic
+# DOSBox); classic needs an absolute WxH value instead.
+#
+# Classic DOSBox and DOSBox Staging also still need different boot
+# methods: classic wants an explicit "boot -l a <img>" in [autoexec];
+# Staging's "boot -l a" is unreliable for this (a known open issue --
+# dosbox-staging/dosbox-staging#522) but it has its own documented,
+# more reliable behaviour: passing a bootable .IMG as the plain
+# positional argument auto-boots it, so it's passed that way instead
+# and needs no [autoexec] section at all.
 #
 
 run_dosbox() {
-	if dosbox --version 2>&1 | grep -qi staging; then
-		dosbox -c "cycles=max" "$RUN_IMAGE"
+	local CONF_FILE
+	local IS_STAGING
+
+	CONF_FILE="$(mktemp)"
+	IS_STAGING=0
+	dosbox --version 2>&1 | grep -qi staging && IS_STAGING=1
+
+	cat > "$CONF_FILE" << EOF
+[sdl]
+windowresolution=$([ "$IS_STAGING" -eq 1 ] && echo large || echo 1280x800)
+output=opengl
+
+[cpu]
+cycles=max
+EOF
+
+	if [ "$IS_STAGING" -eq 1 ]; then
+		dosbox -conf "$CONF_FILE" "$RUN_IMAGE"
 	else
-		dosbox -c "cycles=max" -c "boot -l a $RUN_IMAGE"
+		printf '\n[autoexec]\nboot -l a %s\n' "$RUN_IMAGE" >> "$CONF_FILE"
+		dosbox -conf "$CONF_FILE"
 	fi
 
-	rm -f "$RUN_IMAGE"
+	rm -f "$CONF_FILE" "$RUN_IMAGE"
 }
 
 check_prereqs_installed
