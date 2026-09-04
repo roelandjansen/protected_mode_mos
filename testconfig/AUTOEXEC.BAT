@@ -1,2 +1,2 @@
 batecho off
-install
+ECHO install not done

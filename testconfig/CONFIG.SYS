@@ -1,2 +1,4 @@
-smpsize=32
+smpsize=48
 cache=16
+MEMDEV=$386.SYS
+FREEMEM=C0000,F0000
