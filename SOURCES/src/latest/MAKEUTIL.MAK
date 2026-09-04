@@ -126,7 +126,7 @@ ALL:    adddev.com  addtask.com  dirmap.com  alias.com  class.com  debug.com \
         more.com mos.com  mosadm.com  mosdd7f.sys  moxcptsk.com  msys.com  \
         netname.com  print.com  remdev.com  remtask.com  search.com \
         setmouse.com  spool.com  verify.exe  _286n.sys  _386.sys  _all.sys \
-        _charge.sys  _ems.sys  _gizmo.sys  _kbbe.sys  _kbcf.sys  _kbdk.sys \
+        _charge.sys  _dpmi.sys  _ems.sys  _gizmo.sys  _kbbe.sys  _kbcf.sys  _kbdk.sys \
         _kbfr.sys _kbgr.sys  _kbit.sys  _kbla.sys  _kbnl.sys  _kbno.sys \
         _kbpo.sys  _kbsf.sys  _kbsg.sys  _kbsp.sys  _kbsv.sys  _kbuk.sys \
         _mouse.sys  _netbios.sys  _pipe.sys  _ramdisk.sys  _serial.sys \
@@ -283,6 +283,8 @@ _386.sys:       _386.asm page.inc
 _all.sys:       _all.asm page.inc moxmem.inc
 
 _charge.sys:    _charge.asm page.inc moxmem.inc
+
+_dpmi.sys:      _dpmi.asm page.inc _dpmi.inc mosscbdf.inc dpmiseg.inc mostcb.inc
 
 _ems.sys:       _ems.asm page.inc
 
