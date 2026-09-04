@@ -144,6 +144,7 @@ callold2f:
 		jmp	dword ptr cs:[Old2f]
 dpmi2f		endp
 
+Counters	db	11 dup(0)	; diagnostic marker counters, read via DUMPLOG
 
 GoProtect       proc    far
                 pop     cs:[OrgIP]
@@ -3902,6 +3903,9 @@ MsgMem	  db	'0000000K of Extended Memory Available.',13,10,'$'
 
 No386	  db	'Intel i386 or i486 Microprocessor required.',13,10,'$'
 No386sys  db	'386 Memory Manager required.',13,10,'$'
+NotFin	  db	'DPMI protected-mode init not yet implemented (SegToSel',13,10
+	  db	'has no working GDT-descriptor implementation -- see',13,10
+	  db	'pcmos386-protected-mode-assessment.md addendum).',13,10,'$'
 NoMem	  db	'Not Enought Extended Memory Installed for DPMI Used.',13,10,'$'
 No32	  db	'Protected Code Initialization failed.',13,10,'$'
 Already	  db	'DPMI Driver Already Installed.',13,10,'$'
@@ -3915,41 +3919,113 @@ Bit32Ok	  db	'N'				; Y means 32 Bit protected
 ;
 
 
+LogHandle	dw	0
+LogInited	db	0
+LogName		db	'A:\DPMILOG.TXT',0
+
+MkEntry		db	'>1-ENTRY',13,10,'$'
+MkAfterCopy	db	'>2-AFTER-COPYRIGHT',13,10,'$'
+MkAfterMOS	db	'>3-AFTER-CHECKMOS',13,10,'$'
+MkAfterDPMI	db	'>4-AFTER-CHECKDPMI',13,10,'$'
+MkAfterCPU	db	'>5-AFTER-CPU',13,10,'$'
+MkAfter386	db	'>6-AFTER-386SYS',13,10,'$'
+MkAfterAlloc	db	'>7-AFTER-ALLOC',13,10,'$'
+MkBeforeInit32	db	'>8-BEFORE-INIT32',13,10,'$'
+MkAfterInit32	db	'>9-AFTER-INIT32',13,10,'$'
+MkAfterInstallIt db	'>A-AFTER-INSTALLIT',13,10,'$'
+MkErrorHandler	db	'>E-ERRORHANDLER',13,10,'$'
+
+;
+; WriteLog - increments counter byte Counters[AL]. Diagnostic only --
+; not part of the driver's real logic. Read back later via DUMPLOG,
+; which locates Counters as GoProtect-11 after probing int 2Fh 1687h.
+; Does not touch CF (INC doesn't affect it).
+;
+WriteLog	proc	near
+		push	ax
+		push	bx
+		mov	bl,al
+		xor	bh,bh
+		inc	byte ptr cs:[Counters+bx]
+		pop	bx
+		pop	ax
+		ret
+WriteLog	endp
+
 InstallDriver	proc	near
 		mov	ax,cs
 		mov	ds,ax
+		push	es
+		push	ax		; save cs (currently in ax)
+		mov	ax,0040h
+		mov	es,ax		; es = BIOS data area segment
+		pop	ax		; ax = cs again
+		mov	es:[0f0h],ax	; record our segment at 0040:00F0
+					; regardless of install outcome --
+					; diagnostic only
+		pop	es
+		mov	al,1
+		call	WriteLog
 		mov	dx,offset Copyright
 		mov	ah,9
 		int	21h
+		mov	al,2
+		call	WriteLog
 ;
 ; Check to See if On PC-MOS 4.00 or Higher
 ;
 		call	CheckMOS
+		pushf
+		mov	al,3
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 ;
 ; Check To See is DPMI is already Installed
 ;
 		call	CheckDPMI   		
+		pushf
+		mov	al,4
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 ;
 ; Check to see if ON 386 or 486
 ;
 		call	CheckMicroProcessor
+		pushf
+		mov	al,5
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 ;
 ; Check For Memory Managment 
 ;
 		call	CheckFor386SYS
+		pushf
+		mov	al,6
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 ;
 ; Allocate extended memory for Protected Mode code
 ;
 		call	AllocateExtend
+		pushf
+		mov	al,7
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 ;
 ; At This Point We will Install driver
 ;
+		mov	al,8
+		call	WriteLog
 		call	InstallIt
+		pushf
+		mov	al,9
+		call	WriteLog
+		popf
 		jc	ErrorHandler
 		push	ax
 		mov	dx,offset MsgIns
@@ -3964,6 +4040,10 @@ InstallDriver	proc	near
 ; This is where we will process an error
 ;
 ErrorHandler:
+		push	dx
+		mov	al,10
+		call	WriteLog
+		pop	dx
 		call	FreeExtend			; Free Extended memory
 		push	dx
 		mov	dx,offset MsgNotIns
@@ -3972,6 +4052,28 @@ ErrorHandler:
 		pop	dx
 		mov	ah,9 			; display error message
 		int	21h
+;
+; MOSDDINT.ASM's calc_size/adj_smp_alloc read the break-address fields
+; (request block offset +14/+16) UNCONDITIONALLY once ddinit0 returns --
+; gated only on an unrelated [linktype] check, never on the driver's
+; actual reported success/failure. InstallIt is the only code that
+; normally sets these fields, and it never runs on any path that
+; reaches here -- so without this, the kernel computes a resident size
+; from whatever garbage happens to be on the stack at those offsets.
+; Write the same safe values InstallIt's success path would (declare
+; no growth beyond what's already loaded) so a failed install still
+; reports a sane, bounded size instead of reading uninitialized data.
+;
+		push	es
+		push	bx
+		push	ax
+		mov	ax,offset EndOfDPMI
+		les	bx,[Request]
+		mov	word ptr es:[bx+14],ax
+		mov	es:[bx+16],cs
+		pop	ax
+		pop	bx
+		pop	es
 		xor	ax,ax			; driver not installed
 		ret
 InstallDriver   endp
@@ -4142,14 +4244,28 @@ CheckFor386SYS	proc	near
 		assume	ds:scbs
 		cmp	[si+scbmmfg],'Y'
 		jne	NoMemdev
-		test	[si+scbmmfea],40h		; io protection enable
-		jz	NoMemdev
-		mov	ax,word ptr [si+scbmmsub]
-		mov	word ptr cs:[memman],ax
-		mov	ax,word ptr [si+scbmmsub+2]
-		mov	word ptr cs:[memman+2],ax
+;
+; $386.SYS is present and active (scbmmfg='Y') at this point -- that
+; part is fine. But this proc used to also gate on scbmmfea bit 40h
+; ("io protection enable"), which this $386.SYS build never actually
+; sets (confirmed: parmfeat only ever populates the documented
+; high-byte bits). That accidentally caused DPMI install to fail
+; safely every time, which is the ONLY thing standing between here
+; and a confirmed emulator-crashing bug: InitProtect (called once
+; install proceeds) depends on SegToSel, which has no working
+; implementation -- it calls int 6Fh with a function code
+; (SEGMENT_SELECTOR=7786h) nothing implements, falls through to
+; generic native-mode interrupt reflection, and ends up executing
+; whatever's sitting at the (never-hooked) real-mode int 6Fh vector.
+; Confirmed via instrumented build: this crashes DOSBox outright, not
+; just the guest. Until SegToSel is genuinely implemented (build a
+; real GDT descriptor for the segment -- see the protected-mode
+; assessment addendum for the full trace), refuse explicitly here
+; instead of relying on the old bit-check's accidental behavior.
+;
+		mov	dx,offset NotFin
 		pop	ds
-		clc
+		stc
 		ret
 NoMemdev:
 		pop	ds
@@ -4245,6 +4361,12 @@ Init32Code	endp
 
 InstallIt	proc	near
 		call	Init32Code
+		pushf
+		push	ax
+		mov	al,11
+		call	WriteLog
+		pop	ax
+		popf
 		jc	InstallBad
 		call	SetVectors
 		mov	ax,offset EndOfDPMI

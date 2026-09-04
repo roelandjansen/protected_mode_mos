@@ -613,6 +613,13 @@ ddi02:
 	jmp	ddi0b
 ddi0a:
 	call	moscdint		; character device (look for standard devices)
+;
+; TEMPORARILY reverted to original unconditional-success behavior, to
+; isolate whether THIS fix is what exposes the $386.SYS crash under
+; DEVICE=$DPMI.SYS -- see protected-mode assessment addendum. Restore
+; the status-word check (see git history / addendum) once that's
+; confirmed one way or the other.
+;
 	xor	al,al			; no errors possible in moscdint
 ddi0b:
 	ret
