@@ -251,6 +251,10 @@ cmdtbl	db	'ECHO    '		;@@xlat
 	dw	offset cmd:cchdir
 	db	0ffh			; clear/set errlvl
 
+	db	'CHDIR   '		;@@xlat
+	dw	offset cmd:cchdir
+	db	0ffh			; clear/set errlvl
+
 	db	'CLS     '		;@@xlat
 	dw	offset cmd:ccls
 	db	0			; don't clear/set errlvl

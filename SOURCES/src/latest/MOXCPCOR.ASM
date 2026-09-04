@@ -1705,6 +1705,13 @@ pp3:
 	mov	si,[mlstrt]		; when the command is chdir, si must be
 	call	passdelims		; adjusted so the parameter starts just
 	call	skipdot 		; after cd or chdir
+	mov	bx,[mlstrt]		; 'cd' and 'chdir' share this handler but
+	mov	al,[bx+2]		; need different skip lengths -- check the
+	call	testdelims		; 3rd character of what was actually typed:
+	je	pp3cd			; a delimiter there means 'cd' (2 chars),
+	add	si,5			; anything else means 'chdir' (5 chars)
+	jmp	short pp1
+pp3cd:
 	add	si,2			; 'cd'
 
 ; if no dot and failed the external search, don't need to pass through
