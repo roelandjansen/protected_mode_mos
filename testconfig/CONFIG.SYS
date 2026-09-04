@@ -1,2 +1,2 @@
-smpsize=16
+smpsize=32
 cache=16

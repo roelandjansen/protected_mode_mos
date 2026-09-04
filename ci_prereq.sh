@@ -22,6 +22,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain"
 
 #
+# This script takes no arguments -- --testconfig is a run.sh flag,
+# not a ci_prereq.sh one (this script installs packages/tools, it
+# doesn't touch CONFIG.SYS/AUTOEXEC.BAT at all). Bail with a clear
+# message rather than silently ignoring anything passed, since that
+# would look like the flag was accepted when it wasn't.
+#
+
+check_no_args() {
+	if [ "$#" -gt 0 ]; then
+		printf 'ci_prereq.sh takes no arguments (got: %s).\n' "$*" >&2
+		printf -- '--testconfig is a run.sh flag, not a ci_prereq.sh one.\n' >&2
+		exit 1
+	fi
+}
+
+#
 # Confirms we're running with the privileges zypper needs, without
 # escalating ourselves.
 #
@@ -266,6 +282,7 @@ SCRIPT_EOF
 	printf 'For interactive use, source: %s\n' "$(display_path "$ENV_FILE")"
 }
 
+check_no_args "$@"
 require_root
 install_dosbox
 install_mtools

@@ -19,6 +19,22 @@ KERNEL_IMAGE="$SCRIPT_DIR/SOURCES/src/latest/\$\$MOS.SYS"
 CONF_FILE=""
 
 #
+# This script takes no arguments -- --testconfig is a run.sh flag,
+# not a build.sh one (build.sh doesn't touch CONFIG.SYS/AUTOEXEC.BAT
+# at all, run.sh does). Bail with a clear message rather than
+# silently ignoring anything passed, since that would look like the
+# flag was accepted when it wasn't.
+#
+
+check_no_args() {
+	if [ "$#" -gt 0 ]; then
+		printf 'build.sh takes no arguments (got: %s).\n' "$*" >&2
+		printf -- '--testconfig is a run.sh flag, not a build.sh one.\n' >&2
+		exit 1
+	fi
+}
+
+#
 # If ci_prereq.sh has already set up the native UASM/Open Watcom
 # toolchain, source its env file. Nothing below consumes it yet --
 # the actual build still goes through the old DOS-era toolchain
@@ -98,6 +114,7 @@ check_build_output() {
 	printf 'Build succeeded: %s\n' "$KERNEL_IMAGE"
 }
 
+check_no_args "$@"
 use_native_toolchain_if_present
 check_dosbox_installed
 write_dosbox_conf

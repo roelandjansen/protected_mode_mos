@@ -34,8 +34,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOTDIR="$SCRIPT_DIR/SOURCES/src/latest"
 KERNEL_IMAGE="$BOOTDIR/\$\$MOS.SYS"
 TEMPLATE_IMAGE="$SCRIPT_DIR/IMAGES/template/empty-bootable.img"
+TESTCONFIG_DIR="$SCRIPT_DIR/testconfig"
 SHELL_IMAGE=""
 RUN_IMAGE=""
+USE_TESTCONFIG=0
+
+#
+# Parses the one supported flag: --testconfig. Anything else is an
+# error rather than silently ignored.
+#
+
+parse_args() {
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--testconfig)
+			USE_TESTCONFIG=1
+			shift
+			;;
+		*)
+			printf 'Unknown argument: %s\n' "$1" >&2
+			printf 'Usage: %s [--testconfig]\n' "$(basename "$0")" >&2
+			exit 1
+			;;
+		esac
+	done
+}
 
 #
 # Confirms dosbox and mtools are installed. Bails with a clear
@@ -95,6 +118,13 @@ check_build_exists() {
 # DEFKEYS.ED) are NOT included: checked ed.c too, and those are opened
 # conditionally there, tolerated as missing rather than required.
 #
+# CONFIG.SYS/AUTOEXEC.BAT: by default this writes the same minimal
+# CONFIG.SYS this project has always used (smpsize=16/cache=16) and no
+# AUTOEXEC.BAT at all, landing straight at the [A:\] prompt. Pass
+# --testconfig to use testconfig/CONFIG.SYS and testconfig/AUTOEXEC.BAT
+# instead -- e.g. to test boot-time driver loading or an AUTOEXEC that
+# launches something automatically, without touching this script.
+#
 
 build_boot_floppy() {
 	local F
@@ -103,6 +133,13 @@ build_boot_floppy() {
 	if [ ! -f "$TEMPLATE_IMAGE" ]; then
 		printf 'Boot floppy template not found: %s\n' "$TEMPLATE_IMAGE" >&2
 		exit 1
+	fi
+
+	if [ "$USE_TESTCONFIG" -eq 1 ]; then
+		if [ ! -f "$TESTCONFIG_DIR/CONFIG.SYS" ] || [ ! -f "$TESTCONFIG_DIR/AUTOEXEC.BAT" ]; then
+			printf 'testconfig/ needs both CONFIG.SYS and AUTOEXEC.BAT: %s\n' "$TESTCONFIG_DIR" >&2
+			exit 1
+		fi
 	fi
 
 	RUN_IMAGE="$(mktemp --suffix=.img)"
@@ -126,7 +163,12 @@ build_boot_floppy() {
 	done
 	shopt -u nocaseglob
 
-	printf 'smpsize=16\r\ncache=16\r\n' | mcopy -i "$RUN_IMAGE" - '::CONFIG.SYS'
+	if [ "$USE_TESTCONFIG" -eq 1 ]; then
+		mcopy -i "$RUN_IMAGE" "$TESTCONFIG_DIR/CONFIG.SYS" '::CONFIG.SYS'
+		mcopy -i "$RUN_IMAGE" "$TESTCONFIG_DIR/AUTOEXEC.BAT" '::AUTOEXEC.BAT'
+	else
+		printf 'smpsize=16\r\ncache=16\r\n' | mcopy -i "$RUN_IMAGE" - '::CONFIG.SYS'
+	fi
 }
 
 #
@@ -177,6 +219,7 @@ EOF
 	rm -f "$CONF_FILE" "$RUN_IMAGE"
 }
 
+parse_args "$@"
 check_prereqs_installed
 check_build_exists
 build_boot_floppy
