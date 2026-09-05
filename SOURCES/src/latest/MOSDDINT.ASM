@@ -2,14 +2,14 @@
 ; '##' markings surround changes for bdbsctr/csector/sechigh/seclow
 
 
-	include page.inc
-	title	mosddint.asm - device driver initialization
+	include PAGE.INC
+	title	MOSDDINT.ASM - device driver initialization
 
 extrn	bugerror:near			;enable debug stack error reporting
 comment ^===============================================================
 		      development specification
 
- program name:	$$mos.com		 assigned to: jim bean
+ program name:	$$MOS.COM		 assigned to: jim bean
  module name:	mosddint		 assign date: 01/30/86
  entry points:	mosddint		 completed:   02/12/86
  entry from:	mosxxxxx
@@ -58,7 +58,7 @@ error codes are:
 9 - 15 mosliman error codes + 8 from bdb allocation request
    (block device block allocation failed)
 
-also changed mosbdb.inc to reflect the fact that we don't allow a
+also changed MOSBDB.INC to reflect the fact that we don't allow a
 block device to set a sector size larger than our maximum and
 added some shift counts to rapidly convert between sectors and blocks
 and between allocation units (clusters) and blocks
@@ -175,7 +175,7 @@ mjs 08/31/89	complete correction to problem with device drivers
 		adj_smp_alloc to its previous state.  modified the logic
 		within the mosddint main procedure to unlink a driver
 		when a cs:0 return is made.  for the 4.00 masters,
-		the ndev4xx.pat series now replaces the dev4xx.pat
+		the NDEV4XX.PAT series now replaces the DEV4XX.PAT
 		series.  convert the mosddint procedure to action chart
 		and add 'include xifmacs'.
 
@@ -197,7 +197,7 @@ mjs 04/03/91	change a je to a jne from sah's 02/05/91 changes.
 mjs 12/16/91	dlg mods: convert operations on bsFATsecs from byte to word.
 		convert handling large partitions, from the mlg 24 bit
 		sector number format to the 32 bit dlg format.  converted
-		to use of structures within dskstruc.inc.
+		to use of structures within DSKSTRUC.INC.
  
 ================ 5.01 Kernel Ends Here ====================================
 
@@ -214,20 +214,20 @@ SAH 09/02/92	Corrections for Bernoulli 90 Pro... OADDOS.SYS has
 =======================================================================^
 
 .xlist
-;	include mosddint.pub
-	include group.inc
-	include mosregs.inc
-	include moscdb.inc
-	include mosbdb.inc
-	include macros.inc
-	include dskstruc.inc
+;	include MOSDDINT.PUB
+	include GROUP.INC
+	include MOSREGS.INC
+	include MOSCDB.INC
+	include MOSBDB.INC
+	include MACROS.INC
+	include DSKSTRUC.INC
 
 tcb	segment at 1234h
-	include mostcb.inc
+	include MOSTCB.INC
 tcb	ends
 
 gdata	segment
-	include mosscbex.inc
+	include MOSSCBEX.INC
 gdata	ends
 .list
 
@@ -268,7 +268,7 @@ ramname db	'$RAMDISK'
 ; device name aux = standard auxilliary device (not defined in pcdos)
 ;
 ; in:	es:bx -> device driver
-;	ds:dx -> parameter string (e.g. from config.sys line)
+;	ds:dx -> parameter string (e.g. from CONFIG.SYS line)
 ;	al = 0 if driver is to be linked into scbdrvr list
 ;	al = 1 if to be linked into tcbddpf list (adddev option)
 ;	al = 2 if not to be linked (special mosinit usage)
@@ -362,7 +362,7 @@ msdd6:
 ; if scbdrvr is pointing to scbnul then adddev must be calling mosddint.
 ; in that case, jump to msdd6a to link the new driver in using the
 ; next pointer of the scbnul driver as the root.  otherwise, must
-; be loading a driver from config.sys.  in that case, use scbdrvr as
+; be loading a driver from CONFIG.SYS.  in that case, use scbdrvr as
 ; the root.   
 
 	call	if_scbnul
@@ -464,8 +464,16 @@ msdd5a:
 	mov	dx,word ptr [origroot+2]
 	cmp	[linktype],1 
 	je	msdd8 
-	mov	word ptr [scbdrvr],cx	; unlink for the global case
-	mov	word ptr [scbdrvr+2],dx
+;
+; TEMPORARY diagnostic: write a value CLEARLY DIFFERENT from -1:-1
+; (0x1234:0x1234, nonsense but distinct) instead of either the
+; captured [origroot] or a -1:-1 hardcode, to determine whether it's
+; specifically the value -1:-1 (matching the field's own declared
+; empty-list default, MOSSCBDF.INC: scbdrvr dd -1) that causes
+; trouble downstream, rather than "any write" being unsafe outright.
+; See protected-mode assessment addendum.
+	mov	word ptr [scbdrvr],1234h
+	mov	word ptr [scbdrvr+2],1234h
 
 ; if scbdrvr points to scbnul (mosddint called by adddev) then the
 ; next pointer of the scbnul driver must be restored.

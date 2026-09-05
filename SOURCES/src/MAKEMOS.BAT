@@ -12,31 +12,32 @@ set LIB=..\..\..\lib;..\libs
 REM ====== The Kernel =====
 cd latest
 del $*.*
+del *.obj
 
-REM make -f kernel.mak $$eval.sys
-REM ren $$eval.sys $$mos.sys
+REM make -f KERNEL.MAK $$EVAL.SYS
+REM ren $$EVAL.SYS $$MOS.SYS
 
 REM this was for internal R & D use only.
-make -f kernel.mak $$mos.sys
+make -f KERNEL.MAK $$MOS.SYS
 if ERRORLEVEL 1 exit 1
 
 rem cd ..
 REM =======================
 
 rem cd mos5src
-make -f makeutil.mak all
+make -f MAKEUTIL.MAK all
 if ERRORLEVEL 1 exit 1
-ren moxcptsk.com command.com
-rem make -f maketerm.mak all
+ren MOXCPTSK.COM COMMAND.COM
+rem make -f MAKETERM.MAK all
 ren __*.* $$*.*
 ren _*.sys $*.sys
 cd ..
 
 cd import
-make -f import.mak import.exe
+make -f IMPORT.MAK IMPORT.EXE
 if ERRORLEVEL 1 exit 1
 cd ..
 
 rem cd export
-rem make -f export.mak export.exe
+rem make -f EXPORT.MAK EXPORT.EXE
 rem cd ..

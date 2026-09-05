@@ -549,3 +549,86 @@ Stopping here for now rather than guessing a third time. Two clean,
 precise bisections done; the next one (checking `scbdrvr`'s offset
 against `_386.ASM`'s own SCB field assumptions) is well-defined and
 ready to pick up.
+
+## Resolved: it's not an offset overlap, and not the write itself — it's the value
+
+Checked `scbdrvr`'s exact SCB offset by hand (summing every preceding
+field's declared size in `MOSSCBDF.INC`): **239 (`0xEF`)**. Checked it
+against every offset `_386.ASM` actually touches — `scbmmfea`=101,
+`scbmmfg`=129, and the only hardcoded numeric SCB constant `_386.ASM`
+uses anywhere (`scbtcbpc equ 19`, confirmed correctly in sync with the
+current struct layout). None are anywhere near 239. The offset-overlap
+theory doesn't hold — real negative result, not a dead end papered
+over.
+
+Also checked whether `_386.ASM`'s own write-protection mechanism
+(`nprotect`, "clear the pl3 write enable bit in the pte" — a real,
+implemented feature, matching the `parmfeat` bit `0x2000` "write
+protection supported" decoded earlier) could apply here. It's
+dispatched only via `int 6Fh AX=7707h`; `_DPMI.ASM`'s broken call
+(`7786h`) never lands anywhere near that function. Nothing in this
+scenario calls `nprotect` at all. Also doesn't hold.
+
+**Then re-examined `mosddint`'s own linking code** (the success-path
+counterpart to `msdd5a`'s unlink, never previously read) —
+`MOSDDINT.ASM` around line 360, with a comment stating outright:
+*"if scbdrvr is pointing to scbnul then adddev must be calling
+mosddint... otherwise, must be loading a driver from CONFIG.SYS...
+use scbdrvr as the root."* This **confirms** `[scbdrvr]` genuinely sits
+at its raw declared value (`-1:-1`, `MOSSCBDF.INC`) throughout
+`CONFIG.SYS`-time loading — DPMI gets optimistically linked in
+(`[scbdrvr]` briefly becomes DPMI's own resident address), and
+`origroot` (captured *before* that link, at `mosddint`'s very start)
+holds `-1:-1`.
+
+That meant the earlier "hardcoded -1:-1" bisection test was **not
+actually different from the original code** — both write the same
+final value. Corrected with a proper test: write a value clearly
+different from `-1:-1` (`0x1234:0x1234`) instead.
+
+**Result: no crash — but a genuine hang**, stuck right after
+`$386.SYS` loads, before `DEVICE=$DPMI.SYS` even begins. Confirmed
+reproducible (retried clean, waited 35+ seconds at `cycles=max`,
+identical stuck state both times — every other successful boot this
+entire session progresses within 1-2 seconds at that setting).
+
+**This is the most informative result of the whole investigation.**
+Neither `-1:-1` (crash) nor `0x1234:0x1234` (hang) produces a clean
+boot. Both are wrong, in different ways, which is exactly the
+signature of a downstream consumer that **follows/dereferences
+`scbnul`'s "next" pointer field without first checking for the `-1`
+terminator convention**:
+
+- `MOSINIT2.ASM`'s post-`initp8` cleanup unconditionally copies
+  whatever `[scbdrvr]` ends up as into `scbnul`'s own next-pointer
+  field, once every `CONFIG.SYS` `DEVICE=`/`MEMDEV=` line has been
+  processed.
+- With `-1:-1` (the real value after a genuinely failed install):
+  something — almost certainly inside `$386.SYS`, given the crash
+  executes in its own code selector — treats this as input to a
+  32-bit address computation, landing exactly on the configured
+  16MB ceiling.
+- With `0x1234:0x1234` (an arbitrary non-terminator value): treated as
+  a real address to jump to or read from, landing on nonsense that
+  hangs the CPU instead of tripping the specific boundary check that
+  caused the crash.
+
+Both outcomes are consistent with "this code never checks for `-1`
+before following it," not with anything specific to `_DPMI.ASM` or
+even to `mosddint`'s unlink logic specifically. **This reframes where
+the actual fix belongs**: not in `_DPMI.ASM` (already refuses safely
+via `NotFin`), and arguably not even in `mosddint`'s unlink code
+itself (which correctly restores the empty-list sentinel value) — but
+in whatever code, likely inside `_386.ASM`, walks this list and needs
+to check for the `-1` sentinel *before* dereferencing it. That code
+path has apparently never been exercised before today, because no
+character-mode driver had ever genuinely failed `CONFIG.SYS`-time
+installation until `ddinit0`'s status-word check (root cause #2) made
+a real failure visible for the first time.
+
+**Not yet found**: the exact `_386.ASM` routine that walks/dereferences
+this list. Given the crash's `CS:IP` values (`4dd4`/`5057`/`505c`/
+`5062`, all within `$386.SYS`'s own code selector), that's the next,
+well-defined place to look — starting from those specific offsets in
+a disassembly or listing of `_386.ASM`'s compiled output, working
+backward to find what computation they're part of.

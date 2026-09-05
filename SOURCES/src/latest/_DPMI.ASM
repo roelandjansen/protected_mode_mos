@@ -1,5 +1,5 @@
  
-	include page.inc
+	include PAGE.INC
 	title	_DPMI.ASM - Dos Protected Mode Inteface
 ;-----------------------------------------------------------------------;
 ;		development specification				;
@@ -18,19 +18,19 @@
 
                 .286
 
-include _dpmi.inc
+include _DPMI.INC
 
 scbs		segment	at	0beach
 		assume  cs:scbs
-		include mosscbdf.inc
+		include MOSSCBDF.INC
 scbs		ends
 
 dseg		segment at 	0aceh
-		include dpmiseg.inc
+		include DPMISEG.INC
 dseg		ends
 
 tcb		segment	at	0babeh
-		include mostcb.inc
+		include MOSTCB.INC
 tcb		ends		
 
 ;- DDT -----------------------------------------------------------------;
