@@ -3952,10 +3952,16 @@ WriteLog	proc	near
 		ret
 WriteLog	endp
 
+DevLoadMsg	db	13,10,'>>> DEVICE=$DPMI.SYS NOW LOADING <<<',13,10,'$'
+
 InstallDriver	proc	near
 		mov	ax,cs
 		mov	ds,ax
+		mov	dx,offset DevLoadMsg
+		mov	ah,9
+		int	21h
 		push	es
+		mov	ax,cs		; ah,9 above clobbered ax -- reload cs
 		push	ax		; save cs (currently in ax)
 		mov	ax,0040h
 		mov	es,ax		; es = BIOS data area segment

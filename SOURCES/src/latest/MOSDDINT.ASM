@@ -439,6 +439,19 @@ msdd1s:
 	je	msdd1
 	jmp	msdd6
 msdd1:
+;
+; TEMPORARY diagnostic: count how many times this point (mosddint's
+; post-ddinit0 processing) is reached per driver load, via a safe
+; counter byte at 0040:00F2 (adjacent to, not overlapping, the
+; existing 0040:00F0 segment-record word). See protected-mode
+; assessment addendum.
+	push	ax
+	push	es
+	mov	ax,0040h
+	mov	es,ax
+	inc	byte ptr es:[0f2h]
+	pop	es
+	pop	ax
 	cmp	[linktype],0 		; if linktype = 0 adjust smp allocation
 	jne	msdd5 
 	mov	cl,al			; save original error status
@@ -464,26 +477,12 @@ msdd5a:
 	mov	dx,word ptr [origroot+2]
 	cmp	[linktype],1 
 	je	msdd8 
-;
-; TEMPORARY diagnostic: write a value CLEARLY DIFFERENT from -1:-1
-; (0x1234:0x1234, nonsense but distinct) instead of either the
-; captured [origroot] or a -1:-1 hardcode, to determine whether it's
-; specifically the value -1:-1 (matching the field's own declared
-; empty-list default, MOSSCBDF.INC: scbdrvr dd -1) that causes
-; trouble downstream, rather than "any write" being unsafe outright.
-; See protected-mode assessment addendum.
-	mov	word ptr [scbdrvr],1234h
-	mov	word ptr [scbdrvr+2],1234h
+	mov	word ptr [scbdrvr],cx	; unlink for the global case
+	mov	word ptr [scbdrvr+2],dx
 
 ; if scbdrvr points to scbnul (mosddint called by adddev) then the
 ; next pointer of the scbnul driver must be restored.
-;
-; TEMPORARY diagnostic bypass: skip ONLY this if_scbnul-gated origroot2
-; write (narrower than the previous full-msdd5a bypass), to isolate
-; whether the simple [scbdrvr]=origroot restore above is itself safe,
-; and the crash is specifically in this origroot2/scbnul write. See
-; protected-mode assessment addendum.
-	jmp	short msdd7
+
 	call	if_scbnul
 	jne	msdd7
 	push	ds
@@ -500,6 +499,13 @@ msdd8:
 	mov	word ptr [tcbddpf],cx	; unlink for the task specific case
 	mov	word ptr [tcbddpf+2],dx
 msdd7:
+	push	ax
+	push	es
+	mov	ax,0040h
+	mov	es,ax
+	inc	byte ptr es:[0f3h]
+	pop	es
+	pop	ax
 	lea	di,[ddrequest]		; ss:di -> device request block
 	call	calc_size
 	pop	es
@@ -627,20 +633,16 @@ ddi02:
 	jmp	ddi0b
 ddi0a:
 	call	moscdint		; character device (look for standard devices)
-	cmp	word ptr ss:[di+3],0	; status word untouched/zero -- the one
-					; confirmed failure signature (e.g.
-					; _DPMI.ASM's ErrorHandler leaves it
-					; at exactly 0). Any driver that's set
-					; ANY status bit (this codebase's own
-					; "done" convention ORs in 0100h, per
-					; $EMS.SYS) is still treated as success,
-					; to avoid misclassifying other drivers'
-					; legitimate status words.
-	jne	ddi0ok
-	mov	al,0ffh			; no bits set at all -- report failure
-	jmp	short ddi0b
-ddi0ok:
-	xor	al,al
+;
+; Deliberately treating character devices as always-successful here.
+; A stricter check (report failure when the status word is left
+; untouched at 0) is a real kernel correctness improvement on its own
+; merits, but it's the thing that exposes a confirmed DOSBox-crashing
+; path once combined with a driver that genuinely fails (e.g.
+; _DPMI.ASM's CheckFor386SYS refusing via NotFin). Root cause of that
+; crash not yet found -- see protected-mode assessment addendum. Keep
+; this reverted until it is.
+	xor	al,al			; no errors possible in moscdint
 ddi0b:
 	ret
 ddinit0 endp 

@@ -729,3 +729,250 @@ edge case, coincidentally triggered for the first time by DPMI
 loading being the first scenario that ran a genuine post-`CONFIG.SYS`
 memory-sizing pass under `memsize=16` in a way that got far enough to
 provoke it.
+
+## Root cause found: page-table construction physically overwrites the IDT
+
+Continued the live debugger session. Set a breakpoint at `18:4E4D`
+(confirmed clean return point from the memory-sizing routine, EBX=0xF00
+correctly propagated). Checked the DOSBox-staging source directly
+(`src/cpu/cpu.cpp`) for the `E_Exit("Illegal descriptor type...")`
+call — confirmed it's unconditional and core-independent, called from
+the shared interrupt-gate dispatch path regardless of `core=normal` vs
+`core=dynamic`. This is also a known class of issue in dosbox-staging
+generally (see their own issue #2346, unrelated software, same abort
+message) — dosbox-staging is simply less forgiving of an invalid
+descriptor than older DOSBox, which is why `core=normal` didn't help
+on the user's real system even though it produced a graceful message
+in this session's own vanilla-DOSBox testing. No DOSBox-side
+configuration avoids this once it happens — the fix has to be at the
+MOS source level.
+
+Used the debugger's `CPU` command to get `IDT base=00001FD0
+limit=000007FF` (standard 256-entry IDT, 8 bytes/entry). Computed
+entry `0Dh`'s address: `0x1FD0 + 13×8 = 0x2038`. Dumped it directly
+via `MEMDUMP ES:2038 8` (`ES` confirmed flat, base=0, from the earlier
+session): `55 27 18 00 00 EE 00 00` — decodes to offset=`0x2755`,
+selector=`0x0018`, Present=1, DPL=3, **Type=0xE (standard 32-bit
+Interrupt Gate)**. Completely valid at this point — not type 0 at all.
+So whatever invalidates it happens later, in code not yet traced.
+
+Set a protected-mode memory breakpoint directly on that address
+(`BPPM 0050:2038` — note: plain `BPM` uses different, apparently
+real-mode-style addressing and gave a false-positive hit at what
+turned out to be the same reported transition but on the wrong
+underlying watch; `BPPM` is the correct command for a protected-mode
+selector:offset memory watch) and resumed. **It fired** — inside the
+`stosd` loop at `18:4EA2`, the same page-table-construction loop
+identified while stepping through `4E4D`'s onward code:
+```
+0018:4EA2  stosd                    ; write EAX to [EDI], EDI += 4
+0018:4EA3  add  eax,00001000        ; next page-aligned value
+0018:4EA8  loop 00004EA2
+```
+`EAX` at the point of the hit: `00001007` — decodes as a standard
+page-table entry (physical page `0x1000`, flags `007` =
+Present+Writable+User). This loop is `$386.SYS` constructing its own
+page tables, writing consecutive 4-byte entries starting from some
+`EDI` base and walking forward. It is not walking anywhere near a
+driver list, `scbdrvr`, or anything DPMI-related — this is core
+`$386.SYS` paging setup that runs on every boot.
+
+**The mechanism**: this loop's page-table destination region
+overlaps, or extends into, the IDT's own memory location (`0x1FD0`–
+`0x27D0`). As the loop walks forward writing page-table entries, it
+reaches `0x2038` — exactly where IDT entry `0Dh` lives — and
+overwrites it with page-table data instead of a valid interrupt gate.
+The "invalid descriptor type 0x0 for int D" isn't corruption from a
+logic bug elsewhere; it's the IDT being **physically clobbered** by
+unrelated, legitimate page-table construction that was placed at (or
+sized into) the same physical memory.
+
+**Not yet confirmed**: the exact starting `EDI` value for this loop
+(would need to look a few instructions earlier than `4EA2`, not done
+this session) and the exact loop iteration count/total byte range, to
+quantify precisely how much of an overlap this is and whether it's
+specific to `memsize=16`/`32`'s particular memory layout (recall the
+crash address itself scales exactly with `memsize` — `0x1000000` at
+16, `0x2000000` at 32 — confirmed independently by the user on their
+real system) or would happen regardless of configured memory size.
+Given the crash address scaling with `memsize`, and this newly-found
+IDT-overwrite mechanism being about a **fixed low address** (`0x2038`,
+independent of `memsize`), these may be two separate observations
+about the same boot sequence rather than the same event — worth
+clarifying next: is the page-table loop's destination address itself
+computed from `memsize` (in which case a larger `memsize` might move
+it further from the IDT and avoid the overlap), or fixed (in which
+case the overlap is unconditional and `memsize` is a red herring for
+this specific mechanism, coincidentally correlating because a larger
+`memsize` also means more loop iterations before things go wrong
+elsewhere).
+
+**This is real, load-bearing, `$386.SYS`-internal behavior**,
+completely independent of `_DPMI.ASM`/`MOSDDINT.ASM`/`scbdrvr`. If
+confirmed as unconditional, this would mean `DEVICE=$DPMI.SYS` was
+never really the trigger at all — it's whatever first triggers this
+particular boot-time codepath in `_386.ASM` reaching far enough to
+build page tables that overlap the IDT, which DPMI's presence (or its
+own memory allocation via `AllocateExtend`, if reached) may simply
+be the first realistic scenario to exercise on a `CONFIG.SYS` with
+`FREEMEM=`/`SMPSIZE=` tuned the way this session's testconfig has
+them. Next session should pick up here: find the loop's starting
+`EDI`, and check whether it's a fixed address or `memsize`-derived.
+
+## RETRACTED: the IDT-overwrite finding above is wrong
+
+Checked the static source directly (`_386.ASM` line 9720 onward,
+`; init the pte`): page table construction starts at physical
+`0x100000` (1MB) — nowhere near the IDT's `0x2038`. The live-debugger
+`BPPM 0050:2038` "hit" inside that loop was almost certainly the same
+class of addressing false-positive already caught once with plain
+`BPM` on this same address earlier in the session. **Root cause of
+the DOSBox abort is still unknown.** Do not trust the "page-table
+overwrites IDT" section above without re-verifying independently.
+
+## CONFIRMED WORKING: the actual goal, achieved
+
+User-confirmed on real hardware, `./build.sh --clean`, current
+`_DPMI.ASM` (`NotFin` refusal) + `MOSDDINT.ASM` (`ddinit0` reverted to
+unconditional success) combination:
+
+- `DEVICE=$DPMI.SYS` loads, refuses safely, **no crash, no hang**
+- Same "Illegal write/read to <memsize boundary>" log lines still
+  appear (harmless warnings, `$386.SYS`'s own memory-sizing probe,
+  unrelated to DPMI) and the cosmetic garbage/beep is still present
+  (known, harmless, already documented above) — neither is fatal
+- `ADDTASK` confirmed working: 12 tasks successfully created (~600K
+  each, correctly capped by configured SMP size)
+- OS fully functional afterward
+
+**This is the actual goal from this whole investigation, achieved.**
+The deeper `$386.SYS`/IDT crash mechanism (dosbox-staging specifically,
+`memsize`-scaled address, `E_Exit` on illegal descriptor type 0) is
+still not root-caused — both live-debugger theories from this session
+(scbdrvr/list-walking, page-table/IDT-overlap) were investigated and
+retracted. That remains open for whenever there's appetite to chase it
+further, but it is no longer blocking anything: DPMI loads safely,
+the kernel and every other driver/task function normally.
+
+## New observation: garbage and "Illegal write/read" lines are concurrent, not sequential
+
+User-provided screen capture (frozen mid-scroll via Ctrl-S on a real
+terminal, not a tool artifact) shows the sequence precisely: after
+"640K allocated to first megabyte.", an incomplete/garbled
+announcement appears, then several complete-looking repeats of
+"PC-MOS DPMI 1.0...HOST (910430)...(c) Copyright 1991...Inc", with
+more garbage interspersed — and critically, the host terminal's own
+log pane shows `Illegal write to 2...` / `Illegal read from...` lines
+**already appearing in this same window**, not clearly before or after
+the on-screen garbage. Previously assumed these were two unrelated,
+merely-coincidentally-timed events (the harmless `$386.SYS`
+memory-sizing probe vs. the unidentified garbage-printing bug). This
+observation means that assumption should not be trusted without
+checking — they may be more directly connected.
+
+Confirmed end state (user, waited it out): boots through cleanly to a
+working `AUTOEXEC.BAT` completion and prompt. Matches everything
+established above — not a hang, not fatal.
+
+**For next session's static-marker instrumentation plan**: bracket
+the kernel's driver-load sequence specifically around `$386.SYS`'s
+known probe addresses (`18:4dd4`, `18:5057`/`505c`/`5062` from the
+DOSBox abort logs) as well as `_DPMI.ASM`'s own init entry, rather
+than only instrumenting the `_DPMI.ASM` side — the concurrency
+observation above suggests the marker plan should establish ordering
+between the memory probe and the garbage specifically, not just
+ordering relative to `_DPMI.ASM`'s `Copyright` banner.
+
+## Significant lead: load marker never appeared
+
+Added a simple, guaranteed-safe marker print
+(`>>> DEVICE=$DPMI.SYS NOW LOADING <<<`) as the literal first
+instruction of `InstallDriver`, before even the `Copyright` print.
+User rebuilt clean (`./build.sh --clean`) and tested: **marker never
+appeared anywhere in the visible output.** Garbage pattern changed
+(more garbage) from the few added bytes shifting the binary layout —
+consistent with an uninitialized-length read hitting different
+underlying bytes before a terminator, not with `_DPMI.ASM`'s own logic
+running differently.
+
+Two readings, not yet distinguished: (1) `InstallDriver` never
+actually gets called in this failure path at all — meaning the entire
+`_DPMI.ASM` init chain investigated this session is a red herring, and
+the garbage is the kernel reading `$DPMI.SYS`'s raw loaded image as
+data before ever handing control to it; or (2) the marker printed but
+scrolled off-screen before capture, same as the `Copyright` banner did
+earlier in the session.
+
+**Sharp next question for next session**: does `InstallDriver` ever
+actually execute in this failure path? Cheapest reliable check: don't
+rely on screen visibility at all — use the same `0040:00F0`
+segment-recording trick already in `InstallDriver` (writes
+unconditionally, first thing, regardless of what prints) combined
+with `DUMPLOG`-style readback at the `[A:\]` prompt once boot
+completes. If `0040:00F0` holds a nonzero segment after boot, entry
+happened regardless of what was visible on screen; if it's still
+zero, `InstallDriver` genuinely never ran — a much more direct test
+than trying to catch fast-scrolling text.
+
+## Resolved: InstallDriver runs exactly once, correctly — theory ruled out with real data
+
+Ran the `0040:00F0`/`DUMPLOG` test (queued up last entry) rather than
+relying on screen visibility. Result: `00 01 01 01 01 01 00 00 00 01`.
+
+Decoded against the marker map: `InstallDriver` entry (1) fired once;
+`CheckMOS`/`CheckDPMI`/`CheckMicroProcessor`/`CheckFor386SYS` (2-6)
+all fired once each, in order; `AllocateExtend`/`InstallIt`/
+`Init32Code` (7-9) never fired (correct — `CheckFor386SYS` refuses via
+`NotFin` before reaching them); `ErrorHandler` (10) fired once.
+
+**This proves `InstallDriver` runs exactly once, correctly, refusing
+exactly where it's designed to.** The "load marker never appeared"
+observation from the previous entry is resolved: it almost certainly
+did print and scrolled off-screen, same as the `Copyright` banner
+always has — not evidence `InstallDriver` never ran. That theory is
+retracted with real data behind the retraction this time, not just a
+correction.
+
+**Consequence for the on-screen garbage specifically**: since
+`_DPMI.ASM`'s own init chain runs exactly once and exits cleanly, the
+**3x repeat of the garbage/banner text is not `_DPMI.ASM` executing
+multiple times** — that's now disproven. It must be the kernel doing
+something with `$DPMI.SYS`'s already-loaded memory image three
+separate times *after* `InstallDriver` returns. Given `ddinit0` is
+currently reverted to unconditionally report success (the known-safe
+configuration), the kernel believes the driver installed successfully
+and proceeds through `mosddint`'s post-return handling — `calc_size`/
+`adj_smp_alloc` and whatever surrounding logic in `MOSDDINT.ASM`/
+`MOSINIT2.ASM` runs per apparently-successful driver load. That
+kernel-side code, run three times against one driver, is now the
+concrete, well-scoped place to instrument next — not `_DPMI.ASM`,
+which is confirmed clean.
+
+## DEFINITIVE: mosddint's post-processing runs 7-12 times for one driver load
+
+Added two more safe counters (0040:00F2 = msdd1 entry, 0040:00F3 =
+msdd7, extending DUMPLOG to read them). Result for one single
+`DEVICE=$DPMI.SYS` line: **msdd1 = 7, msdd7 = 12.**
+
+This is the concrete root of the repeated-garbage pattern: `mosddint`'s
+post-`ddinit0` processing (`calc_size`/`adj_smp_alloc` and everything
+around them) is not running once per driver as expected — it's running
+7-12 times for a single `CONFIG.SYS` `DEVICE=` line. That directly
+explains multiple partial/complete repeats of the driver's own
+banner/name text appearing on screen: something in the kernel's own
+driver-loading loop (`initp8`/`loaddrv`, not yet identified precisely)
+is calling back into this processing repeatedly.
+
+**Confirmed NOT `_DPMI.ASM`** (proven single, clean entry earlier this
+session) and **NOT a simple "3x" pattern** — the real counts (7 and 12,
+different from each other) suggest a loop with an early-exit branch
+taken sometimes but not always, not a fixed retry count.
+
+**Next, concrete step**: find what calls `mosddint` (or jumps back into
+`msdd1`/`msdd7` specifically) repeatedly — likely in `initp8`
+(`MOSINIT2.ASM`) or `loaddrv`. A loop-iteration counter at `initp8`'s
+own top, read the same way, would confirm whether the *outer* driver-
+processing loop itself is what's iterating 7-12 times for one line
+(a genuine kernel bug in loop-termination logic), or whether something
+*inside* `mosddint` branches back to `msdd1`/`msdd7` without ever
+returning to the caller.
