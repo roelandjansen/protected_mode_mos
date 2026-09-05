@@ -632,3 +632,100 @@ this list. Given the crash's `CS:IP` values (`4dd4`/`5057`/`505c`/
 well-defined place to look — starting from those specific offsets in
 a disassembly or listing of `_386.ASM`'s compiled output, working
 backward to find what computation they're part of.
+
+## Major correction: live debugger session overturns the list-walking theory
+
+Built a genuine debug-enabled DOSBox from source specifically to settle
+this (vanilla 0.74-3 from `github.com/jwilk-mirrors/dosbox`,
+`./configure --enable-debug=heavy`, one real compile fix needed —
+`debug_gui.cpp` accessed `WINDOW`'s private `_begy` field directly,
+incompatible with modern `ncurses`'s opaque `WINDOW` type; fixed by
+using the public `getbegy()` macro instead, four call sites). Used
+`tmux` for the curses debugger console and `xdotool`/`Xvfb` for the
+SDL window's keyboard input — the two are genuinely separate input
+paths in DOSBox's architecture and both are needed simultaneously.
+
+Set breakpoints at the crash's own `CS:IP` values and stepped through
+live, with full register/disassembly visibility. This directly
+contradicts the list-walking theory above:
+
+**At `18:4DD4`** (`EAX=22C8 ESI=00100000 ECX=00000400 EDI=00000000
+CS=0018 EIP=4DD4`, `CPL0`):
+```
+repe lodsd                              ; read ECX=0x400 dwords from ESI=0x100000 (1MB)
+pop  ds
+mov  eax,es:[00000000]                  ; save es:[0]
+mov  dword es:[00000000],0              ; clear es:[0]
+mov  dword es:[01000000],FFFFFFFF  [illegal]   ; write marker at exactly 16MB
+cmp  dword es:[00000000],0              ; did es:[0] change? (wraparound test)
+jz   00004E08                           ; no change -> no wraparound
+mov  es:[00000000],eax                  ; restore es:[0]
+```
+This is a textbook memory-wraparound/sizing probe — not a driver-list
+walk, not anything touching `scbdrvr`/`scbnul` at all.
+
+**At `18:5057`** (`EBX=00100000 EDI=00100000 ES` selector decoded as
+base=`00000000` limit=`FFFFFFFF` — a full 4GB flat segment):
+```
+mov  es:[edi],dl        ; write test byte
+jmp  short $+0
+mov  es:[edi+1],dh      ; write second test byte
+jmp  short $+0
+cmp  es:[edi],dl        ; read back, compare
+jnz  00005095           ; mismatch -> exit loop (no memory here)
+cmp  es:[edi+1],dh
+jnz  00005095
+```
+A write/read-back memory-test loop, walking `EDI` upward from 1MB.
+Continuing to the breakpoint at `18:5095` (the loop's exit) confirmed
+`EDI` had grown to exactly `01000000` (16MB) at the point of the
+logged illegal access — the loop naturally reaches the configured
+`memsize=16` ceiling as part of normal operation.
+
+**Critically: the loop exits cleanly.**
+```
+0018:5095  sub  edi,ebx      ; 0x1000000 - 0x100000 = 0xF00000 (15MB range tested)
+0018:5097  shr  edi,0Ch      ; -> 0xF00 (3840) 4K pages = 15MB
+0018:509A  mov  ebx,edi      ; result: 15MB of extended memory detected
+0018:509C  pop  edi
+0018:509D  pop  edx
+0018:509E  pop  eax
+0018:509F  ret               ; <- clean return, no fault
+```
+Stepped past the `ret` and several further instructions (`CS:IP`
+reaching `0018:4E4D` with `EBX=00000F00`, the correctly-propagated
+15MB page count) with **no exception, no abort, execution proceeding
+completely normally** — in this build.
+
+**This overturns the previous theory entirely.** The code executing
+at these addresses is `$386.SYS`'s own memory-size detection routine,
+unrelated to `_DPMI.ASM`, `mosddint`, `scbdrvr`, or `scbnul` in any way. It runs this same probe on every boot with
+`MEMDEV=$386.SYS`, `DPMI` involved or not. The "illegal write/read"
+DOSBox warnings are a side effect of the probe naturally reaching the
+exact configured memory ceiling (`memsize=16` gives exactly 16MB, so
+testing "is there memory at 16MB" necessarily touches the boundary) —
+and in this freshly-built debug binary, that's genuinely harmless:
+logged, then execution continues.
+
+**Working hypothesis, immediately testable, not yet confirmed against
+the user's actual crashing build:** different DOSBox variants/builds
+likely differ in how strictly they enforce out-of-bounds access —
+this vanilla 0.74-3 debug build logs and continues; the user's build
+(dosbox-staging, per its distinctive timestamped log format) may
+escalate the same condition to a fatal exception. If so, **the fix
+isn't a code change at all** — raising `memsize` in `dosbox.conf`
+(e.g. `memsize=32` or higher) would give `$386.SYS`'s normal,
+always-present memory-sizing probe room to complete without ever
+touching unmapped memory, regardless of how strict the specific
+DOSBox build's enforcement is.
+
+**Next step, cheap and concrete:** try `memsize=32` (or higher) in the
+crashing config and see if the crash disappears. If it does, this was
+never a `_DPMI.ASM`/`mosddint`/`scbdrvr` bug at all — root causes #1
+and #2 (the `CheckFor386SYS` bit mismatch and the `ddinit0` status
+check) remain real, correct, worthwhile fixes on their own merits, but
+the crash they *exposed* may simply have been a memory-configuration
+edge case, coincidentally triggered for the first time by DPMI
+loading being the first scenario that ran a genuine post-`CONFIG.SYS`
+memory-sizing pass under `memsize=16` in a way that got far enough to
+provoke it.
