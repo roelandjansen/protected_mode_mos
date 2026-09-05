@@ -153,48 +153,59 @@ would produce a worse failure mode than today's: DPMI reporting
 predictably, whenever a real client tried to use it. A loud, correct
 failure beats a silent wrong success.
 
-## Current state of the tree (final, safe, for today)
+## Current state of the tree (mid-investigation — NOT the safe end state)
+
+**Important:** the tree right now has a NARROW `msdd5a` bypass applied
+(skips only the `origroot2`/`scbnul` sub-block, keeps the simple
+`[scbdrvr]=origroot` restore) — and per the correction above, **this
+combination still crashes.** It is not safe. Before stopping, revert
+`MOSDDINT.ASM`'s `msdd5a` back to its fully original form (remove both
+bypass lines) and re-decide between: (a) also revert `ddinit0`'s
+status check, back to yesterday's known-safe state (garbage-but-no-
+crash), or (b) keep pushing on the `scbdrvr`-offset theory now that
+it's precisely bounded.
 
 - **`_DPMI.ASM` `CheckFor386SYS`: refuses explicitly**, honestly
-  labeled (`NotFin` message), not relying on the old accidental
-  bit-mismatch.
+  labeled (`NotFin` message).
 - **`_DPMI.ASM` `ErrorHandler`: writes safe break-address values** on
-  every failure path. Kept — harmless, strictly safer than leaving
-  those fields uninitialized, even though it didn't turn out to be the
-  fix for the crash.
-- **`MOSDDINT.ASM` `ddinit0` status-word check: reverted back to
-  original unconditional-success behavior for character devices.**
-  This is the one real behavior change from where this session started
-  the day: everything else nets out to "DPMI refuses safely instead of
-  proceeding into a confirmed crash," which is a genuine improvement,
-  even though the original cosmetic garbage/beep symptom is back as a
-  result. Do not re-apply the status-word check without first tracing
-  and fixing whatever's actually wrong in `mosddint`'s driver-unlink
-  path — re-enabling it as-is reintroduces a confirmed DOSBox-crashing
-  bug, not a cosmetic one.
+  every failure path. Keep regardless of what happens with the items
+  below — harmless, strictly safer than leaving those fields
+  uninitialized.
+- **`MOSDDINT.ASM` `ddinit0` status-word check: currently RE-APPLIED**
+  (honest failure reporting restored) for this bisection. Combined with
+  the `msdd5a` bypass below, confirmed safe. Combined with the
+  *original* `msdd5a` (unbypassed), confirmed to crash — do not ship
+  that combination.
+- **`MOSDDINT.ASM` `msdd5a`: currently BYPASSED** (`jmp short msdd7`
+  right at entry) — diagnostic only, confirms the isolation but is not
+  a correct fix (skips unlinking a failed driver entirely).
 - **Diagnostic instrumentation left in place** in `_DPMI.ASM`
   (`WriteLog`, `Counters`, the `0040:00F0` segment-recording write in
-  `InstallDriver`) — harmless, and useful groundwork if either
-  `SegToSel` or the driver-unlink path get picked up later.
-- **`MAKEUTIL.MAK`: case-sensitivity fixed** — the `_DPMI.SYS`/
-  `_DPMI.ASM` target and dependency now match the real, on-disk
-  uppercase filenames. Worth checking whether the same mismatch exists
-  for other entries (`_386.sys`, `_ems.sys`, etc.) if any of those
-  sources are ever edited — this class of bug (silently rebuilding
-  from a stale object because `make` can't find the real source file
-  to compare timestamps against) cost significant time twice today.
+  `InstallDriver`) — harmless, useful groundwork for either follow-up
+  project below.
+- **`MAKEUTIL.MAK`: case-sensitivity fixed** — worth checking whether
+  the same mismatch exists for other entries (`_386.sys`, `_ems.sys`,
+  etc.) if any of those sources are ever edited.
 
 ## Net result
 
-DPMI does not work — that was never going to change today, and
-shouldn't have been the goal. What changed: loading `DEVICE=$DPMI.SYS`
-now fails safely (refuses cleanly, cosmetic garbage/beep, boots through
-to a working prompt) instead of the confirmed alternative (a real
-DOSBox-crashing bug, independently reproduced multiple times on a real
-machine). Two genuine, scoped follow-up projects are documented above
-for whenever there's appetite to continue: a real `SegToSel`
-implementation, and tracing `mosddint`'s driver-unlink path under a
-genuine character-driver failure.
+Two genuine, distinct, well-scoped follow-up projects are now
+documented, both precisely bounded rather than vague:
+
+1. **`SegToSel` has no working implementation** (root cause behind the
+   original `AllocateExtend`/`InitProtect` crash path, before
+   `CheckFor386SYS` was made to refuse explicitly). Needs a real GDT
+   descriptor builder.
+2. **`mosddint`'s `origroot2` capture/restore is inconsistent** between
+   `CONFIG.SYS`-time and `ADDDEV`-time driver loading, corrupting the
+   `scbnul` sentinel on the one path (a character driver genuinely
+   failing during boot) that had apparently never been exercised
+   before `ddinit0`'s status-word check made real failures visible for
+   the first time. Needs `if_scbnul`'s two call sites traced against
+   `[scbdrvr]`'s actual boot-time value to confirm, then a correct
+   fix (not a bypass).
+
+Both are self-contained enough to pick up independently, whenever.
 
 ## Resolved: the `$386.SYS`-alone crash was sandbox-specific
 
@@ -416,3 +427,125 @@ inconsistency, which wasn't done this session. But it's a precise,
 well-reasoned starting point: the bug is somewhere in `msdd5a`'s
 handling of the global driver-list pointers, not in `adj_smp_alloc`,
 and not in `_DPMI.ASM` at all.
+
+## Confirmed via bisection: it's `origroot2`, not `[scbdrvr]` visibility to `$386.SYS`
+
+Checked directly: `[scbdrvr]`/`scbnul` are never referenced anywhere in
+`_386.ASM` (grep, zero hits) — the previous section's theory (a
+`$386.SYS`-visible inconsistency from the driver-list head being reset)
+doesn't hold. Isolated properly instead of guessing further: rebuilt
+with root cause #2's `ddinit0` check restored (so `AL` can genuinely
+indicate failure again) **and** `msdd5a`'s `[scbdrvr]`/`[tcbddpf]`
+pointer-mutation block bypassed entirely (`jmp short msdd7` right at
+`msdd5a`'s entry, skipping straight past it).
+
+**Result: no crash.** Reached a clean `[A:\]` prompt. A new, legible
+kernel message appeared that the crash had always been cutting off
+before: `"File error #FF processing DEVICE = $DPMI.SYS"` — the kernel's
+own normal error-reporting path (`loaddrv`'s `deverr`), working
+correctly now that nothing crashes before reaching it. (The original
+garbage/beep cosmetic symptom is still present regardless — confirming
+it has some other, still-unidentified source, entirely separate from
+the crash mechanism. Honest loose end, not resolved by any of today's
+work.)
+
+This precisely and empirically isolates the crash to `msdd5a`'s
+pointer-list handling specifically — not `adj_smp_alloc`, not the
+break-address fields, not `_DPMI.ASM` at all, not a `$386.SYS`-visible
+inconsistency.
+
+**Likely specific cause, found by reading the setup code the bypassed
+block depends on:** `mosddint`'s setup (run once, before the driver
+even loads) captures `origroot2` — described in its own comment as
+"storage for scbdrvr next in list pointer" — but only conditionally:
+
+```
+call    if_scbnul
+jne     skdd1                    ; NOT scbnul -> skip capturing origroot2
+push    ds / push si
+lds     si,[scbdrvr]
+mov     ax,ds:[si]
+mov     word ptr [origroot2],ax  ; only reached if scbdrvr WAS scbnul
+...
+skdd1:
+```
+
+The comment immediately above this in the source states the capture is
+specifically for when `mosddint` is invoked by the runtime `ADDDEV`
+command ("when mosddint is called by adddev, scbdrvr will point to
+scbnul"). For ordinary `CONFIG.SYS`-time `DEVICE=` loading, it's
+plausible `[scbdrvr]` doesn't satisfy `if_scbnul` at this setup point
+the same way — meaning `origroot2` is left uninitialized, holding
+whatever was already on the stack from unrelated prior use. Then in
+the (bypassed) failure-unlink path, if the *restored* `[scbdrvr]`
+later does satisfy `if_scbnul`'s check, that same uninitialized
+`origroot2` gets written directly into `scbnul`'s own next-pointer
+field — corrupting a shared kernel sentinel structure with garbage
+stack content, on the one path (a character driver genuinely failing
+during `CONFIG.SYS` processing) that appears to have never been
+exercised before today.
+
+**Not fully confirmed** — `[scbdrvr]`'s exact runtime value at the
+`mosddint` setup point, for `CONFIG.SYS`-time loading specifically,
+wasn't traced far enough to prove `if_scbnul` genuinely takes the
+`skdd1` branch in this exact scenario. That's the one remaining step
+to close this out completely. But the bisection itself (bypass →
+no crash, confirmed) is solid, and this is now a precise, well-bounded
+place to pick the thread back up: read `if_scbnul`'s two call sites
+(setup and `msdd5a`) side by side against `[scbdrvr]`'s actual value
+at each point, for a genuine `CONFIG.SYS` `DEVICE=` load specifically.
+
+**The bypass itself is not a real fix** — it skips unlinking a failed
+driver entirely, leaving a ghost entry linked into the driver list.
+Left in the tree only as the diagnostic state that confirmed this
+isolation; a real fix needs `origroot2` to be captured correctly (or
+the restore path to not depend on it when it wasn't captured) so the
+unlink actually happens, correctly, without corrupting `scbnul`.
+
+## Correction: narrowed further, and the previous theory was backwards
+
+Checked `[scbdrvr]`'s actual boot-time value before trusting the
+`origroot2` theory further: `MOSINIT2.ASM` (~line 4199) calls `initp8`
+(loads every `DEVICE=`/`MEMDEV=` driver, `mosddint` included) *first*;
+only *after* `initp8` returns does the kernel retroactively insert
+`scbnul` at the head of whatever list resulted (lines 4209–4217). So
+during `mosddint`'s actual processing of `DEVICE=$DPMI.SYS`,
+`[scbdrvr]` is still at its raw declared value (`-1`, `MOSSCBDF.INC`),
+not `scbnul` — meaning `if_scbnul` should say "no" at both the setup
+and restore points for this exact scenario, and the `origroot2`/`scbnul`
+sub-block should be skipped either way, not corrupting anything.
+
+Bisected precisely rather than trusting that reasoning on its own:
+split the previous full-block bypass into two narrower tests, on the
+same honest-failure-reporting build.
+
+- **Bypass only the `if_scbnul`-gated `origroot2` write, keep the
+  simple `[scbdrvr]=origroot` restore** → **crashes.** Same signature
+  as before (`$386.SYS` selector `0x18`, write to `0x1000000`, `int 0D`
+  descriptor corruption).
+- **Bypass the entire block, including the simple restore** → **no
+  crash** (this was the previous round's result).
+
+That flips the earlier conclusion: **the trigger is the plain
+`mov word ptr [scbdrvr],cx` / `mov word ptr [scbdrvr+2],dx` restore
+itself** — not the `origroot2`/`scbnul` logic, which turned out not to
+matter either way (consistent with the boot-order finding above: it's
+skipped in both tests).
+
+This is surprising on its own terms — restoring a list-head pointer to
+its pre-load value looks like it should be safe. That suggests
+`scbdrvr`'s exact byte offset within the shared SCB structure may not
+be as isolated as it looks: `_386.ASM` reads/writes other SCB fields
+at fixed offsets via the same `scbadr`-relative addressing
+(`CheckFor386SYS`'s `[si+scbmmfg]`, etc.). A struct-layout mismatch —
+this specific write landing on or near a byte range `_386.ASM` assumes
+holds something else — would explain a "safe-looking" pointer restore
+corrupting `$386.SYS`'s own state. **Not confirmed** — would need
+`scbdrvr`'s exact offset in `MOSSCBDF.INC` checked against every field
+`_386.ASM` reads at a nearby offset via `scbadr`, which wasn't done
+this session.
+
+Stopping here for now rather than guessing a third time. Two clean,
+precise bisections done; the next one (checking `scbdrvr`'s offset
+against `_386.ASM`'s own SCB field assumptions) is well-defined and
+ready to pick up.

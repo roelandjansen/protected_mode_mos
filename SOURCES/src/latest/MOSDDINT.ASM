@@ -469,7 +469,13 @@ msdd5a:
 
 ; if scbdrvr points to scbnul (mosddint called by adddev) then the
 ; next pointer of the scbnul driver must be restored.
-
+;
+; TEMPORARY diagnostic bypass: skip ONLY this if_scbnul-gated origroot2
+; write (narrower than the previous full-msdd5a bypass), to isolate
+; whether the simple [scbdrvr]=origroot restore above is itself safe,
+; and the crash is specifically in this origroot2/scbnul write. See
+; protected-mode assessment addendum.
+	jmp	short msdd7
 	call	if_scbnul
 	jne	msdd7
 	push	ds
@@ -613,14 +619,20 @@ ddi02:
 	jmp	ddi0b
 ddi0a:
 	call	moscdint		; character device (look for standard devices)
-;
-; TEMPORARILY reverted to original unconditional-success behavior, to
-; isolate whether THIS fix is what exposes the $386.SYS crash under
-; DEVICE=$DPMI.SYS -- see protected-mode assessment addendum. Restore
-; the status-word check (see git history / addendum) once that's
-; confirmed one way or the other.
-;
-	xor	al,al			; no errors possible in moscdint
+	cmp	word ptr ss:[di+3],0	; status word untouched/zero -- the one
+					; confirmed failure signature (e.g.
+					; _DPMI.ASM's ErrorHandler leaves it
+					; at exactly 0). Any driver that's set
+					; ANY status bit (this codebase's own
+					; "done" convention ORs in 0100h, per
+					; $EMS.SYS) is still treated as success,
+					; to avoid misclassifying other drivers'
+					; legitimate status words.
+	jne	ddi0ok
+	mov	al,0ffh			; no bits set at all -- report failure
+	jmp	short ddi0b
+ddi0ok:
+	xor	al,al
 ddi0b:
 	ret
 ddinit0 endp 

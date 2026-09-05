@@ -41,21 +41,21 @@
 #
 ###############################################################################
 #
-.asm.obj:
+.ASM.OBJ:
 	public $<
 	masm $*;
 	del $*.pub
 
-OBJECTS = mosfront.obj mosliman.obj mosheman.obj mosint74.obj \
-	  mosddint.obj mosddcon.obj mosddblk.obj mosint21.obj \
-	  mosfun00.obj mosfun39.obj mosfutil.obj mostemp.obj  \
-	  mosfun0f.obj mosint13.obj mosdebug.obj mosmisc.obj \
-	  mosint10.obj mosint16.obj mosddtmc.obj mosinit.obj \
-	  mosint38.obj moscntxt.obj mosddblf.obj mosint28.obj \
-	  mosddclk.obj mosrtask.obj mosdevs.obj  mosint17.obj \
-	  mosfun01.obj mosmiman.obj mositask.obj mosint15.obj \
-	  mosback.obj  mosfun44.obj mosfutl3.obj mosfutl2.obj \
-	  mosfutl4.obj mosint06.obj mossaver.obj mosnxtsk.obj \
+OBJECTS = MOSFRONT.OBJ MOSLIMAN.OBJ MOSHEMAN.OBJ MOSINT74.OBJ \
+	  MOSDDINT.OBJ MOSDDCON.OBJ MOSDDBLK.OBJ MOSINT21.OBJ \
+	  MOSFUN00.OBJ MOSFUN39.OBJ MOSFUTIL.OBJ MOSTEMP.OBJ  \
+	  MOSFUN0F.OBJ MOSINT13.OBJ MOSDEBUG.OBJ MOSMISC.OBJ \
+	  MOSINT10.OBJ MOSINT16.OBJ MOSDDTMC.OBJ MOSINIT.OBJ \
+	  MOSINT38.OBJ MOSCNTXT.OBJ MOSDDBLF.OBJ MOSINT28.OBJ \
+	  MOSDDCLK.OBJ MOSRTASK.OBJ MOSDEVS.OBJ  MOSINT17.OBJ \
+	  MOSFUN01.OBJ MOSMIMAN.OBJ MOSITASK.OBJ MOSINT15.OBJ \
+	  MOSBACK.OBJ  MOSFUN44.OBJ MOSFUTL3.OBJ MOSFUTL2.OBJ \
+	  MOSFUTL4.OBJ MOSINT06.OBJ MOSSAVER.OBJ MOSNXTSK.OBJ \
 
 COMMON = mosint13 +mosddblk +mosddblf +mosliman +mosheman +mosddint \
 	 +mosint15 +mosddcon +mosint21 +mosfun00 +mosfun01 +mosfun0f \
@@ -68,172 +68,172 @@ COMMON = mosint13 +mosddblk +mosddblf +mosliman +mosheman +mosddint \
 #==============================================================================
 #	Build the version of $$MOS.SYS
 #==============================================================================
-$$$$mos.sys : $(OBJECTS) mosinit2.obj
+$$$$MOS.SYS : $(OBJECTS) MOSINIT2.OBJ
 	link mosfront +$(COMMON) +mosinit2 +mosback/m/se:512, \
-	$$$$mos.sys;
-	debug $$$$mos.sys <exe2bin.dat
-	ts $$$$mos.map/s
+	$$$$MOS.SYS;
+	debug $$$$MOS.SYS <exe2bin.dat
+	ts $$$$MOS.MAP/s
 
 #==============================================================================
 #	Build the EVALUATION version of $$MOS.SYS
 #==============================================================================
-$$$$eval.sys : $(OBJECTS) mosini2e.obj
+$$$$EVAL.SYS : $(OBJECTS) MOSINI2E.OBJ
 	link mosfront +$(COMMON) +mosini2e +mosback/m/se:512, \
-	$$$$eval.sys;
-	debug $$$$eval.sys <exe2bin.dat
-	ts $$$$eval.map/s
+	$$$$EVAL.SYS;
+	debug $$$$EVAL.SYS <exe2bin.dat
+	ts $$$$EVAL.MAP/s
 
 #==============================================================================
 #	Routines common to R&D Development version of MOS
 #==============================================================================
 
-mosinit2.obj : 	mosinit2.asm mosregs.inc mostcb.inc moscdb.inc mosbdb.inc \
-		 mosscbex.inc mospsp.inc  options.inc group.inc \
-		 moslogo.inc macros.inc moscnf.inc dskstruc.inc mboot.inc
+MOSINIT2.OBJ : 	MOSINIT2.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSBDB.INC \
+		 MOSSCBEX.INC MOSPSP.INC  OPTIONS.INC GROUP.INC \
+		 MOSLOGO.INC MACROS.INC MOSCNF.INC DSKSTRUC.INC MBOOT.INC
 
 #==============================================================================
 #	Routines common to EVALUATION version of the MOS kernel.
 #==============================================================================
 
-mosini2e.obj : 	mosinit2.asm mosregs.inc mostcb.inc moscdb.inc mosbdb.inc \
-		 mosscbex.inc mospsp.inc  options.inc group.inc \
-		 moslogo.inc moscnf.inc
+MOSINI2E.OBJ : 	MOSINIT2.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSBDB.INC \
+		 MOSSCBEX.INC MOSPSP.INC  OPTIONS.INC GROUP.INC \
+		 MOSLOGO.INC MOSCNF.INC
 
 	       public mosinit2
 	       masm mosinit2,$*/DRELCODE=YES;
-	       del mosinit2.pub
+	       del MOSINIT2.PUB
 				
 #==============================================================================
 #	Routines common to ALL versions of the MOS kernel.
 #==============================================================================
 
-mositask.obj :	mositask.asm mostcb.inc moscdb.inc mosscbex.inc mosbdb.inc \
-		options.inc group.inc mostcb.pub macros.inc
+MOSITASK.OBJ :	MOSITASK.ASM MOSTCB.INC MOSCDB.INC MOSSCBEX.INC MOSBDB.INC \
+		OPTIONS.INC GROUP.INC MOSTCB.PUB MACROS.INC
 
-mosfutil.obj : 	mosfutil.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc dskstruc.inc
+MOSFUTIL.OBJ : 	MOSFUTIL.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC DSKSTRUC.INC
 
-mosfutl2.obj : 	mosfutl2.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc 
+MOSFUTL2.OBJ : 	MOSFUTL2.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC 
 
-mosfutl3.obj : 	mosfutl3.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc dskstruc.inc
+MOSFUTL3.OBJ : 	MOSFUTL3.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC DSKSTRUC.INC
 
-mosfutl4.obj : 	mosfutl4.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc 
+MOSFUTL4.OBJ : 	MOSFUTL4.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC 
 
-mosfun39.obj : 	mosfun39.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc errcodes.inc mospsp.inc
+MOSFUN39.OBJ : 	MOSFUN39.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC ERRCODES.INC MOSPSP.INC
 
-mosfun44.obj : 	mosfun44.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc errcodes.inc
+MOSFUN44.OBJ : 	MOSFUN44.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC ERRCODES.INC
 
-mosfun00.obj : 	mosfun00.asm errcodes.inc mosregs.inc mostcb.inc moscdb.inc \
-		mostfb.inc moxspldt.inc mosbdb.inc mospsp.inc mosscbex.inc \
-		options.inc group.inc macros.inc
+MOSFUN00.OBJ : 	MOSFUN00.ASM ERRCODES.INC MOSREGS.INC MOSTCB.INC MOSCDB.INC \
+		MOSTFB.INC MOXSPLDT.INC MOSBDB.INC MOSPSP.INC MOSSCBEX.INC \
+		OPTIONS.INC GROUP.INC MACROS.INC
 
-mosfun01.obj :	mosfun01.asm mosregs.inc mostcb.inc mostfb.inc \
-		mosscbex.inc options.inc group.inc macros.inc
+MOSFUN01.OBJ :	MOSFUN01.ASM MOSREGS.INC MOSTCB.INC MOSTFB.INC \
+		MOSSCBEX.INC OPTIONS.INC GROUP.INC MACROS.INC
 
-mosfront.obj : 	mosfront.asm mostcb.inc mosscbdf.inc version.inc mboot.inc \
-		options.inc group.inc dskstruc.inc macros.inc
+MOSFRONT.OBJ : 	MOSFRONT.ASM MOSTCB.INC MOSSCBDF.INC VERSION.INC MBOOT.INC \
+		OPTIONS.INC GROUP.INC DSKSTRUC.INC MACROS.INC
 
-mosback.obj  : 	mosback.asm options.inc group.inc
+MOSBACK.OBJ  : 	MOSBACK.ASM OPTIONS.INC GROUP.INC
 
-mosmisc.obj  : 	mosmisc.asm mostcb.inc mosscbex.inc options.inc group.inc \
-		macros.inc
+MOSMISC.OBJ  : 	MOSMISC.ASM MOSTCB.INC MOSSCBEX.INC OPTIONS.INC GROUP.INC \
+		MACROS.INC
 
-mosheman.obj : 	mosheman.asm options.inc group.inc macros.inc
+MOSHEMAN.OBJ : 	MOSHEMAN.ASM OPTIONS.INC GROUP.INC MACROS.INC
 
-mosliman.obj : 	mosliman.asm mostcb.inc moscdb.inc mosgfb.inc mosrlb.inc \
-		mosbdb.inc mostfb.inc mosscbex.inc options.inc group.inc
+MOSLIMAN.OBJ : 	MOSLIMAN.ASM MOSTCB.INC MOSCDB.INC MOSGFB.INC MOSRLB.INC \
+		MOSBDB.INC MOSTFB.INC MOSSCBEX.INC OPTIONS.INC GROUP.INC
 
-mosrtask.obj : 	mosrtask.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosscbex.inc options.inc macros.inc
+MOSRTASK.OBJ : 	MOSRTASK.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSSCBEX.INC OPTIONS.INC MACROS.INC
 
-mosmiman.obj : 	mosmiman.asm mostcb.inc moscdb.inc mosgfb.inc mostfb.inc \
-		mosrlb.inc mosbdb.inc mosscbex.inc options.inc
+MOSMIMAN.OBJ : 	MOSMIMAN.ASM MOSTCB.INC MOSCDB.INC MOSGFB.INC MOSTFB.INC \
+		MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC
 
-mosint06.obj : 	mosint06.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSINT06.OBJ : 	MOSINT06.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint10.obj : 	mosint10.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSINT10.OBJ : 	MOSINT10.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint16.obj : 	mosint16.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSINT16.OBJ : 	MOSINT16.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint17.obj : 	mosint17.asm mosscbex.inc mostcb.inc moxspldt.inc options.inc \
-		group.inc macros.inc
+MOSINT17.OBJ : 	MOSINT17.ASM MOSSCBEX.INC MOSTCB.INC MOXSPLDT.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint28.obj : 	mosint28.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSINT28.OBJ : 	MOSINT28.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosddtmc.obj : 	mosddtmc.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSDDTMC.OBJ : 	MOSDDTMC.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint15.obj : 	mosint15.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSINT15.OBJ : 	MOSINT15.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosnxtsk.obj : 	mosnxtsk.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSNXTSK.OBJ : 	MOSNXTSK.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint74.obj : 	mosint74.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-				group.inc macros.inc
+MOSINT74.OBJ : 	MOSINT74.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+				GROUP.INC MACROS.INC
 
-moscntxt.obj : 	moscntxt.asm mostcb.inc mosscbex.inc options.inc group.inc \
-		macros.inc
+MOSCNTXT.OBJ : 	MOSCNTXT.ASM MOSTCB.INC MOSSCBEX.INC OPTIONS.INC GROUP.INC \
+		MACROS.INC
 
-mosddblk.obj : 	mosddblk.asm options.inc group.inc dskstruc.inc macros.inc
+MOSDDBLK.OBJ : 	MOSDDBLK.ASM OPTIONS.INC GROUP.INC DSKSTRUC.INC MACROS.INC
 
-mosddclk.obj : 	mosddclk.asm mosscbex.inc mostcb.inc options.inc group.inc \
-		macros.inc
+MOSDDCLK.OBJ : 	MOSDDCLK.ASM MOSSCBEX.INC MOSTCB.INC OPTIONS.INC GROUP.INC \
+		MACROS.INC
 
-mosddblf.obj : 	mosddblf.asm options.inc group.inc dskstruc.inc macros.inc
+MOSDDBLF.OBJ : 	MOSDDBLF.ASM OPTIONS.INC GROUP.INC DSKSTRUC.INC MACROS.INC
 
-mosdevs.obj  : 	mosdevs.asm mostcb.inc options.inc group.inc macros.inc
+MOSDEVS.OBJ  : 	MOSDEVS.ASM MOSTCB.INC OPTIONS.INC GROUP.INC MACROS.INC
 
-mosddint.obj : 	mosddint.asm mosregs.inc mostcb.inc moscdb.inc mosbdb.inc \
-		mosscbex.inc options.inc group.inc macros.inc dskstruc.inc
+MOSDDINT.OBJ : 	MOSDDINT.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSBDB.INC \
+		MOSSCBEX.INC OPTIONS.INC GROUP.INC MACROS.INC DSKSTRUC.INC
 
-mosdebug.obj : 	mosdebug.asm mosregs.inc mosscbex.inc mostcb.inc options.inc \
-		group.inc macros.inc
+MOSDEBUG.OBJ : 	MOSDEBUG.ASM MOSREGS.INC MOSSCBEX.INC MOSTCB.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosint21.obj : 	mosint21.asm mosregs.inc mostcb.inc mosbdb.inc mosscbex.inc \
-		options.inc group.inc macros.inc
+MOSINT21.OBJ : 	MOSINT21.ASM MOSREGS.INC MOSTCB.INC MOSBDB.INC MOSSCBEX.INC \
+		OPTIONS.INC GROUP.INC MACROS.INC
 
-mosddcon.obj : 	mosddcon.asm mostcb.inc options.inc group.inc macros.inc
+MOSDDCON.OBJ : 	MOSDDCON.ASM MOSTCB.INC OPTIONS.INC GROUP.INC MACROS.INC
 
-mosint13.obj : 	mosint13.asm mosscbex.inc options.inc group.inc mosregs.inc \
-		macros.inc mostcb.inc
+MOSINT13.OBJ : 	MOSINT13.ASM MOSSCBEX.INC OPTIONS.INC GROUP.INC MOSREGS.INC \
+		MACROS.INC MOSTCB.INC
 
-mossaver.obj : 	mossaver.asm mosregs.inc mostcb.inc mosscbex.inc options.inc \
-		group.inc macros.inc
+MOSSAVER.OBJ : 	MOSSAVER.ASM MOSREGS.INC MOSTCB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC
 
-mosfun0f.obj : 	mosfun0f.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc macros.inc 
+MOSFUN0F.OBJ : 	MOSFUN0F.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MACROS.INC 
 
-mosint38.obj : 	mosint38.asm mosregs.inc mostfb.inc mosgfb.inc mostcb.inc \
-		mosscbex.inc moscdb.inc mosbdb.inc options.inc group.inc \
-		macros.inc
+MOSINT38.OBJ : 	MOSINT38.ASM MOSREGS.INC MOSTFB.INC MOSGFB.INC MOSTCB.INC \
+		MOSSCBEX.INC MOSCDB.INC MOSBDB.INC OPTIONS.INC GROUP.INC \
+		MACROS.INC
 
-mostemp.obj  : 	mostemp.asm mosregs.inc mostcb.inc moscdb.inc mosgfb.inc \
-		mostfb.inc mosrlb.inc mosbdb.inc mosscbex.inc options.inc \
-		group.inc dskstruc.inc macros.inc
+MOSTEMP.OBJ  : 	MOSTEMP.ASM MOSREGS.INC MOSTCB.INC MOSCDB.INC MOSGFB.INC \
+		MOSTFB.INC MOSRLB.INC MOSBDB.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC DSKSTRUC.INC MACROS.INC
 
-mosinit.obj : 	mosinit.asm mosregs.inc mosscbex.inc options.inc \
-		group.inc mostcb.inc macros.inc moscnf.inc
+MOSINIT.OBJ : 	MOSINIT.ASM MOSREGS.INC MOSSCBEX.INC OPTIONS.INC \
+		GROUP.INC MOSTCB.INC MACROS.INC MOSCNF.INC
 
-mostcb.pub : mostcb.inc
-		public mostcb.inc
+MOSTCB.PUB : MOSTCB.INC
+		public MOSTCB.INC
 
-mosscbdf.pub : mosscbdf.inc
- 		public mosscbdf.inc
+MOSSCBDF.PUB : MOSSCBDF.INC
+ 		public MOSSCBDF.INC
 

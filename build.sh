@@ -17,21 +17,61 @@ TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain"
 KERNEL_IMAGE="$SCRIPT_DIR/SOURCES/src/latest/\$\$MOS.SYS"
 
 CONF_FILE=""
+DO_CLEAN=0
 
 #
-# This script takes no arguments -- --testconfig is a run.sh flag,
-# not a build.sh one (build.sh doesn't touch CONFIG.SYS/AUTOEXEC.BAT
-# at all, run.sh does). Bail with a clear message rather than
-# silently ignoring anything passed, since that would look like the
-# flag was accepted when it wasn't.
+# build.sh takes at most one argument: --clean. --testconfig is a
+# run.sh flag, not a build.sh one (build.sh doesn't touch
+# CONFIG.SYS/AUTOEXEC.BAT at all, run.sh does). Bail with a clear
+# message on anything else, rather than silently ignoring it.
 #
 
-check_no_args() {
-	if [ "$#" -gt 0 ]; then
-		printf 'build.sh takes no arguments (got: %s).\n' "$*" >&2
-		printf -- '--testconfig is a run.sh flag, not a build.sh one.\n' >&2
-		exit 1
+check_args() {
+	if [ "$#" -eq 0 ]; then
+		return
 	fi
+	if [ "$#" -eq 1 ] && [ "$1" = "--clean" ]; then
+		DO_CLEAN=1
+		return
+	fi
+	printf 'build.sh takes at most one argument: --clean (got: %s).\n' "$*" >&2
+	printf -- '--testconfig is a run.sh flag, not a build.sh one.\n' >&2
+	exit 1
+}
+
+#
+# Mirrors SOURCES/src/CLEANALL.BAT's own file list, directory by
+# directory -- kept in sync with it deliberately, so CLEANALL.BAT
+# stays the authoritative "what does a clean build mean" reference.
+# Done here in bash rather than by actually invoking CLEANALL.BAT
+# inside DOSBox: that script has an interactive `pause`, which would
+# hang a non-interactive build.sh run waiting for a keypress that
+# never comes.
+#
+
+clean_build_artifacts() {
+	local SRC="$SCRIPT_DIR/SOURCES/src"
+
+	printf 'Cleaning build artifacts (mirrors CLEANALL.BAT)...\n'
+
+	rm -f "$SRC/unterm/"*.SYS 2>/dev/null || true
+
+	rm -f "$SRC/ulib/"*.OBJ "$SRC/ulib/ULIB.LIB" "$SRC/ulib/ULIB.BAK" 2>/dev/null || true
+
+	rm -f "$SRC/import/"*.EXE "$SRC/import/"*.OBJ "$SRC/import/"*.MAP 2>/dev/null || true
+
+	rm -f "$SRC/acu/"*.EXE "$SRC/acu/"*.OBJ "$SRC/acu/"*.MAP 2>/dev/null || true
+
+	rm -f "$SRC/cutils/"*.EXE "$SRC/cutils/"*.OBJ "$SRC/cutils/"*.MAP 2>/dev/null || true
+
+	rm -f "$SRC/latest/"*.SYS "$SRC/latest/"*.EXE "$SRC/latest/"*.COM \
+		"$SRC/latest/"*.OBJ "$SRC/latest/"*.MAP "$SRC/latest/"*.PUB \
+		"$SRC/latest/"*.PSS "$SRC/latest/"*.NDX 2>/dev/null || true
+
+	rm -f "$SRC/cdlink/"*.SYS "$SRC/cdlink/"*.EXE "$SRC/cdlink/"*.COM \
+		"$SRC/cdlink/"*.OBJ "$SRC/cdlink/"*.MAP "$SRC/cdlink/"*.PUB 2>/dev/null || true
+
+	printf 'Build artifacts cleaned.\n'
 }
 
 #
@@ -114,9 +154,12 @@ check_build_output() {
 	printf 'Build succeeded: %s\n' "$KERNEL_IMAGE"
 }
 
-check_no_args "$@"
+check_args "$@"
 use_native_toolchain_if_present
 check_dosbox_installed
+if [ "$DO_CLEAN" -eq 1 ]; then
+	clean_build_artifacts
+fi
 write_dosbox_conf
 run_build
 check_build_output
