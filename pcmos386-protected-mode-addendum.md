@@ -976,3 +976,14 @@ processing loop itself is what's iterating 7-12 times for one line
 (a genuine kernel bug in loop-termination logic), or whether something
 *inside* `mosddint` branches back to `msdd1`/`msdd7` without ever
 returning to the caller.
+
+## Precise visual count from real hardware: 4 banner instances (1 incomplete, 3 complete)
+
+User's direct, careful count on real screen: exactly 4 DPMI banner
+appearances — 1 incomplete + 3 complete. Does not need to map 1:1 to
+the `msdd1`=7/`msdd7`=12 iteration counts above (kernel-internal loop
+iterations vs. visible complete-banner prints are different
+granularities — not every iteration necessarily reads far enough to
+produce a recognizable, complete banner). Useful as a cross-check once
+the loop itself is found and instrumented per-iteration, to see which
+iterations produce a visible print and which don't.
