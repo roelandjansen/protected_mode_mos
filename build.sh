@@ -6,7 +6,7 @@ set -euo pipefail
 # Was dosemu2-based; switched because dosemu2's current command-line
 # syntax (-K's drive-mapping behaviour specifically) doesn't do what
 # this build needs on a current install, and DOSBox does, verified
-# end to end (full kernel + utilities + import.exe, real MASM/LINK).
+# end to end (full kernel + utilities + IMPORT.EXE, real MASM/LINK).
 # See the tooling policy / Linux-native-build notes for the planned
 # UASM/Open Watcom replacement -- this script is the old-toolchain
 # path either way, just on a different emulator now.
@@ -18,12 +18,13 @@ KERNEL_IMAGE="$SCRIPT_DIR/SOURCES/src/latest/\$\$MOS.SYS"
 
 CONF_FILE=""
 DO_CLEAN=0
+CLEAN_ONLY=0
 
 #
-# build.sh takes at most one argument: --clean. --testconfig is a
-# run.sh flag, not a build.sh one (build.sh doesn't touch
-# CONFIG.SYS/AUTOEXEC.BAT at all, run.sh does). Bail with a clear
-# message on anything else, rather than silently ignoring it.
+# build.sh takes at most one argument: --clean or --clean-only.
+# --testconfig is a run.sh flag, not a build.sh one (build.sh doesn't
+# touch CONFIG.SYS/AUTOEXEC.BAT at all, run.sh does). Bail with a
+# clear message on anything else, rather than silently ignoring it.
 #
 
 check_args() {
@@ -34,7 +35,11 @@ check_args() {
 		DO_CLEAN=1
 		return
 	fi
-	printf 'build.sh takes at most one argument: --clean (got: %s).\n' "$*" >&2
+	if [ "$#" -eq 1 ] && [ "$1" = "--clean-only" ]; then
+		CLEAN_ONLY=1
+		return
+	fi
+	printf 'build.sh takes at most one argument: --clean or --clean-only (got: %s).\n' "$*" >&2
 	printf -- '--testconfig is a run.sh flag, not a build.sh one.\n' >&2
 	exit 1
 }
@@ -155,6 +160,10 @@ check_build_output() {
 }
 
 check_args "$@"
+if [ "$CLEAN_ONLY" -eq 1 ]; then
+	clean_build_artifacts
+	exit 0
+fi
 use_native_toolchain_if_present
 check_dosbox_installed
 if [ "$DO_CLEAN" -eq 1 ]; then

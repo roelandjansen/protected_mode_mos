@@ -2750,22 +2750,67 @@ initp2	proc	near
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdcon		; init standard in and out (console device)
+;
+; TEMPORARY diagnostic: numbered markers identifying each of initp2's
+; 5 standard devices directly, rather than relying on counting marker
+; positions (already led to one misattribution this session). See
+; protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,'1'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,mosstdclk		; init standard clk
+	push	ax
+	push	bx
+	mov	al,'2'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es	 
 	lea	bx,scbcom24		; init devices in MOSDEVS.ASM
+	push	ax
+	push	bx
+	mov	al,'3'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdblk		; init standard disk driver
+	push	ax
+	push	bx
+	mov	al,'4'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdhd		; init standard hard disk driver
+	push	ax
+	push	bx
+	mov	al,'5'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	dodrvr
 	mov	[first],2
 	pop	es

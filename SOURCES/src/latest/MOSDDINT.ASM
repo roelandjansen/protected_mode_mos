@@ -296,6 +296,21 @@ ldword	origroot			; original root pointer - for restoration on error
 ldword	origroot2			; storage for scbdrvr next in list pointer
 lword   lastdrvr			
 ldword  savedrvr
+;
+; TEMPORARY diagnostic: visible marker at mosddint's true entry point,
+; via BIOS teletype (int 10h ah=0Eh) -- needs no DS/segment setup at
+; all, unlike a string print, given "assume ds:nothing" is in effect
+; here. Prints '[' so we can see directly, against the real garbage
+; sequence, whether/how many times mosddint itself gets entered. See
+; protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,'['
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	push	bx
 	push	cx
 	push	si
@@ -440,9 +455,29 @@ msdd3:
 	mov	word ptr ss:[di+18],ax	; set pointer to arguments
 	mov	ax,word ptr [parmptr+2] ; in request block
 	mov	word ptr ss:[di+20],ax
+;
+; TEMPORARY diagnostic: marker '<' immediately before ddinit0 (the
+; actual DOS strategy/interrupt driver-init call), '>' immediately
+; after it returns. See protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,'<'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	push	di
 	call	ddinit0
 	pop	di
+	push	ax
+	push	bx
+	mov	al,'>'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 
 ; skip linking details if special mosinit case exit loop if error
 ; from mosbdint else, set es:bx to the original next driver pointer
@@ -452,10 +487,39 @@ msdd3:
 ; what it needs
 
 	cmp	[linktype],2 
-	je	msdd5 
+	jne	msdd454_not2
+	jmp	msdd5
+msdd454_not2:
 	cmp	al,0 
 	jne	msdd1 
 	mov	bx,[lastdrvr]		   ; point to last driver init
+;
+; TEMPORARY diagnostic: record es:[bx]'s actual value here (the
+; critical "is this -1, i.e. genuinely done" check) into an 8-slot
+; table at 0040:0110, one slot per pass, indexed by a dedicated
+; counter at 0040:00F9. See protected-mode assessment addendum.
+	push	ax
+	push	cx
+	push	di
+	push	es
+	mov	cx,es:[bx]		; cx = the value about to be compared to -1
+	mov	ax,40h
+	mov	es,ax
+	inc	byte ptr es:[0f9h]
+	mov	al,es:[0f9h]
+	cmp	al,8
+	ja	skip_checkval_record
+	dec	al
+	xor	ah,ah
+	mov	di,ax
+	shl	di,1
+	add	di,110h
+	mov	es:[di],cx
+skip_checkval_record:
+	pop	es
+	pop	di
+	pop	cx
+	pop	ax
 	cmp	word ptr es:[bx],-1	   ; did the driver request to	
 	jne	msdd1s			   ; to terminate remaing ones? no
 ;
@@ -514,9 +578,28 @@ skip_scbdrvr_record:
 	jne	msdd5 
 	mov	cl,al			; save original error status
 	les	bx,[origesbx]		; need original es:bx for smp adjustment
+;
+; TEMPORARY diagnostic: marker '{' before adj_smp_alloc, '}' after.
+; See protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,'{'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	push	cx
 	call	adj_smp_alloc
 	pop	cx
+	push	ax
+	push	bx
+	mov	al,'}'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	or	al,cl			; form cumulative error status
 msdd5:
 	cmp	[linktype],2 		; if skip linking, skip recovery test
@@ -525,6 +608,17 @@ msdd5:
 ; if the driver returns cs:0000 or there is an error, unlink
 
 	lea	di,[ddrequest]		; ss:di -> device request block
+;
+; TEMPORARY diagnostic: marker '(' before this calc_size call. See
+; protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,'('
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	calc_size
 	cmp	dx,word ptr [origesbx+2] 
 	je	msdd5a 
@@ -565,6 +659,18 @@ msdd7:
 	pop	es
 	pop	ax
 	lea	di,[ddrequest]		; ss:di -> device request block
+;
+; TEMPORARY diagnostic: marker ')' before this (second) calc_size
+; call, ']' right at mosddint's own return, after all the pops. See
+; protected-mode assessment addendum.
+	push	ax
+	push	bx
+	mov	al,')'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 	call	calc_size
 	pop	es
 	pop	ds
@@ -572,6 +678,14 @@ msdd7:
 	pop	si
 	pop	cx
 	pop	bx
+	push	ax
+	push	bx
+	mov	al,']'
+	mov	ah,0eh
+	xor	bx,bx
+	int	10h
+	pop	bx
+	pop	ax
 lundef	ddrequest,23
 lundef	nxtdrvr
 lundef	parmptr

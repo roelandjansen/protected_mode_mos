@@ -1119,3 +1119,356 @@ word ptr [scbdrvr],bx` write inside `msdd6a`/msdd3, to catch the
 exact moment and see what `bx`/`es` actually are at write time,
 rather than reading the already-written value after the fact) rather
 than more static guessing.
+
+## CORRECTION: the "msdd6 loop-back" theory is wrong — pass 1 terminates cleanly
+
+Attempted the live-breakpoint approach queued up above. The tmux/dosbox
+debug session got stuck (same class of interaction fragility seen
+earlier this session — resumed execution stopped progressing and
+repeated F5 didn't help, unrelated to anything in `MOSDDINT.ASM`
+itself). Abandoned it and went back to the static-instrumentation
+technique that's actually delivered every real finding this session,
+rather than keep fighting an unreliable debugger session.
+
+Added a direct recorder at the critical check itself (`cmp word ptr
+es:[bx],-1` at source line 459) — an 8-slot table at `0040:0110`
+capturing the actual value being compared, one slot per pass. Two
+short-jump-out-of-range errors surfaced from code growth (same class
+seen earlier — `je msdd5` and the diagnostic's own bounds check both
+exceeded short-jump range once enough code was inserted before their
+targets); fixed both with the same proven pattern (short jump to a
+nearby label + unconditional `jmp` for the far target).
+
+Result: **`FFFF 4362 92E8 9AC0 9AD2 9AE4 9AF6 9B08`**
+
+**Pass 1's checked value is `FFFF` (`-1`) — correct, from the very
+first pass.** This directly contradicts the earlier theory. If the
+check genuinely sees `-1` on pass 1, the code takes the clean-
+termination branch (source lines 465-471: restore `es:[bx]` from
+`[savedrvr]`, `jmp short msdd1`) — it never reaches `msdd1s`'s
+`nxtdrvr` comparison on pass 1 at all. The "kernel reads back its own
+linking-write as a false next-header pointer, causing `msdd6` to loop"
+mechanism described in the previous entries does not explain why
+`msdd1` is reached 7 times, since pass 1 alone should terminate
+processing for this single-header file immediately.
+
+**This is a real correction, not a refinement** — the loop-back
+mechanism at `msdd1s`/`msdd6` was static-source-plausible and fit the
+comment ("extra passes... multi header case"), but the actual recorded
+runtime data doesn't support it as *the* explanation for the 7-pass
+count. Something else causes `msdd1` (and by extension `mosddint`'s
+surrounding processing) to be reached repeatedly — possibilities not
+yet checked: `mosddint` being invoked multiple times through a
+different caller entirely (confirmed earlier: `MOSINT38.ASM` also
+calls `mosddint`, separately from `loaddrv`/`ldloop` — not yet ruled
+out as a contributor), or `msdd1` not actually being the point that
+should be used to count "passes" the way this session assumed.
+
+**Do not build a fix on the loop-back theory as previously described.**
+The `if_scbnul`/`nxtdrvr`-corruption mechanism may still be *a* real
+issue worth understanding, but it is not established as *the* cause
+of the specific 7/12-pass counts measured. Next session should start
+by checking whether `mosddint` itself gets entered more than once
+(a counter at the very top of the `lproc mosddint` procedure itself,
+before any of the `msdd1`/`msdd6`/`msdd7` internal labels, would
+settle this directly) before revisiting the `msdd6`/`msdd1s` internal
+loop logic at all.
+
+## Real progress: visible markers rule out calc_size/adj_smp_alloc directly
+
+Following the plan to use visible on-screen markers rather than silent
+counters: added BIOS-teletype single-character markers (`int 10h
+ah=0Eh` — chosen specifically because it needs no `DS`/segment setup
+at all, unlike a string print, and `assume ds:nothing` is in effect
+throughout this procedure) at five points: `[` (mosddint's true
+entry), `<`/`>` (immediately before/after `ddinit0`), `{`/`}`
+(immediately before/after `adj_smp_alloc`), `(` and `)` (before each
+of the two `calc_size` calls), `]` (mosddint's final return). Two
+short-jump-out-of-range errors surfaced from the added code size (same
+class as before — `je msdd5` and one of the diagnostic's own branches
+exceeded short range once enough code was inserted); fixed both with
+the same proven short-jump-plus-unconditional-jmp pattern.
+
+**First real finding**: `mosddint` is called multiple times *before
+`$386.SYS` even loads* — full, clean `[<>{}()]` sequences appear two
+or three times in the earliest part of boot, well before "Loading
+$386.SYS" prints. This means `mosddint` processes other, unrelated
+built-in devices through this exact same code path first (this
+session's markers are generic — they fire for *any* driver mosddint
+handles, not just DPMI). Each of these early passes completes cleanly,
+no garbage, no interruption. This is expected, normal kernel behavior,
+not part of the DPMI-specific symptom.
+
+**Second, more directly useful finding**: captured a later frame
+showing `♦{}()]` immediately preceding the correct "5K SMP #1
+allocated" line — i.e., `adj_smp_alloc` and *both* `calc_size` calls
+run **once, cleanly, together, immediately after all the visible
+garbage has already happened**, not during it. This rules out
+`adj_smp_alloc`/`calc_size` as the source of the repeated garbage
+directly, by observation, not inference — they're confirmed innocent.
+
+**Not yet captured**: where exactly DPMI's own `[`/`<`/`>` markers
+land relative to the garbage itself. The transition from "$386.SYS
+loaded" to "all garbage has already happened, 5K SMP allocated"
+continues to happen in well under the ~1-second granularity screenshot
+polling can reliably catch (consistent with every earlier finding this
+session about this specific transition's speed, regardless of
+`cycles=` throttling) — the markers may be buried within the dense
+garbage itself, visually indistinguishable from the noise, rather than
+genuinely absent.
+
+**Narrowed conclusion**: the repeated garbage/banner-printing happens
+specifically **during or immediately around `ddinit0`'s own call** —
+i.e., during the DOS strategy/interrupt driver-init protocol dispatch
+itself, or in the narrow window between `mosddint`'s entry and
+`ddinit0` returning. Not in `adj_smp_alloc`/`calc_size` (ruled out
+above), and not in `_DPMI.ASM`'s own code (`InstallDriver` proven
+single-entry, clean, in an earlier session). That's a real narrowing
+of the search space — from "somewhere in mosddint's ~370-line
+procedure" to "somewhere in ddinit0's own ~60-line procedure, or the
+protocol dispatch it performs" — even without having caught the exact
+visual moment.
+
+**Best next step**: rather than keep fighting screenshot timing, add
+one more marker *inside* `ddinit0` itself, between its `ddstrat`/
+`ddinter` calls specifically (the actual DOS strategy/interrupt
+protocol dispatch to the driver) — narrowing further within this now
+much smaller, confirmed-relevant procedure.
+
+## CONFIRMED by direct visual evidence: garbage happens during ddinit0's own execution
+
+User captured a real screenshot from actual hardware showing the full
+marker sequence clearly. Decoded precisely:
+
+The repeating `[<>)][<>)][<>)][<>)][<>)]` pattern (five times, missing
+`{`/`}` and the first `(` entirely) is **not related to DPMI at all**.
+Traced to `initp2` (`MOSINIT2.ASM`), which explicitly initializes five
+standard built-in devices back-to-back — `scbstdcon` (console),
+`mosstdclk` (clock), `scbcom24` (serial ports, `MOSDEVS.ASM`),
+`scbstdblk` (standard disk), `scbstdhd` (standard hard disk) — each
+through `dodrvr`, itself calling `mosddint` twice per device (`mov
+al,[first] ; 0 for first pass, 2 for second`, `[first]` set to `2`
+immediately after this block for the documented second pass). The
+`linktype==2` code path (skips `adj_smp_alloc` and the first
+`calc_size`, landing directly on the second) is this second pass,
+running for five completely ordinary, unrelated kernel devices. Fully
+explained, confirmed normal, no bug here.
+
+**Right after these five clean passes, the actual DPMI-relevant one
+begins**: a sixth `[<` appears (from `loaddrv`, which processes our
+one `DEVICE=$DPMI.SYS` line — confirmed separately, earlier this
+session, to invoke `mosddint` exactly once), and **garbage starts
+immediately after `<` fires, before `>` (immediately after `ddinit0`
+returns) ever appears cleanly**.
+
+**This is now confirmed by direct observation, not narrowed by
+elimination: the garbage happens specifically during `ddinit0`'s own
+execution for `$DPMI.SYS`'s driver** — after `mosddint`'s entry and
+the immediate-pre-`ddinit0` marker fire correctly, but before
+`ddinit0` returns. Combined with the earlier finding that `_DPMI.ASM`'s
+own `InstallDriver` runs once, cleanly (proven via its own internal
+counters) — the garbage is not `_DPMI.ASM`'s own code executing
+incorrectly, and not `mosddint`'s surrounding logic (`adj_smp_alloc`/
+`calc_size`, proven to run once, cleanly, afterward) — it is
+specifically in `ddinit0`'s own body, most likely in or around its
+`ddstrat`/`ddinter` DOS device-driver protocol dispatch calls (the
+actual mechanism by which `ddinit0` hands control to `_DPMI.ASM`'s
+`inter`/`InstallDriver` and gets a result back).
+
+**Next step, now precisely scoped**: add markers *inside* `ddinit0`
+itself — before/after `ddstrat`, before/after `ddinter` specifically
+— to narrow within this single, now-confirmed-relevant ~60-line
+procedure. This is the smallest, best-defined search space reached
+so far in the whole investigation.
+
+## Correction: the repeated-marker pattern was misattributed to DPMI
+
+The `[<>{}()]`/`[<>)]` sequences analyzed in the previous entry are
+**not related to `$DPMI.SYS` at all**. Confirmed directly: user tested
+the exact same marker build with `DEVICE=$DPMI.SYS` removed entirely,
+and the same pattern still appeared. Traced to `initp2`
+(`MOSINIT2.ASM`), which explicitly initializes five standard built-in
+devices — `scbstdcon` (console), `mosstdclk` (clock), `scbcom24`
+(serial ports, `MOSDEVS.ASM`), `scbstdblk` (standard disk),
+`scbstdhd` (standard hard disk) — each through `dodrvr`, itself calling
+`mosddint` twice per device (`mov al,[first] ; 0 for first pass, 2 for
+second`). The repeating pattern is this normal, documented two-pass
+mechanism running for five ordinary devices, confirmed by five
+consecutive `call dodrvr` sites in `initp2`'s source. Not a bug, not
+DPMI-specific. The earlier conclusion ("garbage happens during DPMI's
+own `ddinit0`, confirmed by direct observation") was wrong — it was
+very likely this same serial-port-related pattern, misread as DPMI's
+own pass. Correcting the record rather than letting it stand.
+
+## Two failed attempts to instrument inside ddstrat/ddinter — both reverted
+
+Given `ddinit0`'s own call is still the confirmed-relevant region
+(shared code, used by every driver including DPMI, not yet fully
+cleared), attempted to narrow further with markers between its
+`ddstrat`/`ddinter` calls specifically.
+
+**Attempt 1 — `int 10h` teletype markers**: caused a genuine hang.
+Confirmed via sustained ~90% CPU use with zero visible screen progress
+for 15+ seconds, where every other test this session completed in
+under one second. Reverted immediately.
+
+**Attempt 2 — silent memory-counter markers** (same safe technique
+used successfully everywhere else this session, no BIOS calls):
+compiled individually without error, but **broke the full kernel
+link** — `$$MOS.SYS` was not produced. Checked and ruled out two
+hypotheses with real evidence: `/se:512`→`/se:1024` (linker symbol
+table size) made no difference; the `DDT`/`CODE2` segment in a
+successful build's own `.MAP` file measures `0A750H` (42,832 bytes),
+well under the 64KB hard segment limit, ruling out segment overflow
+too. The actual cause of the link failure was not found. Reverted.
+
+**Both attempts reverted; the kernel builds successfully again** as of
+this session's end. `MOSDDINT.ASM`'s `ddinit0` is back to its original,
+unmodified form.
+
+## Why this specific region is uniquely fragile — understood, not just observed
+
+Read `ddstrat`/`ddinter` (`MOSDDINT.ASM`) and their targets `strat`/
+`inter` (`_DPMI.ASM`) directly, without further live instrumentation,
+given the risk just demonstrated twice.
+
+`ddstrat`/`ddinter` do not use a normal call/return. `ddinit0` does
+`push cs / call ddstrat` (building a return address on the stack
+manually), then `ddstrat` itself pushes the *driver's own* handler
+address (read from the driver's header, `es:[bx+6]` for strategy,
+`es:[bx+8]` for interrupt) and executes `retf` — jumping directly into
+`_DPMI.ASM`'s code with a manually-constructed far-return address
+still sitting on the stack underneath. The driver's own `strat`/
+`inter` routines are expected to eventually `retf` themselves, popping
+that same address to return control to `ddinit0`. Any code inserted
+inside this window has to keep that stack arrangement exactly intact.
+This plausibly explains the `int 10h` hang (a real BIOS interrupt call
+from within this unusual, manually-managed control-transfer context
+is a reasonable thing to disrupt it) — though not conclusively the
+link failure, which remains unexplained.
+
+**Checked both targets directly, and both are confirmed sound:**
+- `_DPMI.ASM`'s `strat:` — three instructions, trivially correct: save
+  the request-block pointer, `retf`. Standard DOS strategy-routine
+  convention.
+- `_DPMI.ASM`'s `inter:` — pushes `ds,es,bx,ax` (4 registers) at entry,
+  pops `ax,bx,es,ds` (correct reverse order) immediately before its own
+  `retf`. Balanced, correct. This is also where `InstallDriver` gets
+  called — already proven, via its own internal counters, to run
+  exactly once, cleanly.
+
+**This rules out `_DPMI.ASM`'s own dispatch entry points as the
+source of the garbage, by direct code review, not just absence of
+evidence.** Combined with everything else ruled out this session
+(`_DPMI.ASM`'s init chain overall, `adj_smp_alloc`/`calc_size`), the
+search space is now: `ddstrat`/`ddinter`'s own kernel-side code
+(read, appears simple/correct, but not live-verified given the
+instrumentation risk), or `ddinit0`'s own setup code immediately
+before calling `ddstrat` (request-block field initialization,
+`MOSDDINT.ASM` lines ~762-773 — not yet specifically examined).
+
+## Honest status at session end
+
+Real, substantial progress: several wrong theories identified and
+corrected with evidence (not left standing), the search space
+genuinely narrowed and most of it now ruled out by direct code
+review rather than instrumentation. The exact mechanism remains
+unfound. Given how fragile this specific code region has proven
+(two failed live-instrumentation attempts), the next session should
+be cautious about further markers here specifically — consider
+static analysis of `ddinit0`'s request-block setup first, or a
+carefully isolated single-instruction-at-a-time approach if live
+debugging is attempted again, rather than multi-instruction marker
+blocks.
+
+## DEFINITIVE: the garbling is in scbcom24 (serial ports, MOSDEVS.ASM) specifically
+
+Added distinct numbered markers ('1'-'5') directly before each of
+`initp2`'s five `call dodrvr` sites, replacing position-counting with
+direct identification. Result, no-DPMI config:
+
+```
+1[<>{}()]2[<>{}()]3[<>♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦()]4[<>{}()]5[<>{}()][<Loading $386.SYS...
+```
+
+**Device 3 is definitively, unambiguously the garbled one.** Devices 1
+(`scbstdcon`, console), 2 (`mosstdclk`, clock), 4 (`scbstdblk`, standard
+disk), and 5 (`scbstdhd`, standard hard disk) are all completely clean.
+Device 3 is `scbcom24` — "init devices in MOSDEVS.ASM" — the serial
+port devices.
+
+This is a well-scoped, concrete, real lead: `scbcom24` most likely
+represents multiple COM ports (COM1-4) as a genuine multi-header
+device structure — unlike `$DPMI.SYS` (a real single-header file, where
+the `nxtdrvr`/`msdd6` loop-back mechanism traced earlier in this
+document should never legitimately trigger), this is exactly the kind
+of driver where that same chaining logic is supposed to matter for
+real. If there's a genuine bug in how multi-header chaining works,
+this is precisely where it would surface.
+
+**Next concrete step**: read `MOSDEVS.ASM` directly — specifically
+`scbcom24`'s own device header structure(s) and whatever declares the
+chain between individual COM port entries — before attempting any
+further live instrumentation, given how fragile the `ddstrat`/
+`ddinter` region has proven. This is now unambiguously about
+`MOSDEVS.ASM`'s serial port devices, not `_DPMI.ASM`, not the other
+four standard devices, and not the `mosddint` linking mechanism in the
+abstract — a specific, real multi-header structure to go examine.
+
+## Strong structural lead found in MOSDEVS.ASM — confidence, not certainty
+
+Read `MOSDEVS.ASM` directly. Its own revision history (1988) states
+explicitly: *"reordered the headers in here to accomodate the
+corrections done in mosddint for device drivers with more than one
+header per file"* — direct historical confirmation this file is a
+genuine multi-header structure, exactly the kind of driver the
+`nxtdrvr`/`msdd6` chaining logic traced earlier in this document is
+meant to handle for real (unlike `$DPMI.SYS`, a genuine single-header
+file where that logic should never legitimately trigger at all).
+
+`scbcom24`'s `header` macro declares a **25-entry chain**: COM24 down
+through COM1, AUX, LPT3, LPT2, PRN, terminating at LPT1 (`dd -1`).
+Each entry's own "next" pointer:
+```asm
+header macro p1,p2,p3,p4
+scb&p1  label dword
+    dw  mos:scb&p2      ; offset of next header
+    dw  0               ; segment of next header -- literal zero
+    ...
+```
+The offset half is a valid, compile-time-resolvable group-relative
+reference. The segment half is a **hardcoded literal zero** for every
+one of the 25 entries. Checked `dodrvr` (the caller) directly — it
+does no fix-up of any kind, just calls `mosddint` with `es:bx` as
+given. No patch site was found anywhere searched this session
+(`MOSDEVS.ASM`, `MOSINIT.ASM`, `MOSINIT2.ASM`).
+
+**If this segment genuinely needs to be patched to the kernel's own
+runtime segment (matching the same "filled in with pointer to next
+driver" convention `_DPMI.ASM`'s own header comment describes for
+standalone drivers) and that patch is missing**, then `mosddint`
+reading this field (confirmed via `msdd6`'s own code: a direct,
+unconditional copy of `es:[bx]`/`es:[bx+2]` into `nxtdrvr`, no special-
+casing) would produce a "next" pointer of `offset:0000` — dereferencing
+deep into low memory near the interrupt vector table, reading and
+potentially printing/using unrelated data as if it were a real device
+header. That's a precise, mechanical explanation matching the observed
+symptom exactly.
+
+**Genuine uncertainty, stated plainly**: whether `dw 0` truly needs a
+runtime patch that's missing, or whether this reflects some other
+`MASM`/kernel convention not fully understood this session (e.g.
+`mosddint` or something else implicitly treating a `0` segment as
+"same as current" — checked `msdd6`'s code and found no such special-
+casing, but the *full* read/dereference path wasn't traced end to end).
+This is a strong, well-evidenced lead, not a confirmed root cause.
+
+**Next step**: trace precisely how `nxtdrvr`'s segment value actually
+gets *used* after being read at `msdd6` — specifically, confirm
+whether `es` (used for the next iteration's `es:[bx]` header read) is
+set from `nxtdrvr`'s segment half directly, and if so, whether a
+genuine `0` there is ever caught/rejected before being dereferenced.
+Static reading only — this session's two live-instrumentation attempts
+inside the related `ddstrat`/`ddinter` region both failed for reasons
+not fully understood, so further live debugging here should be
+approached cautiously, one minimal change at a time.

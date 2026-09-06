@@ -132,6 +132,46 @@ wbyte:
 	int	21h
 	pop	dx
 	pop	ax
+	mov	si,110h
+	mov	cx,8
+xbyte:
+	mov	al,[si+1]	; high byte of word first
+	mov	ah,al
+	push	cx
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	mov	al,[si]		; low byte of word
+	mov	ah,al
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	push	ax
+	push	dx
+	mov	dl,' '
+	mov	ah,2
+	int	21h
+	pop	dx
+	pop	ax
+	pop	cx
+	add	si,2
+	dec	cx
+	jnz	xbyte
+	push	ax
+	push	dx
+	mov	dl,'|'
+	mov	ah,2
+	int	21h
+	mov	dl,' '
+	int	21h
+	pop	dx
+	pop	ax
 	mov	ax,0040h
 	mov	es,ax
 	mov	al,es:[0f1h]	; high byte of segment
