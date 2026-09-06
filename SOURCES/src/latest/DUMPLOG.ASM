@@ -75,6 +75,81 @@ kbyte:
 	inc	si
 	dec	cx
 	jnz	kbyte
+;
+; also dump the 8-slot scbdrvr-value-per-pass table at 0040:0100
+; (see protected-mode assessment addendum)
+;
+	push	ax
+	push	dx
+	mov	dl,'|'
+	mov	ah,2
+	int	21h
+	mov	dl,' '
+	int	21h
+	pop	dx
+	pop	ax
+	mov	si,100h
+	mov	cx,8
+wbyte:
+	mov	al,[si+1]	; high byte of word first (big-endian print)
+	mov	ah,al
+	push	cx
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	mov	al,[si]		; low byte of word
+	mov	ah,al
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	push	ax
+	push	dx
+	mov	dl,' '
+	mov	ah,2
+	int	21h
+	pop	dx
+	pop	ax
+	pop	cx
+	add	si,2
+	dec	cx
+	jnz	wbyte
+;
+; also print the driver's own actual load segment (0040:00F0) for
+; direct comparison against the scbdrvr sequence above
+;
+	push	ax
+	push	dx
+	mov	dl,'|'
+	mov	ah,2
+	int	21h
+	mov	dl,' '
+	int	21h
+	pop	dx
+	pop	ax
+	mov	ax,0040h
+	mov	es,ax
+	mov	al,es:[0f1h]	; high byte of segment
+	mov	ah,al
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	mov	al,es:[0f0h]	; low byte of segment
+	mov	ah,al
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
 	mov	ah,4ch
 	int	21h
 

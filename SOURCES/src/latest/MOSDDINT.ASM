@@ -486,6 +486,28 @@ msdd1:
 	mov	ax,0040h
 	mov	es,ax
 	inc	byte ptr es:[0f2h]
+;
+; TEMPORARY diagnostic: record [scbdrvr]'s current low word (offset
+; part) into an 8-slot table at 0040:0100, one slot per pass, using
+; the pass counter (just incremented above, 0040:00F2) as the index.
+; Lets us see the actual VALUE SEQUENCE across passes, not just how
+; many there are. Stops recording past slot 8 (safe bound). See
+; protected-mode assessment addendum.
+	push	bx
+	push	di
+	mov	al,es:[0f2h]
+	cmp	al,8
+	ja	skip_scbdrvr_record
+	dec	al			; 1-based counter -> 0-based index
+	xor	ah,ah
+	mov	di,ax
+	shl	di,1			; word-sized slots
+	add	di,100h
+	mov	bx,word ptr [scbdrvr]
+	mov	es:[di],bx
+skip_scbdrvr_record:
+	pop	di
+	pop	bx
 	pop	es
 	pop	ax
 	cmp	[linktype],0 		; if linktype = 0 adjust smp allocation

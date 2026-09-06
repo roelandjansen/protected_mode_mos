@@ -1054,3 +1054,68 @@ is elsewhere (e.g. in why `scbdrvr`'s sequence of values takes 7
 iterations to settle rather than 1). Needs careful, static tracing of
 what `[scbdrvr]` actually holds across the 7 passes before proposing
 a fix -- this session's tool budget did not extend to that.
+
+## Connecting discovery: the scbdrvr value sequence looks like raw memory, not meaningful state
+
+Added an 8-slot recorder capturing `[scbdrvr]`'s low word at each
+`msdd1` pass (safe table at `0040:0100`, `DUMPLOG` extended to print
+it). Result for the same one-driver-load scenario (`msdd1`=7 passes):
+
+**`4334 92BA 9C8A 1934 24D2 0000 0000 0000`**
+
+Five distinct, essentially random-looking 16-bit values across the
+real passes, followed by zero-fill for the unused table slots. This
+is not a clean, predictable progression (not counting up, not cycling
+through a small known set of legitimate list-head addresses) — it
+looks like whatever's at the driver header's "next" field location is
+picking up **raw, unrelated memory content** each pass, being
+reinterpreted as a pointer.
+
+**This may unify the two mysteries this whole investigation has
+chased separately**: the on-screen garbage (established: real driver
+banner text, running past its intended bounds into actual code bytes)
+and the 7/12-pass linking loop (established: caused by the kernel
+reading back its own previous linking-write as a false "next device"
+pointer) may share the same underlying root defect — something not
+correctly bounding a read/pointer against `$DPMI.SYS`'s actual
+single-header size, letting real memory content leak through as
+"structure fields" in both places.
+
+**Checked directly**: searched `_DPMI.SYS`'s actual binary file for
+all five values as byte patterns (little-endian). **None found
+anywhere in the file.** This rules out the simplest version of the
+connecting hypothesis — these values are not raw bytes copied
+directly from `$DPMI.SYS`'s own on-disk image being misread as a
+header field.
+
+**Second check, also negative**: compared against the driver's actual
+runtime load segment (recorded independently at `0040:00F0` — this
+same run: `CD8E`). None of the five values match it either. So this
+isn't simply "scbdrvr correctly points at the driver, then something
+walks forward through the driver's own resident bytes reinterpreting
+them as pointers" — the first value in the sequence doesn't even match
+the real starting point that theory would require.
+
+That doesn't rule out a connection entirely — the *loaded, resident*
+image in memory could differ from the raw file (relocation, or the
+values could originate from a completely different already-resident
+structure, e.g. `$386.SYS`'s own memory, or stale content left over
+from something else previously occupying that memory) — but the
+direct, easy-to-check version of "these are leaked driver bytes" is
+now disproven, not just untested. Whoever picks this up next should
+not assume the connection without further checking a different
+source for these values (e.g. dump the driver's actual *loaded*
+memory image at runtime, not the on-disk file, and compare against
+that instead).
+
+**Status**: two concrete, checkable hypotheses for the `scbdrvr`
+sequence's origin tested and disproven this session. The real source
+remains genuinely unknown. Given the practical goal (DPMI refuses
+safely, OS fully functional) was already achieved separately, this
+specific sub-question is now a pure curiosity/correctness item rather
+than something blocking anything — worth a fresh, carefully-planned
+live-debugging session (with a live breakpoint on the actual `mov
+word ptr [scbdrvr],bx` write inside `msdd6a`/msdd3, to catch the
+exact moment and see what `bx`/`es` actually are at write time,
+rather than reading the already-written value after the fact) rather
+than more static guessing.
