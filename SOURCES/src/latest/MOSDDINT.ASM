@@ -348,11 +348,29 @@ skdd1:
 msdd6:
 	mov	es,word ptr [origesbx+2]
 	cmp	[linktype],2 		; linktype 2, special case from mosinit
-	je	msdd3 
+	jne	msdd6_not3
+	jmp	msdd3
+msdd6_not3:
 	mov	ax,es:[bx]		; when linktype == 0 or 1, save the
 	mov	word ptr [nxtdrvr],ax	; driver's next pointer in case of
 	mov	ax,es:[bx+2]		; multiple headers per file
 	mov	word ptr [nxtdrvr+2],ax
+;
+; TEMPORARY diagnostic: record the actual nxtdrvr value read here,
+; first pass, to safe bytes 0040:00F5 (low word) unconditionally --
+; only the FIRST write sticks meaningfully since we check via DUMPLOG
+; after boot, but repeated writes are harmless. See protected-mode
+; assessment addendum.
+	push	ax
+	push	es
+	mov	ax,40h
+	mov	es,ax
+	mov	ax,word ptr [nxtdrvr]
+	mov	es:[0f5h],ax
+	mov	ax,word ptr [nxtdrvr+2]
+	mov	es:[0f7h],ax
+	pop	es
+	pop	ax
 	mov	[lastdrvr],bx
 	cli
 	cmp	[linktype],1 
@@ -366,6 +384,24 @@ msdd6:
 ; the root.   
 
 	call	if_scbnul
+;
+; TEMPORARY diagnostic: count how many times the "scbnul" branch gets
+; taken here -- expected to be 0 for CONFIG.SYS-time loading (per the
+; comment above), since that path is meant only for the runtime
+; ADDDEV case. Safe counter at 0040:00F8. See protected-mode
+; assessment addendum. PUSH/POP don't affect flags, so the je check
+; below still reflects if_scbnul's original result, unchanged.
+; (Uses a nearby short jump + unconditional jmp for the far target,
+; since a direct jne to the far-away real target exceeds short range.)
+	jne	scbnul_local_skip
+	push	ax
+	push	es
+	mov	ax,40h
+	mov	es,ax
+	inc	byte ptr es:[0f8h]
+	pop	es
+	pop	ax
+scbnul_local_skip:
 	je	msdd6a
 	mov	es:[bx],ax		; into global list
 	mov	ax,word ptr [scbdrvr+2]

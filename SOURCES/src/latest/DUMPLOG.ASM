@@ -53,7 +53,7 @@ nextbyte:
 	mov	ax,0040h
 	mov	ds,ax
 	mov	si,0f2h
-	mov	cx,2
+	mov	cx,7
 kbyte:
 	mov	al,[si]
 	mov	ah,al
