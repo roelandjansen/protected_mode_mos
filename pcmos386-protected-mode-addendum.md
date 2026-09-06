@@ -1545,3 +1545,61 @@ variable to track here at all — the built-in-device linking path
 different list entirely rather than `scbdrvr`, given `msdd8`'s
 existence in `mosddint` for exactly this "task-specific"/alternate-
 linktype case.
+
+## RESOLVED: why pass 2 is clean — it skips the chain-walk entirely, by design
+
+Found the exact branch, `msdd6` (`MOSDDINT.ASM` line ~365):
+```asm
+msdd6:
+    mov  es,word ptr [origesbx+2]
+    cmp  [linktype],2      ; linktype 2, special case from mosinit
+    jne  msdd6_not3
+    jmp  msdd3              ; <- pass 2 goes straight here
+msdd6_not3:
+    mov  ax,es:[bx]         ; <- pass 1 only: reads nxtdrvr, walks the chain
+    ...
+```
+
+On pass 2 (`linktype==2`), execution jumps directly to `msdd3`,
+**completely bypassing** the `nxtdrvr` read, the `msdd6`/`msdd1s`
+chain-walk loop, and the entire `scbdrvr`-linking logic underneath it.
+This is by design, matching the "second pass does less work" pattern
+already established (also skips `adj_smp_alloc` and the first
+`calc_size`).
+
+This means the earlier "`scbdrvr` unchanged, `0000`/`0000`" measurement
+was captured on **pass 1** specifically — and pass 1 is exactly where
+`scbcom24`'s real 25-entry chain (COM24 down to LPT1, documented in
+`MOSDEVS.ASM`'s own 1988 revision history as a genuine multi-header
+structure) actually gets walked. Devices 1, 2, 4, 5 are single-header,
+so pass 1's chain-walk for them completes trivially (one iteration,
+matching everything else this session established about single-header
+files). Device 3 is the only one of the five that's genuinely
+multi-header, so it's the only one where this chain-walk does real,
+repeated work — 25 potential iterations instead of 1.
+
+**This resolves the "why pass 2 is clean" question completely**: pass
+2 doesn't re-walk the chain at all, by design, so whatever goes wrong
+during pass 1's genuine 25-entry walk simply never gets a chance to
+recur on pass 2.
+
+**Does not yet explain**: what specifically goes wrong *during* that
+25-entry walk to produce garbage, or why `scbdrvr` itself never changes
+even during pass 1 (if linking is supposed to happen for at least the
+head of a legitimately-processed chain, its absence here is itself
+worth understanding, not just attributed to "the chain-walk". Given
+`scbcom24`'s own 25 headers are declared with a **hardcoded-zero
+segment** for each "next" pointer (documented in the "Strong structural
+lead" entry above), the natural next check is whether that's the
+actual point of failure during this now-confirmed real chain-walk —
+that lead was found before this pass-1/pass-2 mechanism was understood,
+and now has a confirmed, correct context to be tested in.
+
+**Next step**: with the exact iteration point now confirmed (`msdd6`'s
+`nxtdrvr` read/chain-walk, pass 1 only, for `scbcom24` specifically),
+recording `nxtdrvr`'s value across each of the (up to 25) iterations
+during device 3's pass 1 — the same per-pass recording technique used
+successfully for `$DPMI.SYS` earlier this session — would directly
+show whether the hardcoded-zero segment is really what's being
+dereferenced, and at which specific link in the 25-entry chain it goes
+wrong.
