@@ -987,3 +987,70 @@ granularities — not every iteration necessarily reads far enough to
 produce a recognizable, complete banner). Useful as a cross-check once
 the loop itself is found and instrumented per-iteration, to see which
 iterations produce a visible print and which don't.
+
+## DEFINITIVE ROOT CAUSE: mosddint conflates the driver's static "next" field with its own dynamic linking write
+
+Traced `msdd1`/`msdd7`'s repeated hits to their actual source. Found
+the real loop mechanism at `msdd1s`/`msdd6` in `MOSDDINT.ASM`:
+```
+msdd1s:
+    les  bx,[nxtdrvr]
+    cmp  bx,-1
+    je   msdd1        ; offset == -1 -> single-header file, done
+    jmp  msdd6         ; else -> "another header in this file", loop back
+```
+`nxtdrvr` is populated at `msdd6`'s own top by reading straight from
+the driver's own header (`es:[bx]`/`es:[bx+2]` — the standard DOS
+device-driver "pointer to next device" field). Confirmed via
+`_DPMI.ASM`'s actual source (`code16` segment header): `dd -1 ; filled
+in with pointer to next driver` — correctly declared as the proper
+single-header terminator from the start.
+
+Added a diagnostic recording the actual `nxtdrvr` value at each read
+(safe bytes `0040:00F5`/`00F6`). Result after boot: **`FF FF`** — the
+final value is the correct terminator. Combined with `msdd1`=7,
+`msdd7`=12 from the previous entry, this means the loop *does*
+eventually terminate correctly, but takes 7 passes to get there for
+what is genuinely a single-header file.
+
+**The actual mechanism**: `msdd6` reads the header's "next" field into
+`nxtdrvr` at the start of each pass. Later in the *same* pass,
+`msdd3`/`msdd4` (the driver-linking code) **writes** `[scbdrvr]`'s
+current value into that *exact same header field*, as part of
+legitimately linking the driver into the kernel's driver list. On the
+next iteration, `msdd6` reads back its own previous linking-write,
+mistakes it for evidence of a genuine additional device header chained
+in the file, and loops back — repeating the entire process (including
+the driver-name/banner read that produces the visible garbage) for a
+file that only has one header. This continues until the accumulating
+sequence of overwrites happens to produce `-1` again, at which point
+it finally, correctly, stops.
+
+**This is a genuine kernel bug, independent of `_DPMI.ASM` and DPMI
+specifically** — `mosddint` conflates a field meant to be a static,
+one-time-read property of the loaded file with a field it also uses
+as dynamic, per-pass linking-bookkeeping scratch space. Any
+character-mode driver loaded via this exact path is potentially
+subject to the same false multi-header loop; `$DPMI.SYS` is simply
+the scenario that happened to expose it (likely because
+`AllocateExtend`/`InstallIt` never running left `scbdrvr`/the driver's
+resident-size fields in a state that iterates a visible, non-trivial
+number of times before self-correcting, rather than terminating on
+the first or second pass unnoticed).
+
+**Not yet attempted**: an actual fix. The most direct, narrowly-scoped
+fix would be to read `nxtdrvr` from the header *before* any linking
+write touches that field in the same pass — but the current code
+already does that ordering (`msdd6` reads first, `msdd3`/`msdd4`
+writes after). The real problem is that the write itself corrupts the
+field for the *next* pass's read, meaning the fix needs to either
+(a) save the driver's original, file-declared "next" value once,
+before any pass ever writes to it, and use that saved copy for the
+loop-continuation check instead of re-reading the (by-then-mutated)
+header field on every pass, or (b) determine why a single-header file
+takes multiple passes to resolve at all -- possibly the loop is
+*by design* meant to run until linking stabilizes, and the real bug
+is elsewhere (e.g. in why `scbdrvr`'s sequence of values takes 7
+iterations to settle rather than 1). Needs careful, static tracing of
+what `[scbdrvr]` actually holds across the 7 passes before proposing
+a fix -- this session's tool budget did not extend to that.

@@ -1,26 +1,33 @@
-	include page.inc
+	include PAGE.INC
 	title	mosinit2 - mos initialization module init segment
 comment ^===============================================================
 		development specification
 
- program name:	$$mos.com		assigned to: stewart hyde
+ program name:	$$MOS.COM		assigned to: stewart hyde
  module name:	mosinit2		assign date: 08/06/88
  entry points:	mosinit2		completed:   10/06/88
  entry from:	mosinit
  entry method:	far call
  calls: 	mosheman, mosint21 (file i/o)
  purpose:	mos kernel initialization (disposalable init segment)
- refer to:	multilink module mlinit.inc
- last update:	03/26/92
+ refer to:	multilink module MLINIT.INC
+ last update:	08/18/1992
+========================================================================
 
-=======================================================================
+the cnfbuf segment is used to define the structure of the CONFIG.SYS
+data and the pointers used during its processing.  the segment will
+actually reside in the system heap.  the ddtable is used to save
+pointers to the device driver filenames since they are not loaded
+until after the buffers and buffaddr commands are found.
+
+========================================================================
 
 mjs 10/21/88	remove all calls to linkdrv and modify all calls to
 		mosddint to account for a new entry parameter.
 
 sah 11/01/88	one line fix for intersegment jump to hperr
 
-mjs 11/14/88	modified allocation of smp when loading config.sys
+mjs 11/14/88	modified allocation of smp when loading CONFIG.SYS
 		device drivers.  must reserve some space so that bdb's
 		and cdb's can be allocated.
 
@@ -35,14 +42,14 @@ sah 11/21/88	initialize scbtcbps, scbtcbvs and scbtcbvr to value
 
 mjs 11/30/88	remove a tab code that was embedded in a string of
 		blanks which is used to overwrite the crlf codes when
-		the tilde character is detected in the config.sys
+		the tilde character is detected in the CONFIG.SYS
 		processing logic.  [ya, i know its a runon sentence]
 
 sah 12/04/88	move bootdrv to scb (renamed to scbbootdrv)
 
 sah 02/13/89	made init code call initstation to initialize tcbstation
 		before calling device drivers. this is necessary so that
-		tcbstation can be correctly setup during config.sys time
+		tcbstation can be correctly setup during CONFIG.SYS time
 		this is necessary for proper initialization of srterm
 
 sah 02/21/89	made initp9 set mos services interupt if not set 38h
@@ -58,7 +65,7 @@ mjs 04/16/89	modify error handling after call to mosddint.
 sah 07/26/89	initialization of scborg38 which is used in context
 		handling of scbfar38
 
-mjs 08/01/89	included xifmacs.inc.  converted readcnf to action chart
+mjs 08/01/89	included XIFMACS.INC.  converted readcnf to action chart
 		and	fixed a bug in that routine.  reworked the
 		managemet of the length of a device driver's parameter
 		so that it can be greater than 256 chars.
@@ -85,11 +92,11 @@ mjs 01/17/90	moved setting of scborg38 to be where the master
 		context is saved.  this var is actually part of the
 		master context and must be set from scbfar38 after
 		all device drivers have been loaded.  this must be done
-		just in case a driver (e.g. lansat.sys) hooks scbfar38.
+		just in case a driver (e.g. LANSAT.SYS) hooks scbfar38.
 
 sah 02/06/90	added lidt support for int 74h (ps/2 mice)
 
-mjs 03/07/90	added config.sys parsing logic for  disksw=n  to disable
+mjs 03/07/90	added CONFIG.SYS parsing logic for  disksw=n  to disable
 		the int15 disk busy task switching feature.
 
 sah 03/08/90	corrections for 6 digit serial #'s
@@ -134,13 +141,13 @@ mjs 06/08/90	modify init of irq's 2 through 7 to lidt mode.  must
 
 sah 06/08/90	changes for 10 digit serial #'s
 
-mjs 07/17/90	parse the kbrate config.sys statement.	initialize the
+mjs 07/17/90	parse the kbrate CONFIG.SYS statement.	initialize the
 		keyboard rate control logic.
 
 sah 07/20/90	added patch table for controlling patches in future
-		patch.com utility program. (4.10 will support this feature)
+		PATCH.COM utility program. (4.10 will support this feature)
 
-sah 07/26/90	change access keys so they are place into options.inc for
+sah 07/26/90	change access keys so they are place into OPTIONS.INC for
 		easy changing between releases
 
 mjs 08/02/90	convert kbrate control to use set_kbrate.  this function
@@ -148,19 +155,19 @@ mjs 08/02/90	convert kbrate control to use set_kbrate.  this function
 		directly.  ami 33 mhz machines required this (or much
 		more detailed direct i/o).
 
-sah 08/28/90	corrections for sysloading periscope in config.sys.
-		config.sys needs to be transfer to offical heap so
+sah 08/28/90	corrections for sysloading periscope in CONFIG.SYS.
+		CONFIG.SYS needs to be transfer to offical heap so
 		that when periscope does int 12h and initialize the
-		memory it will not write over our config.sys data area
+		memory it will not write over our CONFIG.SYS data area
 
 sah 08/30/90	move tranfer of freemem locations to before calling
 		initp8 so that device drivers can verify that they
 		don't have conflict with freemem areas
 
 mjs 09/16/90	move point where scbfar21 is set to before init8.
-		this was required to fix disk manager's dmdrvr.bin
+		this was required to fix disk manager's DMDRVR.BIN
 		version 4.20 since it made an int21fun4b03 call
-		during its init to load the xbios.ovl overlay file.
+		during its init to load the XBIOS.OVL overlay file.
 		this is only done when a drive has > 1024 cylinders.
 
 sah 11/01/90	remove ems check, ems context switching is only use
@@ -174,7 +181,7 @@ sah 01/22/91	corrections for device driver will be supported by
 sah 03/18/91	initialize scbioptr to point to io protection table
 		for faster io protection access.
 
-mjs 03/26/91	moved cnfbuf structure to moscnf.inc since both mosint
+mjs 03/26/91	moved cnfbuf structure to MOSCNF.INC since both mosint
 		and mosinit2 use it.
 		increase max # of device= statements supported to 80
 		add limit checking to logic which records device=
@@ -185,16 +192,16 @@ mjs 03/26/91	moved cnfbuf structure to moscnf.inc since both mosint
 		it can use.
 		removed sah's changes of 08/28/90
 
-SAH 03/28/91	Added KBBIOS config.sys command, also added a 512 byte
+SAH 03/28/91	Added KBBIOS CONFIG.SYS command, also added a 512 byte
 		patch area for INIT code, since all of init code goes
 		away, we are suffuring anything by doing this
 
 SAH 06/13/91	Change so that 'EXE' style device drivers can be loaded
-	  	at config.sys time.  This was done for Adaptec SCII
+	  	at CONFIG.SYS time.  This was done for Adaptec SCII
 		controller's device driver
 
 SAH 09/11/91    Added code to initialize scbi10old before loading device
-		drivers.  Also added lastdrive command in config.sys
+		drivers.  Also added lastdrive command in CONFIG.SYS
 
 SAH 09/23/91	Correction for 09/11/91 fix, needed to added a GRP override
 		before accessing i10old
@@ -202,8 +209,8 @@ SAH 09/23/91	Correction for 09/11/91 fix, needed to added a GRP override
 RBR 10/10/91    Corrections for CD-ROM exe device driver
 
 mjs 12/16/91	dlg mods:  added a bootstrap segment with an "include
-		mboot.inc".  added an "include dskstruc.inc" because
-		mboot.inc needs the structure definitions in that file. 
+		MBOOT.INC".  added an "include DSKSTRUC.INC" because
+		MBOOT.INC needs the structure definitions in that file. 
 		this was all done because the logic above the dftpart label
 		needs to reference the [drive] field within the partition
 		boot record.  previously, this access was done through a
@@ -215,11 +222,50 @@ SAH 01/14/92	Display error message and do not allow VTYPE f option if
 SAH 03/17/92	Set SCB4013 to value at 40:13,   also change setting
 		of tcbendad to a calculation from SCB4013.
 
-SAH 03/23/92	Added DOSVER= config.sys command
+SAH 03/23/92	Added DOSVER= CONFIG.SYS command
 
-SAH 003/26/92	opps, need to make sure DOSVER is not the same as the
+SAH 03/26/92	opps, need to make sure DOSVER is not the same as the
 		version of MOS
+
+================ 5.01 kernel ends here ====================================
+
+mjs 08/08/92	when scbgfbpf is reset within initpc, must also reset
+		scbgfbpl.  otherwise, the tests that compare these
+		two in mosliman could be confused.
+
+mjs 08/18/92	clean up segment declarations
+
 =======================================================================^
+
+.xlist
+;	include MOSINIT2.PUB
+	include OPTIONS.INC
+	include GROUP.INC
+	include MACROS.INC
+	include MOSREGS.INC
+	include	DSKSTRUC.INC
+	include MOSCDB.INC
+	include MOSBDB.INC
+	include	MOSCNF.INC
+	include MOSPSP.INC
+
+bootstrap segment at 0
+	include	MBOOT.INC
+bootstrap ends
+
+tcb	segment at 1234h
+	include MOSTCB.INC
+tcb	ends
+
+gdata	segment
+	include MOSSCBEX.INC
+gdata	ends
+.list
+
+gdata	segment
+	extrn	fgtcboff:near,ddtmctcb:word,mcsnow:byte,gend:byte
+	extrn	initpsp:byte, trueboot:byte
+gdata	ends
 
 features equ	0600h			; special memman features bits
 dftck	equ	16			; 16k default for cache
@@ -230,77 +276,35 @@ dftcwpcnt equ	60			; 65% default of cache available for write buffering
 dftcbits equ	4			; 4k bits bit map default
 tmpcbits equ	4			; 4k bit map to start
 
-	include options.inc
-	include group.inc
-
-init	group	initseg
-
-	.xlist
-
-	include macros.inc
-
 cfmos	macro	addr
 	mov	word ptr cs:[imosaddr], offset	addr
 	call	camos
 	endm
 
-	subttl	group segments and include block definitions
-	page
-
-	include mosregs.inc
-
-	include	dskstruc.inc
-bootstrap segment at 0
-	include	mboot.inc
-bootstrap ends
-
-tcb	segment at 1234h
-	include mostcb.inc		; tcb definition
-tcb	ends
-
-	include moscdb.inc		; needed in relocation of heap
-	include mosbdb.inc		; needed to set up disk buffers
-
-gdata	segment word public 'data'
-	extrn	fgtcboff:near,ddtmctcb:word,mcsnow:byte,gend:byte
-	extrn	initpsp:byte, trueboot:byte
-	include mosscbex.inc		; specify all scb items as external
-gdata	ends
-
-	.list
-
-irq	segment byte public 'data'
+irq	segment
 	extrn	irqstart:byte, irqend:byte
 	extrn   i10old:dword
 irq	ends
 
-poll	segment byte public 'data'
+poll	segment
 	extrn	pollstart:byte, pollend:byte
 poll	ends
 
-	page
-;-----------------------------------------------------------------------
-; the cnfbuf segment is used to define the structure of the config.sys
-; data and the pointers used during its processing.  the segment will
-; actually reside in the system heap.  the ddtable is used to save
-; pointers to the device driver filenames since they are not loaded
-; until after the buffers and buffaddr commands are found.
-;-----------------------------------------------------------------------
-
-	include	moscnf.inc
-
-	page
-	include mospsp.inc		; psp definition
-
-ddt	segment para public 'code2'
+;======================================================== ddt segment
+if 0 eq 0
+segment_num = 2
+endif
+ddt	segment
 	extrn	mo1seg:word,mcterm:near,mo2end:byte
 	extrn	grpseg2:word		;031288
 	extrn	lidtint09:near
 ddt	ends
 
-	subttl	mos segment - mos module code and local data
-	page
-mosseg	segment word public 'code1'
+;======================================================== mos segment
+if 0 eq 0
+segment_num = 1
+endif
+mosseg	segment
 	assume	cs:mos,ds:nothing,es:nothing,ss:nothing
 
 	extrn	gseglen:word, mapvmf:near, mapvsf:near, scanguts:near
@@ -326,8 +330,11 @@ mosseg	segment word public 'code1'
 
 mosseg	ends
 
-	page
-initseg segment para public 'code3'
+;======================================================== init segment
+if 0 eq 0
+segment_num = 3
+endif
+initseg	segment
 	assume	cs:init,ds:nothing,es:nothing,ss:nothing
 	extrn	initend:byte, imosaddr:word, mscall:far
 	extrn	initmos:word, initmo2:word, initgrp:word
@@ -376,7 +383,7 @@ msgkbbios db	'KBBIOS parameter error           ',13,10,'$'  ;@@xlat
 msgldrive db	'LASTDRIVE parameter error          ',13,10,'$'  ;@@xlat
 msgdosver db	'DOSVER parameter error (3.0 - 5.0)         ',13,10,'$'   ;@@xlat
 
-; the following is a value which is search by setuser.com to locate
+; the following is a value which is search by SETUSER.COM to locate
 ; locations in mos's INIT code to plug in values
 
 scandb	db	'[MOS]' 		; this is what program will search for
@@ -387,9 +394,9 @@ scandb	db	'[MOS]' 		; this is what program will search for
 
 
 ; the following is a 80 byte table which is use to control patches
-; the planned is for a future patch.com utility program will place an
+; the planned is for a future PATCH.COM utility program will place an
 ; entry in this table which indicates which patch has been patch to
-; kernel by patch.com scripts.	the label [patch] will make it easy to find
+; kernel by PATCH.COM scripts.	the label [patch] will make it easy to find
 ; this patch area by the patch program
 
 	db	'[PATCH]'
@@ -403,7 +410,7 @@ plugtbl db	04h,07h,2ah,2bh,2ch,2dh
 	db	30h,31h,32h,33h,34h,35h,36h,37h,39h,3ah,3bh,3ch,3dh,3eh,3fh
 	db	0ffh			; terminator
 
-	include  moslogo.inc		; other stuff in moslogo.old
+	include  MOSLOGO.INC		; other stuff in MOSLOGO.OLD
 
 icnfhdl dw	0			; handle for config during init code
 icnfsiz	dw	0			; size of device driver loaded
@@ -415,7 +422,8 @@ smp2dev dw	0			; smp #2 device drivers size
 
 wordten dw	10
 
-enbedded db	'X0X0X0X0X0'
+include	SERIAL.INC			; generated serial number file
+;enbedded db	'X0X0X0X0X0'
 
 msgheap  label	byte			;021588
 msgheap1 db	5 dup (' '), 'K SMP #1 allocated; $ '  ;021588 ;@@xlat
@@ -463,7 +471,7 @@ idispmos endp
 	 assume cs:init, ds:nothing,es:nothing,ss:nothing
 ;======================================================================
 ;,fs
-; these routines processe config.sys commands for cacheing
+; these routines processe CONFIG.SYS commands for cacheing
 ;
 ;
 ; pccache
@@ -494,11 +502,11 @@ idispmos endp
 ;
 ; cachesys
 ;
-; the device=$cache.sys command is interpreted for compatibility.  the
+; the device=$CACHE.SYS command is interpreted for compatibility.  the
 ; size parameter is regarded as allowing the cache to be that much
 ; larger
 ;
-; device=$cache.sys k l
+; device=$CACHE.SYS k l
 ;
 ; k = size of cache in k
 ; l = location to map cache buffer (ignored)
@@ -897,9 +905,9 @@ igncacherr endp
 ;,fs
 ; cachesys  
 ;
-; called from device= as special case for compatibility w/ $cache.sys
+; called from device= as special case for compatibility w/ $CACHE.SYS
 ; enter ds:si -> device name specified in device= command
-; set cache length if $cache.sys and return z, else return nz
+; set cache length if $CACHE.SYS and return z, else return nz
 ;
 ; in:	
 ;
@@ -923,7 +931,7 @@ cachesys proc near
 	mov	ch,0			;jrbt
 	add	si,cx			;jrbt
 	mov	cx,cln
-	sub	si,cx			;jrbt -> start of $cache.sys if present
+	sub	si,cx			;jrbt -> start of $CACHE.SYS if present
 	repe cmpsb
 	jne	csysx			; z flag clear for device=
 	call	getnum
@@ -989,20 +997,20 @@ pcbufr	endp
 
 rserial db	'1234'			; real hidden serial # use in cross check
 
-	subttl procnfg - process config.sys file
+	subttl procnfg - process CONFIG.SYS file
 	page
 ;======================================================================
 ;,fs
-; procnfg - process config.sys file
+; procnfg - process CONFIG.SYS file
 ;
-; this routine will read the config.sys file into the system heap and
+; this routine will read the CONFIG.SYS file into the system heap and
 ; parse the commands.  the actually processing for most of the commands
 ; will occur later, this routine will simply set the appropriate
 ; variables.
 ;
 ; upon exit the scb variables scbhpadr, scbhpsiz, cnfbuffr,
 ; cnfbufno, and mosaddr will be set according to the values read
-; in the config.sys file.
+; in the CONFIG.SYS file.
 ;
 ; updated 01/18/88 sah - all calls to command processing now make
 ; sure that es points to grp and this will save both time and
@@ -1084,7 +1092,7 @@ endif
 procnfg proc	near
 	assume	ds:grp
 	push	ds
-	call	readcnf 		; read config.sys file into memory
+	call	readcnf 		; read CONFIG.SYS file into memory
 	jz	$+5			; got one, process it
 	jmp	endcomm 		; end of config parms process defaults
 
@@ -1138,7 +1146,7 @@ errfun:
 	pop	ds
 	assume	ds:init
 	push	ds
-	lea	dx,errcomm		; tell user invalid command in config.sys
+	lea	dx,errcomm		; tell user invalid command in CONFIG.SYS
 	call	idispmos		;021588
 	mov	ds,[initmos]
 	assume	ds:mos
@@ -1208,11 +1216,11 @@ cntyerr:				;42888
 	push	cs
 	pop	ds
 	assume	ds:init 		;42888
-	lea	dx,errcnty		; tell user invalid country in config.sy;42888
+	lea	dx,errcnty		; tell user invalid country in CONFIG.SY;42888
 	call	idispmos		; display on console			;42888
 	mov	ds,[initmos]
 	assume	ds:mos
-	mov	ds,[cnfseg]		; point ds back to config.sys buffer	;42888
+	mov	ds,[cnfseg]		; point ds back to CONFIG.SYS buffer	;42888
 	assume	ds:cnfbuf		;42888
 	ret				; finished processing country		;42888
 pccnty	endp
@@ -1374,7 +1382,7 @@ devcomm:
 	add	bx,[ddnum]		; offset number of driver
 	mov	[bx],si 		; save pointer to driver
 	mov	[bx+2],cl		; save length also
-	call	cachesys		;jrbr is it $cache.sys?
+	call	cachesys		;jrbr is it $CACHE.SYS?
 	jz	pcdevcx 		;jrbr yes, so we took care of it
 	add	[ddnum],ddrecsiz	; set up for next time
 	xor	al,al			; get string
@@ -1622,7 +1630,7 @@ pcmmvd	endp
 ;,fs
 ; pcrem
 ;
-; remark command will only display line of config.sys that it is on
+; remark command will only display line of CONFIG.SYS that it is on
 ; on entry si points to start of command line
 ;
 ; in:	
@@ -1750,7 +1758,7 @@ pcuser	endp
 ;,fs
 ; pcvtype
 ;
-; this routine processes the vtype command in the config.sys where it
+; this routine processes the vtype command in the CONFIG.SYS where it
 ; has the following syntax:
 ;		vtype=n[f]
 ; where f is option parameter to fill the foreground memory to limited
@@ -1824,7 +1832,7 @@ pcvtype endp
 ;,fs
 ; pcdisksw
 ;
-; pcdisksw - specify disksw=n in config.sys if the int15 disk busy
+; pcdisksw - specify disksw=n in CONFIG.SYS if the int15 disk busy
 ; task switching feature is to be suppressed.
 ;
 ; in:	
@@ -1946,7 +1954,7 @@ pckbbios endp
 ;,fs
 ; pcldrive
 ;
-; lastdrive - lastdrive support in config.sys
+; lastdrive - lastdrive support in CONFIG.SYS
 ; form:
 ;   lastdrive= drive letter
 ;
@@ -2055,7 +2063,7 @@ pcdosver endp
 ;,fs
 ; getcomm - get next command from file
 ;
-; this routine will parse a command from a line in the config.sys
+; this routine will parse a command from a line in the CONFIG.SYS
 ; file.  the command will be set to all uppercase.  if the 1st
 ; non-blank character is a semi-colon (;) then the line is
 ; ignored.
@@ -2210,7 +2218,7 @@ blknoend:
 	je	endstr			; yes, a cr terminates string
 	cmp	byte ptr [si],0ah	; so does a lf
 	je	endstr
-	cmp	byte ptr [si],1ah	; cntrl-z (last line in config.sys)
+	cmp	byte ptr [si],1ah	; cntrl-z (last line in CONFIG.SYS)
 	je	endstr
 	inc	si
 	inc	cx
@@ -2285,21 +2293,21 @@ lundef	num1
 lundef	place
 lendp	getparm
 
-	subttl readcnf - read config.sys file into memory
+	subttl readcnf - read CONFIG.SYS file into memory
 	page
 ;======================================================================
 ;,fs
-; readcnf - read config.sys file into memory
+; readcnf - read CONFIG.SYS file into memory
 ;
-; this subroutine will open and read the entire config.sys
+; this subroutine will open and read the entire CONFIG.SYS
 ; file into a buffer starting at first available space.  this
-; routine will also issue 2 error messages, one if no config.sys
+; routine will also issue 2 error messages, one if no CONFIG.SYS
 ; file is found and the second if any file error occurs.
 ; this routine will also concat any lines that end with a '~'
 ;
 ; in:	ds -> grp
 ;
-; out:	the zf will be set if the config.sys file was successfully read
+; out:	the zf will be set if the CONFIG.SYS file was successfully read
 ;
 ;,fe
 ;=====================================================================
@@ -2330,7 +2338,7 @@ readcnf proc near
 	cfmos ifar21
 	pop	cx			; get # bytes to read
 	ljc	cnferr
-	mov	dx,cx			; # bytes in config.sys file
+	mov	dx,cx			; # bytes in CONFIG.SYS file
 	add	dx,5			; room for file terminator (ours) + leading and trailing cr, lf
 	add	dx,0fh			; round up to next para boundary
 	shr	dx,1			; calc # para's needed
@@ -2368,13 +2376,13 @@ cnfhpok:
 	assume	ds:mos
 	mov	ds,[cnfseg]		; address buffer area in heap
 	assume	ds:cnfbuf
-	lea	dx,cnffile		; load config.sys file after dd pointer table
+	lea	dx,cnffile		; load CONFIG.SYS file after dd pointer table
 	add	dx,2			; room for inserted cr,lf
 	mov	di,dx			; save offset of buffer
 	mov	ax,0a0dh		; put in a false cr,lf for 1st call
 	mov	[di-2],ax		;  to getcomm
 	mov	ax,3f00h		; read file
-	cfmos ifar21			; read config.sys into buffer space
+	cfmos ifar21			; read CONFIG.SYS into buffer space
 	jnc	cnfgotit
 	pop	ds
 	assume	ds:grp
@@ -2387,7 +2395,7 @@ cnfgotit:
 	mov	byte ptr [di+2],1ah	; ensure file terminator
 	pop	di
 	mov	cx,ax			; size
-	mov	ah,3eh			; close config.sys file
+	mov	ah,3eh			; close CONFIG.SYS file
 	mov	bx,[icnfhdl]		; file handle
 	cfmos ifar21
 	pop	ds
@@ -2444,7 +2452,7 @@ cnferr:
 	lea	dx,msgfile
 	cmp	al,2			; is it a 'File not found' error?
 	jnz	errnext
-	lea	dx,msgnone		; yes, no config.sys file to process
+	lea	dx,msgnone		; yes, no CONFIG.SYS file to process
 errnext:
 	aam
 	add	ax,3030h		; ascii
@@ -2749,7 +2757,7 @@ initp2	proc	near
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es	 
-	lea	bx,scbcom24		; init devices in mosdevs.asm
+	lea	bx,scbcom24		; init devices in MOSDEVS.ASM
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
@@ -2884,7 +2892,7 @@ public	tempcache
 tempcache proc	near
 	push	ds
 
-; default config.sys parameters
+; default CONFIG.SYS parameters
 
 	mov	ds,[initgrp]
 	assume	ds:grp
@@ -2894,12 +2902,12 @@ tempcache proc	near
 	mov	[scbcwf],0		; write-through
 	mov	[scbcwl],0
 	mov	word ptr [scbcd],0	; init cache off for all drives
-	mov	word ptr [scbcd+2],8000h; config.sys turns on selected drives
+	mov	word ptr [scbcd+2],8000h; CONFIG.SYS turns on selected drives
 	call	initcache
 
-; prepare parameters for config.sys
+; prepare parameters for CONFIG.SYS
 
-	mov	[scbcsysk],0		; no k for device=$cache.sys yet
+	mov	[scbcsysk],0		; no k for device=$CACHE.SYS yet
 	mov	[scbck],0		; 0k of cache (to determine if it's been set)
 	push	ax			;mjs@
 	call	getdfcbk		;mjs@
@@ -2920,7 +2928,7 @@ tempcache endp
 ; initialize caching according to current parameters of:
 ;
 ; in:	scbck - cache=k
-;	scbcsysk - device=$cache.sys m
+;	scbcsysk - device=$CACHE.SYS m
 ;	scbcd - bit map of drives to be cached
 ;
 ; out:	scbcuob - para size of unit of buffering
@@ -2941,7 +2949,7 @@ initcache:
 	jne	initc1			; ne if cache= was specified
 	mov	ax,[scbcsysk]
 	mov	[scbck],ax
-	or	ax,ax			; nz if device=$cache.sys was specified
+	or	ax,ax			; nz if device=$CACHE.SYS was specified
 	jnz	initc1
 	mov	[scbck],dftck		; default k if nothing was specified
 initc1:
@@ -3093,12 +3101,12 @@ initl1:
 ; init scb parameters pointing into cache list
 
 	mov	[scbccur],0		; nothing current
-	mov	ax,[scbcwf]		; config.sys version of write-delay
+	mov	ax,[scbcwf]		; CONFIG.SYS version of write-delay
 	mov	[scbcwrf],ax		; write-delay set as needed
-	mov	ax,[scbcwl]		; config.sys version of write-delay
+	mov	ax,[scbcwl]		; CONFIG.SYS version of write-delay
 	mov	[scbcwrl],ax		; write-delay set as needed
 
-	mov	ax,[scbcwsys]		; from config.sys
+	mov	ax,[scbcwsys]		; from CONFIG.SYS
 initl1a:
 	cmp	ax,100
 	jbe	initl1b
@@ -3171,7 +3179,7 @@ prereadcmd proc near
 	mov	[scbcpsiz],00h		; clear size
 	mov	ds,cs:[initmos]
 	assume	ds:mos
-	lea	dx,[cpres]		; string "$$shell.sys",0
+	lea	dx,[cpres]		; string "$$SHELL.SYS",0
 	mov	ax,3d00h
 	cfmos	ifar21
 	jc	preexit
@@ -3646,9 +3654,9 @@ sgonlz:
 	mov	ax,1301h		; string write
 	int	10h
 
-; setup tcbstation before processing config.sys, this is necessary
+; setup tcbstation before processing CONFIG.SYS, this is necessary
 ; for terminal drivers which need to determined what kind of master
-; console is on the system. for example sunriver (srterm.sys) needs
+; console is on the system. for example sunriver (SRTERM.SYS) needs
 ; to detect is station is either and ega or vga to provide approviated
 ; driver execution.
 
@@ -3734,7 +3742,7 @@ tbt1:
 	mov	[tcbdta+2],cs
 	call	getmpsw 		; get master password if needed
 	mov	grp:[mcsnow],0		; default to no desnowing
-	call	procnfg 		; (initp3) read and process config.sys file
+	call	procnfg 		; (initp3) read and process CONFIG.SYS file
 	call	prereadcmd		; pre-read command processor size
 	assume	ds:grp,ss:tcb
 	call	initp4			; process freemem and memdev commands
@@ -3876,8 +3884,8 @@ docpal:
 	mov	di,ax
 	call	finddm			; find a block in dm large enough for it
 	or	ax,ax			; find one?
-	jz	skipcpal		; yes, we can move $$shell.sys to freemem
-	mov	[scbcpseg],ax		; record location for command.com to enter
+	jz	skipcpal		; yes, we can move $$SHELL.SYS to freemem
+	mov	[scbcpseg],ax		; record location for COMMAND.COM to enter
 skipcpal:
 
 ; allocate space for secondary heap 
@@ -3923,8 +3931,8 @@ skipheap2:
 	mov	di,ax
 	call	finddm			; find a block in dm large enough for it
 	or	ax,ax			; find one?
-	jz	skipcpal2		; yes, we can move $$shell.sys to freemem
-	mov	[scbcpseg],ax		; record location for command.com to enter
+	jz	skipcpal2		; yes, we can move $$SHELL.SYS to freemem
+	mov	[scbcpseg],ax		; record location for COMMAND.COM to enter
 skipcpal2:
 
 ; enable trapping for the timer/counter chip 
@@ -4015,7 +4023,7 @@ min200j:
 min180j:
 
 ;jrbr disk i/o is ok from here on
-;jrbr cache is now set up according to config.sys, writes are delayed if
+;jrbr cache is now set up according to CONFIG.SYS, writes are delayed if
 ;jrbr	requested, drives are cached as specified, etc.
 
 ; allocate smp block for port specific irq reservations 
@@ -4097,6 +4105,7 @@ no286a:
 	mov	[scbbdbpf],0		; clear pointer to 1st block device
 	mov	[scbbdbpl],0		; clear pointer to last block device
 	mov	[scbgfbpf],0		; clear any active gfbs
+	mov	[scbgfbpl],0		; clear any active gfbs
 	mov	word ptr [scbstdin],0	; clear any standard device pointers
 	mov	word ptr [scbstdin+2],0
 	mov	word ptr [scbstdout],0
@@ -4182,7 +4191,7 @@ okhere:
 	pop	ds
 
 ; since some device drivers call int21fun4b03, must init scbfar21
-; before calling initp8.  (e.g. disk manager's dmdrvr.bin version 4.20)
+; before calling initp8.  (e.g. disk manager's DMDRVR.BIN version 4.20)
 
 	mov	word ptr [scbfar21], offset mosint21
 	mov	ax, [scbmosadr]
@@ -4245,7 +4254,7 @@ ivt1x:
 
 ; load command processor 
 
-	lea	dx,[cpres]		; string "$$shell.sys",0
+	lea	dx,[cpres]		; string "$$SHELL.SYS",0
 	mov	ax,3d00h
 	cfmos	ifar21
 	assume	cs:init,ds:nothing
@@ -4301,8 +4310,8 @@ min150:
 	mov	di,ax
 	call	finddm			; find a block in dm large enough for it
 	or	ax,ax			; find one?
-	jz	min160			; yes, we can move $$shell.sys to freemem
-	mov	[scbcpseg],ax		; record location for command.com to enter
+	jz	min160			; yes, we can move $$SHELL.SYS to freemem
+	mov	[scbcpseg],ax		; record location for COMMAND.COM to enter
 cpisset:
 	mov	ax,[scbcpseg]
 	mov	cx,dx
@@ -4315,16 +4324,16 @@ cpisset:
 	assume	ds:mos
 	mov	ds,[scbfree]
 	assume	ds:nothing
-	rep	movsb			; move $$shell.sys up to freemem
+	rep	movsb			; move $$SHELL.SYS up to freemem
 	pop	es
 	pop	ds
 	jmp	min170
 min160:
 	call	getscbfree		; mov	ax,[scbfree]
 	assume	ds:grp
-	mov	[scbcpseg],ax		; record location for command.com to enter
+	mov	[scbcpseg],ax		; record location for COMMAND.COM to enter
 	add	ax,di
-	cfmos	updfree 		; point scbfree past $$shell.sys
+	cfmos	updfree 		; point scbfree past $$SHELL.SYS
 min170:
 
 if	code286
@@ -4349,7 +4358,7 @@ endif
 	add	[scbmosend], ax
 
 ; reset tcbcmap to clear any access privilages used to get at the
-; config.sys file
+; CONFIG.SYS file
 
 	push	es
 	mov	es,[scbtcbpc]
@@ -4634,7 +4643,7 @@ getscbfree endp
 ;,fs
 ; init1a - init temporary heap
 ;
-; initialize a temporary heap for use during config.sys file i/o and
+; initialize a temporary heap for use during CONFIG.SYS file i/o and
 ; temporary data storage.  this heap and all that is in it will later
 ; be relocated to its permanent home.  the heap is allocated in the
 ; top of memory as reported by the bios int 12.
@@ -4844,7 +4853,7 @@ do13jnk:
 ; note the actual start of the no disk i/o critical section is in mminit
 
 ; if have i/o trapping, and the kbrate=n statement was not found within
-; config.sys, time to setup the keyboard rate control logic.
+; CONFIG.SYS, time to setup the keyboard rate control logic.
 
 	test	[scbmmfea],40h
 	jz	kbrt1
@@ -5398,7 +5407,7 @@ chkdint endp
 ;,fs
 ; initp8 - load and init device drivers
 ;
-; load and initialize device drivers from config.sys file
+; load and initialize device drivers from CONFIG.SYS file
 ;
 ; in:	
 ;
@@ -5433,7 +5442,7 @@ initp8	proc	near
 	mov	ax,[dd4013]
 	mov	es:[13h],ax
 
-; any config.sys file read?
+; any CONFIG.SYS file read?
 
 	cmp	[cnfseg],0
 	je	initp8e
@@ -5449,6 +5458,17 @@ initp81:
 ; load loop to load driver and init it
 
 ldloop:
+;
+; TEMPORARY diagnostic: count iterations of this outer driver-load
+; loop, via safe counter byte at 0040:00F4 (adjacent to the existing
+; 00F0/00F2/00F3 markers). See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,40h
+	mov	es,ax
+	inc	byte ptr es:[0f4h]
+	pop	es
+	pop	ax
 	push	cx			; save count of drivers left to load
 	mov	cl,byte ptr [bx+ddtable+5]
 	mov	[lowdev],cl
@@ -6699,4 +6719,3 @@ endif
 initseg ends
 	end
 
-

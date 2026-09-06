@@ -2,75 +2,72 @@
 ; '##' markings surround changes for bdbsctr/csector/sechigh/seclow
 
 
-	include page.inc
-	title	mosddint.asm - device driver initialization
+	include PAGE.INC
+	title	MOSDDINT.ASM - device driver initialization
 
 extrn	bugerror:near			;enable debug stack error reporting
 comment ^===============================================================
 		      development specification
 
- program name:	$$mos.com		 assigned to: jim bean
+ program name:	$$MOS.COM		 assigned to: jim bean
  module name:	mosddint		 assign date: 01/30/86
  entry points:	mosddint		 completed:   02/12/86
  entry from:	mosxxxxx
  entry method:	call
  calls:		mosheman
  purpose:	device driver initialization
- last update:	02/05/91
-
- this routine provides for initializing a device driver.  if it is
- a block device, a bdb is built for it.  if it has a "standard"
- name (con, prt, etc.), appropriate steps are taken to assure that
- it is treated as standard input, output, or whatever.
-
- registers passed are:
-      es - address of driver
-
- registers returned are:
-      al - return code; 0 if all is ok
-
-=======================================================================
+ last update:	09/02/1992
+========================================================================
 
 discussion of mosddint as implemented
 
-jrb 02/12/86
+this routine provides for initializing a device driver.  if it is a
+block device, a bdb is built for it.  if it has a "standard" name
+(con, prt, etc.), appropriate steps are taken to assure that it is
+treated as standard input, output, or whatever.
 
- this routine provides for initializing a device driver.  if it is
- a block device, a bdb is built for it.  if the standard character
- device bits are set, the standard character device pointers are set
- to the new driver
+registers passed are:
+     es - address of driver
 
- bit 0 = stdin standard input device
- bit 1 = stdout standard output device
- bit 2 = nul device (we allow it to be re-defined, unlike pcdos)
- bit 3 = clock device
- device name prn = standard printer device (not defined in pcdos)
- device name aux = standard auxilliary device (not defined in pcdos)
+registers returned are:
+     al - return code; 0 if all is ok
 
- it is called with es:bx = address of start of device driver
- ds:dx points to the remainder of the arguments from the specification
-   of the device driver
- it returns al = 0 if no error
- else al = error code
+this routine provides for initializing a device driver.  if it is
+a block device, a bdb is built for it.  if the standard character
+device bits are set, the standard character device pointers are set
+to the new driver
 
- error codes are:
- 0	 no error
- 1 - 7  mosheman error codes from driver allocation adjustment
-	  ( driver requested more space than was available)
- 8	 block device driver specified an invalid sector size
- 9 - 15 mosliman error codes + 8 from bdb allocation request
-	   (block device block allocation failed)
+bit 0 = stdin standard input device
+bit 1 = stdout standard output device
+bit 2 = nul device (we allow it to be re-defined, unlike pcdos)
+bit 3 = clock device
+device name prn = standard printer device (not defined in pcdos)
+device name aux = standard auxilliary device (not defined in pcdos)
 
- also changed mosbdb.inc to reflect the fact that we don't allow a
- block device to set a sector size larger than our maximum and
- added some shift counts to rapidly convert between sectors and blocks
- and between allocation units (clusters) and blocks
+it is called with es:bx = address of start of device driver
+ds:dx points to the remainder of the arguments from the specification
+  of the device driver
+it returns al = 0 if no error
+else al = error code
 
- added to sys block
- sysdrives:byte the number of drives allocated so far
- sysbufsz:word  the maximum size of a sector
- sysstdin:dword pointers to standard device drivers
- sysstdout, sysstdnul, sysstdclk, sysstdprn, sysstdaux
+error codes are:
+0	 no error
+1 - 7  mosheman error codes from driver allocation adjustment
+  ( driver requested more space than was available)
+8	 block device driver specified an invalid sector size
+9 - 15 mosliman error codes + 8 from bdb allocation request
+   (block device block allocation failed)
+
+also changed MOSBDB.INC to reflect the fact that we don't allow a
+block device to set a sector size larger than our maximum and
+added some shift counts to rapidly convert between sectors and blocks
+and between allocation units (clusters) and blocks
+
+added to sys block
+sysdrives:byte the number of drives allocated so far
+sysbufsz:word  the maximum size of a sector
+sysstdin:dword pointers to standard device drivers
+sysstdout, sysstdnul, sysstdclk, sysstdprn, sysstdaux
 
 =======================================================================
 
@@ -178,7 +175,7 @@ mjs 08/31/89	complete correction to problem with device drivers
 		adj_smp_alloc to its previous state.  modified the logic
 		within the mosddint main procedure to unlink a driver
 		when a cs:0 return is made.  for the 4.00 masters,
-		the ndev4xx.pat series now replaces the dev4xx.pat
+		the NDEV4XX.PAT series now replaces the DEV4XX.PAT
 		series.  convert the mosddint procedure to action chart
 		and add 'include xifmacs'.
 
@@ -200,44 +197,45 @@ mjs 04/03/91	change a je to a jne from sah's 02/05/91 changes.
 mjs 12/16/91	dlg mods: convert operations on bsFATsecs from byte to word.
 		convert handling large partitions, from the mlg 24 bit
 		sector number format to the 32 bit dlg format.  converted
-		to use of structures within dskstruc.inc.
+		to use of structures within DSKSTRUC.INC.
  
+================ 5.01 Kernel Ends Here ====================================
+
+mjs 08/18/92	clean up segment declarations
+
+SAH 09/02/92	Corrections for Bernoulli 90 Pro... OADDOS.SYS has 
+		multiable device driver in a list an if it desires
+		that it does not need to include the other device
+		drivers in driver it will terminated the list early.
+		I add code to check for this codition and correct the
+		problem.
+		(Corrected for MOS 5.01 with patch 501_p04.pat)
+
 =======================================================================^
 
-	include group.inc
-
-	subttl	group segments and include block definitions
-	page
-
-	.xlist
-	include mosregs.inc
+.xlist
+;	include MOSDDINT.PUB
+	include GROUP.INC
+	include MOSREGS.INC
+	include MOSCDB.INC
+	include MOSBDB.INC
+	include MACROS.INC
+	include DSKSTRUC.INC
 
 tcb	segment at 1234h
-	include mostcb.inc		; tcb definition
+	include MOSTCB.INC
 tcb	ends
 
-	include moscdb.inc		; etc., etc., etc.
-	include mosbdb.inc		; this is the only one we need in this module
-
-gdata	segment word public 'data'
-	include mosscbex.inc		; specify all scb items as external
+gdata	segment
+	include MOSSCBEX.INC
 gdata	ends
+.list
 
-	.list
-
-irq	segment byte public 'data'
-irq	ends
-
-poll	segment byte public 'data'
-poll	ends
-
-ddt	segment word public 'code2'
-ddt	ends
-
-	subttl	mos segment - mos module code and local data
-	page
-
-mosseg	segment word public 'code1'
+;======================================================== mos segment
+if 0 eq 0
+segment_num = 1
+endif
+mosseg	segment
 	assume	cs:mos,ds:nothing,es:nothing,ss:tcb
 	extrn	mosend:byte, sbios:word
 
@@ -245,9 +243,6 @@ mosseg	segment word public 'code1'
 	extrn	get_true_clusters:near
 
 	public	mosddint, setbdb
-
-	include macros.inc
-	include dskstruc.inc
 
 prnname db	'PRN     '		; name of standard printer device
 auxname db	'AUX     '		; name of standard auxilliary device
@@ -273,7 +268,7 @@ ramname db	'$RAMDISK'
 ; device name aux = standard auxilliary device (not defined in pcdos)
 ;
 ; in:	es:bx -> device driver
-;	ds:dx -> parameter string (e.g. from config.sys line)
+;	ds:dx -> parameter string (e.g. from CONFIG.SYS line)
 ;	al = 0 if driver is to be linked into scbdrvr list
 ;	al = 1 if to be linked into tcbddpf list (adddev option)
 ;	al = 2 if not to be linked (special mosinit usage)
@@ -299,6 +294,8 @@ lbyte	linktype			; original al
 ldword	origesbx			; original es:bx
 ldword	origroot			; original root pointer - for restoration on error
 ldword	origroot2			; storage for scbdrvr next in list pointer
+lword   lastdrvr			
+ldword  savedrvr
 	push	bx
 	push	cx
 	push	si
@@ -356,6 +353,23 @@ msdd6:
 	mov	word ptr [nxtdrvr],ax	; driver's next pointer in case of
 	mov	ax,es:[bx+2]		; multiple headers per file
 	mov	word ptr [nxtdrvr+2],ax
+;
+; TEMPORARY diagnostic: record the actual nxtdrvr value read here,
+; first pass, to safe bytes 0040:00F5 (low word) unconditionally --
+; only the FIRST write sticks meaningfully since we check via DUMPLOG
+; after boot, but repeated writes are harmless. See protected-mode
+; assessment addendum.
+	push	ax
+	push	es
+	mov	ax,40h
+	mov	es,ax
+	mov	ax,word ptr [nxtdrvr]
+	mov	es:[0f5h],ax
+	mov	ax,word ptr [nxtdrvr+2]
+	mov	es:[0f7h],ax
+	pop	es
+	pop	ax
+	mov	[lastdrvr],bx
 	cli
 	cmp	[linktype],1 
 	je	msdd4 
@@ -364,7 +378,7 @@ msdd6:
 ; if scbdrvr is pointing to scbnul then adddev must be calling mosddint.
 ; in that case, jump to msdd6a to link the new driver in using the
 ; next pointer of the scbnul driver as the root.  otherwise, must
-; be loading a driver from config.sys.  in that case, use scbdrvr as
+; be loading a driver from CONFIG.SYS.  in that case, use scbdrvr as
 ; the root.   
 
 	call	if_scbnul
@@ -374,7 +388,7 @@ msdd6:
 	mov	es:[bx+2],ax
 	mov	word ptr [scbdrvr],bx
 	mov	word ptr [scbdrvr+2],es
-	jmp	short msdd3
+	jmp	short msdd3  
 msdd6a:
 	push	ds
 	push	si
@@ -397,6 +411,10 @@ msdd4:
 	mov	word ptr [tcbddpf+2],es
 msdd3:
 	sti
+	mov	ax,word ptr es:[bx]		; save next on list 
+	mov	word ptr [savedrvr],ax		; for cases like 
+	mov	ax,word ptr es:[bx+2]		; Bernoulli 90 Pro
+	mov	word ptr [savedrvr+2],ax
 	lea	di,[ddrequest]		; ss:di -> device request block
 	mov	ax,word ptr [parmptr]
 	mov	word ptr ss:[di+18],ax	; set pointer to arguments
@@ -409,16 +427,47 @@ msdd3:
 ; skip linking details if special mosinit case exit loop if error
 ; from mosbdint else, set es:bx to the original next driver pointer
 ; of the current driver and go back through the loop until done
+; Updated 09/02/92 SAH, to include special case for handle drivers
+; like IOMEGA's OADDOS.SYS which has multible drivers but only includes
+; what it needs
 
 	cmp	[linktype],2 
 	je	msdd5 
 	cmp	al,0 
 	jne	msdd1 
+	mov	bx,[lastdrvr]		   ; point to last driver init
+	cmp	word ptr es:[bx],-1	   ; did the driver request to	
+	jne	msdd1s			   ; to terminate remaing ones? no
+;
+;  driver does not need remaining drivers in file, so replace list
+;  with one saves earler and make sure we don't loop back
+;
+	push	ax
+	mov	ax,word ptr [savedrvr]
+	mov	word ptr es:[bx],ax
+	mov	ax,word ptr [savedrvr+2]
+	mov	word ptr es:[bx+2],ax
+	pop	ax
+	jmp	short msdd1
+msdd1s:
 	les	bx,[nxtdrvr]
 	cmp	bx,-1
 	je	msdd1
 	jmp	msdd6
 msdd1:
+;
+; TEMPORARY diagnostic: count how many times this point (mosddint's
+; post-ddinit0 processing) is reached per driver load, via a safe
+; counter byte at 0040:00F2 (adjacent to, not overlapping, the
+; existing 0040:00F0 segment-record word). See protected-mode
+; assessment addendum.
+	push	ax
+	push	es
+	mov	ax,0040h
+	mov	es,ax
+	inc	byte ptr es:[0f2h]
+	pop	es
+	pop	ax
 	cmp	[linktype],0 		; if linktype = 0 adjust smp allocation
 	jne	msdd5 
 	mov	cl,al			; save original error status
@@ -466,6 +515,13 @@ msdd8:
 	mov	word ptr [tcbddpf],cx	; unlink for the task specific case
 	mov	word ptr [tcbddpf+2],dx
 msdd7:
+	push	ax
+	push	es
+	mov	ax,0040h
+	mov	es,ax
+	inc	byte ptr es:[0f3h]
+	pop	es
+	pop	ax
 	lea	di,[ddrequest]		; ss:di -> device request block
 	call	calc_size
 	pop	es
@@ -481,6 +537,8 @@ lundef	linktype
 lundef	origesbx
 lundef	origroot
 lundef	origroot2
+lundef	lastdrvr
+lundef	savedrvr
 lendp	mosddint
 
 	subttl if_scbnul - see if scbdrvr points to scbnul
@@ -591,6 +649,15 @@ ddi02:
 	jmp	ddi0b
 ddi0a:
 	call	moscdint		; character device (look for standard devices)
+;
+; Deliberately treating character devices as always-successful here.
+; A stricter check (report failure when the status word is left
+; untouched at 0) is a real kernel correctness improvement on its own
+; merits, but it's the thing that exposes a confirmed DOSBox-crashing
+; path once combined with a driver that genuinely fails (e.g.
+; _DPMI.ASM's CheckFor386SYS refusing via NotFin). Root cause of that
+; crash not yet found -- see protected-mode assessment addendum. Keep
+; this reverted until it is.
 	xor	al,al			; no errors possible in moscdint
 ddi0b:
 	ret
@@ -1163,4 +1230,3 @@ setbdbc3:
 mosseg	ends
 	end
 
-
