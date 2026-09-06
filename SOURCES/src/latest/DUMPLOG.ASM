@@ -190,6 +190,88 @@ xbyte:
 	mov	al,ah
 	and	al,0fh
 	call	outnib
+;
+; also dump the four ddstrat/ddinter counters at 0040:0120-0123
+; (before ddstrat, after ddstrat, before ddinter, after ddinter)
+;
+	push	ax
+	push	dx
+	mov	dl,'|'
+	mov	ah,2
+	int	21h
+	mov	dl,' '
+	int	21h
+	pop	dx
+	pop	ax
+	mov	ax,0040h
+	mov	ds,ax
+	mov	si,120h
+	mov	cx,4
+ybyte:
+	mov	al,[si]
+	mov	ah,al
+	push	cx
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	push	ax
+	push	dx
+	mov	dl,' '
+	mov	ah,2
+	int	21h
+	pop	dx
+	pop	ax
+	pop	cx
+	inc	si
+	dec	cx
+	jnz	ybyte
+;
+; also dump the two targeted before/after scbdrvr values for device 3
+; specifically, at 0040:0130 (before) and 0040:0132 (after)
+;
+	push	ax
+	push	dx
+	mov	dl,'|'
+	mov	ah,2
+	int	21h
+	mov	dl,' '
+	int	21h
+	pop	dx
+	pop	ax
+	mov	si,130h
+	mov	cx,2
+zbyte:
+	mov	al,[si+1]
+	mov	ah,al
+	push	cx
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	mov	al,[si]
+	mov	ah,al
+	mov	cl,4
+	shr	al,cl
+	call	outnib
+	mov	al,ah
+	and	al,0fh
+	call	outnib
+	push	ax
+	push	dx
+	mov	dl,' '
+	mov	ah,2
+	int	21h
+	pop	dx
+	pop	ax
+	pop	cx
+	add	si,2
+	dec	cx
+	jnz	zbyte
 	mov	ah,4ch
 	int	21h
 

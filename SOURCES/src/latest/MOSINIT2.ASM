@@ -2787,7 +2787,35 @@ initp2	proc	near
 	int	10h
 	pop	bx
 	pop	ax
+;
+; TEMPORARY diagnostic: record [scbdrvr]'s low word immediately
+; before and immediately after device 3's (scbcom24) dodrvr call --
+; safe bytes at 0040:0130 (before) and 0040:0132 (after). Tests
+; directly whether scbdrvr actually changes (i.e. linking succeeded)
+; despite the garbled output. Stays entirely within initp2, not the
+; fragile ddstrat/ddinter region. See protected-mode assessment
+; addendum.
+	push	ax
+	push	cx
+	push	es
+	mov	cx,word ptr [scbdrvr]
+	mov	ax,40h
+	mov	es,ax
+	mov	es:[130h],cx
+	pop	es
+	pop	cx
+	pop	ax
 	call	dodrvr
+	push	ax
+	push	cx
+	push	es
+	mov	cx,word ptr [scbdrvr]
+	mov	ax,40h
+	mov	es,ax
+	mov	es:[132h],cx
+	pop	es
+	pop	cx
+	pop	ax
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdblk		; init standard disk driver

@@ -114,8 +114,8 @@ check_build_exists() {
 # HELP.SRC needs including explicitly since it's a data file, not a
 # build output the .COM/.SYS/.EXE glob below would catch -- HELPGEN.EXE
 # hard-fails ("Cannot open HELP.SRC") without it, confirmed from its
-# own source (helpgen.c). ED.EXE's similar companion files (ED.KEY,
-# DEFKEYS.ED) are NOT included: checked ed.c too, and those are opened
+# own source (HELPGEN.C). ED.EXE's similar companion files (ED.KEY,
+# DEFKEYS.ED) are NOT included: checked ED.C too, and those are opened
 # conditionally there, tolerated as missing rather than required.
 #
 # CONFIG.SYS/AUTOEXEC.BAT: by default this writes the same minimal
@@ -124,6 +124,12 @@ check_build_exists() {
 # --testconfig to use testconfig/CONFIG.SYS and testconfig/AUTOEXEC.BAT
 # instead -- e.g. to test boot-time driver loading or an AUTOEXEC that
 # launches something automatically, without touching this script.
+#
+# --testconfig also copies every other file present directly in
+# testconfig/ onto the image (a diagnostic tool like DUMPLOG.COM, a
+# driver being tested, anything else CONFIG.SYS/AUTOEXEC.BAT there
+# might reference) -- drop a file in testconfig/ and it's on the boot
+# floppy next run, no separate mcopy step needed.
 #
 
 build_boot_floppy() {
@@ -166,6 +172,17 @@ build_boot_floppy() {
 	if [ "$USE_TESTCONFIG" -eq 1 ]; then
 		mcopy -i "$RUN_IMAGE" "$TESTCONFIG_DIR/CONFIG.SYS" '::CONFIG.SYS'
 		mcopy -i "$RUN_IMAGE" "$TESTCONFIG_DIR/AUTOEXEC.BAT" '::AUTOEXEC.BAT'
+
+		shopt -s nocaseglob
+		for F in "$TESTCONFIG_DIR"/*; do
+			[ -f "$F" ] || continue
+			NAME="$(basename "$F")"
+			case "$NAME" in
+			CONFIG.SYS | AUTOEXEC.BAT) continue ;;
+			esac
+			mcopy -i "$RUN_IMAGE" "$F" "::$NAME"
+		done
+		shopt -u nocaseglob
 	else
 		printf 'smpsize=16\r\ncache=16\r\n' | mcopy -i "$RUN_IMAGE" - '::CONFIG.SYS'
 	fi

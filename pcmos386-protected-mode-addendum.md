@@ -1472,3 +1472,76 @@ Static reading only — this session's two live-instrumentation attempts
 inside the related `ddstrat`/`ddinter` region both failed for reasons
 not fully understood, so further live debugging here should be
 approached cautiously, one minimal change at a time.
+
+## Sharper data: device 3 garbles on first pass only, clean on second
+
+User's numbered-marker test shows two complete passes through all 5
+devices (matching `initp2` apparently being invoked twice overall —
+once before `[first]` is set to 2, once after):
+
+**Pass 1**: `1[<>{}()]2[<>{}()]3[<>♦♦♦♦♦...{}]4[<>{}()]5[<>{}()]` — device
+3 garbled, all others clean.
+
+**Pass 2**: `1[<>]2[<>]3[<>]4[<>]5[<>]` — **device 3 is completely clean
+this time.** (Also note: pass 2's markers show only `[<>]` for every
+device, no `{}`/`()` at all — different from the earlier
+non-numbered-marker session's `[<>)]` finding for "linktype 2." Not
+yet reconciled; possibly `initp2`'s second invocation here goes through
+a different call context than previously assumed. Flagging the
+discrepancy rather than ignoring it.)
+
+**This narrows the question further than "device 3 has a problem"**:
+specifically, device 3's *first* invocation of `mosddint` garbles;
+its second does not. Since the chain-walking logic (`msdd6`/`nxtdrvr`,
+which is where the previous entry's `MOSDEVS.ASM` hardcoded-zero-
+segment hypothesis lives) runs *before* the first/second-pass branch
+point in `mosddint` — both passes should walk the same 25-entry chain
+— this doesn't cleanly fit that hypothesis as-is. Possible
+reconciliation, not yet checked: by pass 2, device 3 may already be
+linked into the driver list from pass 1 (even though pass 1's own
+output was garbled, the *linking* may have still completed), changing
+what pass 2's chain-walk actually encounters compared to pass 1's
+genuinely-first walk. This would mean the corruption is specifically
+tied to walking the chain from its *original, unlinked* state — which
+would still be consistent with a bad segment value on the *first*
+uncorrected read, if something about the state at that first read
+differs from all subsequent ones.
+
+**Not yet resolved** — recorded precisely so the discrepancy isn't
+lost, rather than forcing a fit to the existing hypothesis.
+
+## Targeted test result: scbdrvr does NOT change during device 3's processing — reconciliation theory disproven
+
+Added two precise recordings bracketing device 3's `dodrvr` call
+specifically: `[scbdrvr]`'s value immediately before (`0040:0130`) and
+immediately after (`0040:0132`), staying entirely within `initp2`
+(not the fragile `ddstrat`/`ddinter` region).
+
+Result: **`0000` before, `0000` after — unchanged.**
+
+This directly disproves the reconciliation theory from the previous
+entry (that device 3 gets successfully linked during pass 1 despite
+the garbled output, explaining why pass 2 is clean). `scbdrvr` doesn't
+move at all — no linking occurs, successful or otherwise, as a
+detectable side effect of device 3's first-pass processing.
+
+Also notable: the value is `0000`, not `-1` (`FFFF`) as this session's
+earlier `$DPMI.SYS` testing established as `scbdrvr`'s starting value.
+This is a different point in boot (built-in device init, well before
+any `CONFIG.SYS` `DEVICE=` processing) — plausible explanations not
+yet checked: `scbdrvr` may simply not have been initialized to its
+declared `-1` default yet at this point, or devices 1-2 (processed
+immediately before device 3, also apparently without visibly changing
+`scbdrvr` either, though not directly measured) don't actually link
+themselves into this list in the way assumed.
+
+**Status**: the "why does pass 2 come out clean" question remains
+open. Ruled out: successful-linking-despite-garbled-output. Still
+unknown: what actually differs about device 3's state between its
+first and second invocation, given `scbdrvr` itself isn't the answer.
+Next step, if continued: check whether `scbdrvr` is even the right
+variable to track here at all — the built-in-device linking path
+(`linktype` values used by `dodrvr`'s callers) may use `tcbddpf` or a
+different list entirely rather than `scbdrvr`, given `msdd8`'s
+existence in `mosddint` for exactly this "task-specific"/alternate-
+linktype case.
