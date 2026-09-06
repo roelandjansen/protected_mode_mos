@@ -369,6 +369,26 @@ msdd6_not3:
 	mov	ax,es:[bx]		; when linktype == 0 or 1, save the
 	mov	word ptr [nxtdrvr],ax	; driver's next pointer in case of
 	mov	ax,es:[bx+2]		; multiple headers per file
+;
+; FIX: a genuinely multi-header device driver embedded directly in
+; the kernel image (e.g. MOSDEVS.ASM's scbcom24 chain) can't know its
+; own runtime load segment at compile time -- its "next" pointer's
+; offset half is a valid compile-time constant, but the segment half
+; is necessarily a placeholder. Confirmed (MOSDEVS.ASM's own header
+; macro) that placeholder is a literal 0, with no patch site found
+; anywhere in the kernel that fixes it up before mosddint walks the
+; chain. Since every entry in such a chain shares one segment by
+; construction, es here -- already proven correct, since it was just
+; used to read this same header -- is also correct for the next one.
+; A genuine end-of-chain sentinel is -1 (the established convention,
+; per _DPMI.ASM's own header comment), never 0, so this cannot
+; misinterpret a real terminator. See protected-mode assessment
+; addendum for the investigation that led here -- this fix is
+; hypothesis-driven and needs validation, not assumed correct.
+	or	ax,ax
+	jnz	nxtdrvr_seg_ok
+	mov	ax,es
+nxtdrvr_seg_ok:
 	mov	word ptr [nxtdrvr+2],ax
 ;
 ; TEMPORARY diagnostic: record the actual nxtdrvr value read here,

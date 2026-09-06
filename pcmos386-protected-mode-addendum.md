@@ -1603,3 +1603,129 @@ successfully for `$DPMI.SYS` earlier this session — would directly
 show whether the hardcoded-zero segment is really what's being
 dereferenced, and at which specific link in the 25-entry chain it goes
 wrong.
+
+## Attempted fix: hardcoded-zero-segment substitution — DID NOT WORK
+
+Implemented the fix reasoned through above: in `msdd6`'s `nxtdrvr`
+read, substitute the current `es` for a literal `0` segment value.
+Built and tested cleanly (kernel builds, boots, no crash).
+
+**Tested directly against device 3 specifically, with the numbered
+markers still in place: no change.** Same extensive garbled output as
+before the fix (`3[<>♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦♦()]`), byte-for-byte
+consistent with every prior test. The fix is confirmed *not* to
+resolve the symptom.
+
+**This means the hardcoded-zero-segment hypothesis is wrong, or at
+best incomplete** — either the segment substitution logic itself has
+a bug (worth re-checking the actual assembled code, not just the
+source), or the real problem lies elsewhere in the chain-walk (the
+offset half, a different field entirely, or something about how many
+iterations actually occur that a segment fix alone doesn't address).
+Recorded honestly rather than left ambiguous. The fix as implemented
+should be considered reverted/inactive for the purposes of any future
+session picking this up — it added code without confirmed benefit,
+and should not be assumed correct or built upon.
+
+**Not yet done**: reverting this specific change, or further
+diagnosing why it didn't help. Both are open for next steps.
+
+## Diagnostic counter for the fix caused a genuine hang — reverted
+
+Attempted to test the fix's own assumption directly (does the
+segment-substitution branch actually fire?) with two simple counters
+bracketing the `or ax,ax/jnz` check. This caused a genuine hang —
+confirmed via over a minute of sustained ~90% CPU with zero visible
+progress, same class of failure as the earlier `int 10h` hang in
+`ddstrat`/`ddinter`, but this time in ostensibly simple, silent,
+push/pop-only counter code with no BIOS calls at all.
+
+**Reverted the counters, keeping only the underlying fix** (the
+`or ax,ax/jnz/mov ax,es` substitution itself, no diagnostics around
+it). Confirmed this reverted state builds and boots successfully
+again (full boot sequence completes, matches known-good file/output
+size).
+
+**This is now the third distinct failure mode encountered while
+instrumenting in or near this specific chain-walk/multi-header
+region this session** (the `ddstrat`/`ddinter` hang, the `ddstrat`/
+`ddinter` link failure, and now this). The common thread across all
+three: this general area of `mosddint` — genuine multi-header
+chain-walking and the code immediately around it — does not tolerate
+additional inline instrumentation well, for reasons not established
+in any of the three cases. This is now a pattern, not a one-off.
+
+**Recommendation for whoever continues this**: do not add more
+inline counters/markers directly in or immediately around `msdd6`'s
+chain-walk. If further live diagnosis is needed here, consider an
+entirely different technique — e.g. a live debugger breakpoint set
+externally (not compiled into the kernel) on the chain-walk's actual
+runtime address, using the proven MAP-file-address-lookup method from
+earlier in this document, rather than any further inline code
+insertion in this specific region.
+
+## Session-end status
+
+**Confirmed, solid findings, safe to build on:**
+- The garbling is real `scbcom24`/`MOSDEVS.ASM` content (confirmed
+  independently on two separate real systems), not DPMI, not the
+  other four built-in devices.
+- It occurs specifically during pass 1 (`linktype=0`) of `mosddint`'s
+  processing of `scbcom24`, which is genuinely multi-header (25
+  entries) — pass 2 (`linktype=2`) provably skips the entire
+  chain-walk via a direct jump, explaining why pass 2 is always clean.
+- `_DPMI.ASM`/DPMI's own loading is unaffected by any of this — its
+  own init chain was separately proven clean earlier in this
+  document, and remains so.
+- The overall practical goal from earlier in this investigation
+  (DPMI refuses safely, OS fully functional, `ADDTASK` works) remains
+  true and unaffected by anything in this session.
+
+**Tried and disproven:**
+- The hardcoded-zero-segment substitution fix, tested directly against
+  device 3 with no change in behavior. The underlying reasoning (why
+  it seemed plausible) is documented above for reference, but the fix
+  itself does not resolve the symptom and should not be assumed
+  correct.
+
+**Still unknown:**
+- What actually goes wrong during `scbcom24`'s real chain-walk. The
+  segment-zero hypothesis was the leading candidate and is now ruled
+  out. No replacement hypothesis has been formed yet.
+
+**Current file state**: `MOSDDINT.ASM` contains the disproven fix
+(harmless — doesn't crash or hang, just doesn't help) plus all
+prior session's proven-safe instrumentation. Builds and boots
+successfully, confirmed.
+
+## External lead received: documented CPU errata in _386.ASM — noted, not confirmed connected
+
+User provided two externally-documented PC-MOS/386 issues (forum.vcfed.org,
+os2museum.com): a "2012 date rollover" bug (already patched upstream per
+GitHub issue #2, not relevant to this investigation) and a "32-bit code
+segment target address miscalculation" in `_386.ASM`.
+
+Checked directly: `_386.ASM` (lines 21-36) contains this exact errata
+**verbatim**, quoted from IBM's own documentation of the "Bimini 2-SX"
+386SLC/486SLC2 chipset: a CPU hardware flaw where `CALL`/`JMP near`
+with a `0x66` operand-size override and a negative displacement (target
+within 32768 bytes, both within the code segment's first 64K) computes
+the wrong target address.
+
+**Important nuance**: this is chip-specific hardware errata, not a
+generic x86 bug, and the kernel's own revision history shows it was
+already identified and corrected as of `SAH 11/11/92` — extensive
+`db 66h`/`67h` workaround bytes appear throughout the file (583 `66h`
+occurrences) as the established mitigation.
+
+**Not established**: whether this connects to the `scbcom24` chain-walk
+symptom investigated this session. Would require confirming whether
+DOSBox-staging's CPU emulation replicates this specific IBM-chip
+quirk (unlikely, as it emulates a generic 386/486 core, not this
+specific chip's silicon-level behavior) or has an unrelated bug of
+its own in similar prefix-handling territory — neither checked this
+session. Recorded as a real, externally-sourced, worth-remembering
+lead, not a confirmed cause. If picked up again: search `_386.ASM`
+specifically for `66h`+negative-displacement `CALL`/`JMP near`
+sequences within the code paths `scbcom24`'s chain-walk actually
+executes, rather than auditing all 583 occurrences broadly.
