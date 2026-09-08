@@ -1729,3 +1729,208 @@ lead, not a confirmed cause. If picked up again: search `_386.ASM`
 specifically for `66h`+negative-displacement `CALL`/`JMP near`
 sequences within the code paths `scbcom24`'s chain-walk actually
 executes, rather than auditing all 583 occurrences broadly.
+
+## Untested hypotheses for next session — reasoned through, not yet tried
+
+Several distinct, plausible explanations for the `scbcom24` chain-walk
+garbling, none yet tested. Documented for whoever continues this,
+roughly ordered by how promising they seem, each with a concrete way
+to test it without guessing blind.
+
+### Hypothesis 1: the offset half of the "next" pointer is also wrong, not just the segment
+
+The disproven fix only addressed the segment half (`dw 0`) of each
+header's "next" pointer. The offset half (`dw mos:scb&p2`) was assumed
+correct because it's a compile-time-resolvable group-relative
+reference — but that assumption was never actually verified. If `mos`
+is a group spanning multiple segments (not just the one `scbcom24`'s
+headers live in), `mos:LABEL` could resolve to an offset relative to
+the *group's* base rather than the specific segment's base — a
+systematic, consistent miscalculation that would corrupt every single
+step of the chain-walk, not just the segment half. This is a real gap
+in the reasoning behind the already-tried fix, not a new invention.
+
+**How to test**: statically compare a header's declared offset
+(`mos:scb&p2`, from the `.LST` file) against where that label actually
+lives at link time (from `$$MOS.MAP`, the same technique used
+successfully earlier this session to compute `_DPMI.ASM`'s real
+runtime addresses). If they don't match by a consistent delta, this is
+confirmed directly, no live instrumentation needed at all.
+
+### Hypothesis 2: the actual garbling is in devstrat/devsintr's own code, not the chain-walk pointers
+
+Checked `MOSDEVS.ASM`'s `com1intr` through `com24intr`: all 24 are
+uniform, trivial stubs (`mov [tcbdnum],N / jmp devsintrx`) — not
+direct hardware I/O. But the shared dispatcher they jump to
+(`devsintr`, not examined this session) could still contain the actual
+per-device logic, including real UART/COM-port register access. If
+`devsintr` does something COM-port-specific that behaves differently
+under DOSBox-staging's emulated (or absent) serial hardware for
+higher-numbered, almost certainly never-real-hardware-tested ports
+(COM5 through COM24 — no real 386-era PC would have had anywhere near
+this many serial ports), that's a plausible, entirely different locus
+for the corruption than the chain-walk pointer logic this session
+focused on.
+
+**How to test**: read `devsintr` directly (static analysis first,
+matching this session's safer approach), specifically for any I/O
+port access (`in`/`out` instructions) gated by `[tcbdnum]`, before
+attempting any live instrumentation given how fragile this general
+code region has proven.
+
+### Hypothesis 3: the documented IBM 386SLC/486SLC2 CPU errata, if DOSBox-staging happens to replicate its symptom
+
+Covered in the previous entry. Chip-specific hardware errata,
+already corrected in the kernel's own 1992 revision history via
+extensive `66h`/`67h` prefix workarounds — but worth checking whether
+DOSBox-staging's CPU core has an unrelated bug in the same
+negative-displacement-plus-operand-override territory that produces a
+similar symptom on ordinary emulated hardware, not the specific IBM
+chip the original errata describes.
+
+**How to test**: search `_386.ASM` specifically for `CALL`/`JMP near`
+sequences using the `66h` prefix with a negative/backward displacement
+within the actual code paths `scbcom24`'s processing executes (not
+all 583 occurrences broadly) — narrow, targeted, not an open-ended
+audit.
+
+### Hypothesis 4: the 25-entry chain was never realistically exercised on real hardware, and the bug may be entirely pre-existing/original
+
+No 1992-era PC would plausibly have had anywhere near 24 real serial
+ports. It's plausible this specific code path — walking a *genuinely
+full* 25-entry chain — was rarely or never exercised end-to-end by the
+original developers or any real user, since doing so would require
+actually populating that many COM ports. If true, this may not be a
+regression introduced by anything in this project's own history at
+all, but a latent, always-present bug in the original 1992 kernel that
+happens to now be getting exercised for the first time under emulation
+(where "24 COM ports" is a config file away, not a hardware
+acquisition problem). This reframes the question from "what did we
+break" to "what was never actually correct" — worth keeping in mind
+when weighing how much effort a fix deserves versus documenting it as
+a known, longstanding limitation.
+
+**Not independently testable** in the same way as 1-3; more a framing
+note for prioritization than a concrete next step.
+
+### Session note on process
+
+All four hypotheses above are static-analysis-first by design, given
+this specific code region's demonstrated fragility under inline live
+instrumentation (three distinct failures this session: an `int 10h`
+hang, a link failure, and a silent-counter hang — different causes
+each time, same general area). Static analysis, and the MAP-file
+address-lookup technique proven earlier for `_DPMI.ASM`, are the
+recommended starting points before any further live debugging is
+attempted here.
+
+## Clarification: the two initp2 passes are separated by all of $386.SYS's own init, not adjacent
+
+User's screenshot pins down the timing precisely, something not
+explicitly established before: the two numbered-marker rounds are not
+back-to-back. Round 1 (`1[<>{}()]2[<>{}()]3[garbled]4[<>{}()]5[<>{}()]`)
+completes *before* "Loading $386.SYS" even prints. Round 2
+(`1[<>)]2[<>)]3[<>)]4[<>)]5[<>)]`) happens afterward, near "640K
+allocated to first megabyte." — meaning all of `$386.SYS`'s own
+protected-mode/paging setup, memory sizing, etc. runs *between* the
+two `initp2`-driven passes over the five built-in devices, not
+immediately after one another as previously assumed.
+
+Confirms directly, once more, in this independent capture: device 3's
+actual garbling appears only in round 1; round 2's device 3 is clean.
+Consistent with everything already documented (`linktype=2` skips the
+chain-walk entirely) — this entry adds the precise *timing* between
+the two rounds, which wasn't previously pinned down and could matter
+for future hypotheses (e.g. whether anything `$386.SYS`'s own init
+does in between — protected-mode transition, paging setup, its own
+memory-sizing probe — has any bearing on why round 1's chain-walk goes
+wrong, given it happens once, cold, before any of that has settled).
+
+## Hypothesis 1 tested and disproven: offset half of the "next" pointer
+
+Tested via the exact static method the previous entry proposed: compare
+each header's compile-time offset against its actual link-time address
+in `$$MOS.MAP`, no live instrumentation.
+
+First, the premise doesn't even apply: `GROUP.INC` defines `mos group
+mosseg` — the `mos` group has exactly one member segment. There is no
+way for `mos:LABEL` to resolve group-relative vs. segment-relative
+differently, since group base and segment base are identical by
+construction.
+
+Checked anyway, using the chain's two other `public` labels as
+independent checkpoints. `MOSDEVS.ASM`'s `header` macro produces an
+18-byte record. From `$$MOS.MAP`:
+
+- `SCBCOM24` = `0CB0:9B26`
+- 28 macro-generated headers (`com24`→`prn`) × 18 bytes = `1F8h` →
+  predicted `scblpt1` = `9B26 + 1F8` = `9D1E`
+- `SCBLPT1` in the map = `0CB0:9D1E` — exact match
+- `scblpt1` itself is 18 bytes → predicted `scbnul` = `9D1E + 12h` =
+  `9D30`
+- `SCBNUL` in the map = `0CB0:9D30` — exact match
+
+Both independent checkpoints land exactly where the source-declared
+layout predicts. The offset half of the "next" pointer is correct,
+contiguous, and consistent with the compile-time structure.
+**Hypothesis 1 is disproven** — no group/segment resolution bug, no
+stride miscalculation. The chain-walk pointer arithmetic itself is
+sound.
+
+## Hypothesis 2 tested and disproven (for this symptom): devsintr's own code is uniform, not COM-specific, during init
+
+Traced the actual call path the boot-time chain-walk exercises for
+each of the 25 `scbcom24` headers: `dodrvr` → `mosddint` → `ddinit0`,
+which sets the request block's command byte to `0` (init) and calls
+`ddstrat` (→ `devstrat`, which just stores the request-header pointer)
+then `ddinter` (→ the header's own `p3&intr` entry — e.g. `com24intr`,
+`lp1intr`, `nulintr` — which sets `tcbdnum` then falls into
+`devsintr`, which dispatches command `0` to `vinit`).
+
+Read `vinit` directly (`MOSDEVS.ASM`): it reads the BIOS equipment
+list (`int 11h`), derives a printer count, and calls `int 17h`
+function 1 once per detected printer — nothing in it is gated by
+`tcbdnum`, nothing in it touches a COM port, and nothing in it writes
+to the screen (no `int 10h`, no `int 21h`). It runs identically
+regardless of which of the 25 headers called it. `devstrat` is
+likewise generic — it only stores a pointer.
+
+**Hypothesis 2 is disproven for this specific symptom.** The code
+that actually executes during boot's driver-init chain-walk (`vinit`,
+command 0) is uniform across all 25 devices and cannot itself be the
+source of device-position-dependent garbling. The chain-walk symptom's
+cause is still open.
+
+**Separate, real finding, not connected to this symptom:** `input`
+(command 4) and `output` (command 8) in `MOSDEVS.ASM` compute the BIOS
+`int 14h` port number as `dl = tcbdnum - 4`, unclamped. For
+`com5intr`..`com24intr`, `tcbdnum` runs 8..27, so `dl` runs 4..23.
+Real/emulated BIOS `int 14h` serial services only define 4 ports (`dl`
+0-3, backed by a 4-entry I/O-base table at `0040:0000`-`0040:0007`).
+`dl` values above 3 read past that table into whatever else lives in
+the BIOS data area and then attempt real I/O against that garbage
+port. This can't produce the boot-time symptom under investigation —
+`input`/`output` are never called during driver init, only in
+response to an actual DOS read/write against COM5-COM24 — but it's a
+genuine latent bug worth fixing or at minimum documenting as a known
+limit: COM5-COM24 support in this driver is compile-time-present but
+runtime-broken via BIOS `int 14h`'s 4-port ceiling. Not pursued
+further this session; recorded here so it isn't lost.
+
+## Remaining leads after H1/H2
+
+With both H1 (pointer arithmetic) and H2 (per-device interrupt-handler
+code) ruled out as the boot-time cause, the bug must live either in
+`mosddint`'s own chain-walk *mechanics* (as opposed to the pointers it
+walks or the code it calls) — something position/count-dependent
+across 25 iterations of the loop itself (stack usage via `[tcbstkp]`,
+`ddrequest` reuse, `savedrvr`/`nxtdrvr` state carried between
+iterations) — or in Hypothesis 3/4 as previously documented (CPU
+errata analog; latent original-kernel bug never exercised at 25
+entries). Hypothesis 3 and 4 remain untested. A new, more targeted
+hypothesis 5 — auditing `mosddint`'s loop-carried state
+(`ddrequest`/`savedrvr`/`nxtdrvr`/`[tcbstkp]`) for anything that isn't
+correctly reset or that accumulates across repeated iterations of a
+25-entry chain specifically — is the natural next static-analysis
+target, following the same MAP/`.LST`-first approach that worked for
+H1.
