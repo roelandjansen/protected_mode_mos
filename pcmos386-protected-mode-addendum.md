@@ -1934,3 +1934,323 @@ correctly reset or that accumulates across repeated iterations of a
 25-entry chain specifically — is the natural next static-analysis
 target, following the same MAP/`.LST`-first approach that worked for
 H1.
+
+## Hypothesis 5 partially tested: manual far-call stack manipulation is balanced, not a leak
+
+Traced `ddinit0`/`ddstrat`/`ddinter`'s "emulate a far call via a
+hand-built return frame + `retf`" idiom in full, since this is the
+mechanism invoked once per header (25 times for `scbcom24`) and any
+per-iteration imbalance here would be the most direct way for a
+25-entry chain specifically to misbehave where a 1-entry chain
+wouldn't.
+
+Traced the exact stack delta through `ddstrat`'s manipulation
+(pushes `es`, the strategy offset from the header, `ss`; pops `es`)
+and confirmed it nets to zero before its `retf` — meaning the
+`retf` consumes precisely the `[IP][CS]` pair `ddinit0` set up via
+its own `push cs; call ddstrat`, so `devstrat`'s own far `ret`
+lands cleanly back in `ddinit0` right after the call, as if it had
+been an ordinary near call all along. Same pattern, same result, for
+`ddinter` → `devsintr` (near proc) → `devsintrx`'s explicit `retf`.
+Checked `devsintr`'s own internal pushes/pops (`ax bx cx dx si di es
+ds`, 8 of each) — balanced. **No stack leak found in this path** —
+it's balanced on every iteration, so it can't be the source of a
+25-iterations-only symptom by itself. Hypothesis 5, as originally
+framed (stack imbalance in the per-header call mechanism), is not
+supported by what's actually in this code.
+
+## New finding, not from static analysis: `$386.SYS` alone crashes DOSBox-under-test, independent of DPMI
+
+This session got a real boot environment running for the first
+time — not more static reading. Installed classic DOSBox 0.74 (via
+`apt`, matching the version `run.sh` already documented as verified)
+plus Xvfb for headless screen capture, built a boot floppy from this
+tree's already-built `$$MOS.SYS`/`$$SHELL.SYS`, and booted it for
+real.
+
+**Minimal `CONFIG.SYS` (`smpsize=16` / `cache=16` only, no
+`$386.SYS`, no `$DPMI.SYS`)**: boots cleanly. Screen capture shows
+exactly the round-1 marker sequence this doc already describes —
+`1[<>{}()]2[<>{}()]3[<>()<>()...many...]4[<>{}()]5[<>{}()]` — with
+**no visibly garbled or non-ASCII bytes**. It does fail shortly
+after with "Command processor cannot be found" (a separate,
+unexplained shell-load issue in this minimal config, not yet
+investigated) before reaching a prompt, so `DUMPLOG.COM` couldn't be
+run yet to pull the actual recorded diagnostic-table values. But the
+key result: round 1's marker printing itself is clean with no
+`$386.SYS`/DPMI present.
+
+**`CONFIG.SYS` with `smpsize=64` / `cache=16` / `MEMDEV=$386.SYS` /
+`FREEMEM=C0000,F0000` — deliberately still no `DEVICE=$DPMI.SYS`, to
+isolate `$386.SYS` from the already-documented DPMI/`SegToSel`
+crash**: DOSBox segfaults, confirmed reproducible across two
+independent runs (exit code 139 both times). Run under `gdb`, the
+backtrace at the moment of the fault is **~100,000+ frames deep**,
+cycling through exactly five addresses in strict repeating order
+(`0x588cd2 → 0x599698 → 0x59c471 → 0x59cad3 → 0x5889e5 →` repeat) —
+the unmistakable signature of unbounded recursion blowing the host
+stack, not a one-off fault. These are real addresses in the DOSBox
+host process itself (confirmed via `nm -D`/`addr2line` against
+`/usr/bin/dosbox` — a stripped release binary with no local symbols
+available in this sandbox's package sources, so the specific
+function names couldn't be resolved; Ubuntu's `ddebs` debug-symbol
+repository isn't in this environment's allowed network domains).
+
+**This means the previously-documented DPMI/`SegToSel` DOSBox crash
+and this one are likely the same *category* of failure but not
+necessarily the same trigger**: `$386.SYS`'s own protected-mode/
+paging setup crashes DOSBox on its own, with `$DPMI.SYS` never even
+loaded. Most likely explanation, pending symbol-level confirmation:
+DOSBox's own guest-page-fault emulation recursing on some paging
+structure `$386.SYS` sets up (a self-referential or malformed page
+directory/table entry that DOSBox's fault handler doesn't terminate
+on) — but that's reasoned from the crash's shape, not yet verified
+against source on either side (DOSBox's or `_386.ASM`'s).
+
+**Not yet resolved:** whether this crash happens *before or after*
+round 1's `initp2` call — i.e., whether the diagnostic data this
+session's whole investigation depends on (0040:00F0 through
+0040:0130) is even reachable with `$386.SYS` loaded, since crashing
+before a live prompt means `DUMPLOG.COM` can never run to retrieve
+it. Round 1 is known to run before "Loading $386.SYS" prints (an
+earlier addendum entry established this precisely), which suggests
+round 1 *does* complete before this crash — but that hasn't been
+directly confirmed, since the crash currently happens before any
+prompt is reachable regardless of what ran earlier.
+
+**Next steps for whoever continues this:**
+1. Get a symbol-equipped DOSBox (build from source with `-g`, or a
+   system where `ddebs`/debug packages are reachable) and re-run
+   under `gdb` to name the five recursing functions — that would
+   settle whether this is genuinely DOSBox's page-fault handling or
+   something else entirely.
+2. Independently of (1): try to recover the round-1 diagnostic bytes
+   despite the crash, e.g. by locating DOSBox's emulated-RAM buffer
+   in the crashed process's own memory (via `gdb`/a core dump) and
+   reading physical offset `0x4F0` (0040:00F0) directly, without
+   needing a live DOS prompt at all.
+3. Resolve the separate, currently-unexplained "Command processor
+   cannot be found" failure in the minimal (no-`$386.SYS`) config —
+   worth understanding on its own, and would give a second, safer
+   route to running `DUMPLOG.COM` if `$386.SYS` can be avoided
+   entirely for this specific diagnostic.
+
+## Follow-up this session: got a full round-1+round-2 diagnostic dump — clean on every count, no garbling reproduced
+
+Resolved item 3 above directly, then ran `DUMPLOG.COM` for real.
+
+**Shell-load fix**: the "Command processor cannot be found" failure
+was just an incomplete test floppy — the minimal build only had
+kernel+shell+`DUMPLOG`, not the full set of built `.COM`/`.SYS`/`.EXE`
+files `run.sh`'s own default path copies. Copying all of them (as
+`run.sh` does) fixed it; boots cleanly to a live `[A:\]` prompt with
+`smpsize=16`/`cache=16` only, no `$386.SYS`, no DPMI.
+
+**`DUMPLOG.COM` needed one small patch to be usable here**: it gates
+its entire dump behind `es:[0F0h]` being nonzero (a real-DPMI-host
+presence check), so with no DPMI loaded it just printed "No DPMI host
+found" and exited. Wrote a 16-byte throwaway `POKE.COM`
+(`mov ax,40h / mov es,ax / mov word ptr es:[0F0h],1 / mov ah,4Ch /
+int 21h`) to force that check to pass, run immediately before
+`DUMPLOG` in `AUTOEXEC.BAT`. This only unlocks `DUMPLOG`'s *other*
+dumps (the 0040:00F2-0132 counters/tables this investigation
+actually cares about); the first 11-byte "Counters" field it prints
+is read from the segment `POKE.COM` wrote (`1`), so that field is
+noise from this test rig, not real data — ignore it.
+
+**Decoded dump** (`smpsize=16`/`cache=16` only, no `$386.SYS`/DPMI):
+
+```
+0040:00F2 (msdd1-entry counter)      = 05
+0040:00F3 (msdd7 counter)            = 0A (10)
+0040:0100 table, slots 1-5           = 43C8 934E 9D1E 1934 24D2 (slots 6-8: 0000, unused)
+0040:0110 table, slots 1-8           = FFFF 43C8 934E 9B26 9B38 9B4A 9B5C 9B6E
+```
+
+**This resolves a real ambiguity in how the loop was being read.**
+`msdd1` (0040:00F2) is reached once per *completed dodrvr call*, not
+once per header — re-tracing the control flow confirms `msdd1` is
+only reached at the very end of a chain (error, explicit early
+termination, or the normal `nxtdrvr == -1` end). Five global calls
+happen per `initp2` pass (`scbstdcon`, `mosstdclk`, `scbcom24`,
+`scbstdblk`, `scbstdhd`) — `05` means **all five completed normally
+in round 1**, with `scbcom24`'s full chain walked to its actual end
+without error.
+
+`msdd7` (0040:00F3) reads `0A` = exactly double `msdd1`'s `05`. Traced
+why: `dodrvr` passes `[first]` (0 for round 1, set to 2 by `initp2`
+itself right before it returns) as `linktype` into `mosddint`. A
+`linktype == 2` call jumps straight from post-`ddinit0` handling to
+`msdd5` — bypassing `msdd1` and its counter entirely — but still
+reaches `msdd7` normally afterward. So `msdd7` counts *both* rounds'
+five calls each (5 + 5 = 10), while `msdd1` only counts round 1's.
+**This confirms round 2 does run in this boot, even with no
+`$386.SYS`/`MEMDEV` loaded at all** — it isn't gated on a memory
+manager being present, contrary to what this doc previously assumed.
+Both rounds completed cleanly (no error, no early termination) by
+this measure.
+
+The `0040:0100` table (indexed by `msdd1`'s counter, one slot per
+completed round-1 call): slot 3 — `scbdrvr` right after `scbcom24`'s
+call completes — is `9D1E`. That's exactly `SCBLPT1`'s address from
+`$$MOS.MAP` (confirmed independently in the Hypothesis 1 entry
+above). Worth noting precisely: `scbcom24`'s chain isn't 25 headers,
+it's 29 — the `header` macro's last entry (`prn`) chains to
+`scblpt1` (`dw mos:lpt1`), and `scblpt1` itself (declared separately,
+`dd -1`) is what actually terminates the walk. `scbdrvr` ending at
+`9D1E` after this call is exactly what "walked all the way to
+`scblpt1` and stopped there correctly" looks like — a live match to
+the static picture, not a discrepancy.
+
+The `0040:0110` table (`es:[bx]`, the header currently being
+processed, recorded per pass) reads `FFFF, 43C8, 934E, 9B26, 9B38,
+9B4A, 9B5C, 9B6E` — slot 1 (`FFFF`) is `scbstdcon`'s own terminator,
+consistent with a single-header chain. Slots 4-8 step by exactly
+`18` bytes each (`9B26 → 9B38 → 9B4A → 9B5C → 9B6E`) — precisely the
+per-header stride established in the Hypothesis 1 entry, and slot 4
+(`9B26`) is `SCBCOM24`'s own address from the map. **This is the
+chain walk actually happening live, matching the static prediction
+exactly, header after header, with no jump, skip, or garbage value
+anywhere in the recorded sequence.**
+
+**Bottom line: every diagnostic this session could extract came back
+clean.** No garbled output on screen (confirmed twice now, minimal
+config), no error status from any of the five drivers in either
+round, and a live, address-correct chain walk through `scbcom24`
+exactly matching the static structure. The originally-reported
+"garbage text and continuous beeping" has not been reproduced at all
+in this sandbox, under either tested configuration — it either needs
+`$386.SYS` and/or DPMI actually loaded (both of which currently crash
+DOSBox here before reaching a comparable state, for reasons
+documented above and likely unrelated to this specific bug), or it
+depends on something about the original reporting environment
+(DOSBox build/version, timing, `cycles=` setting) that this sandbox's
+setup doesn't reproduce. That's now the open question, not the
+chain-walk mechanics — everything mechanically traceable about
+`scbcom24`'s walk, static and live, has come back correct.
+
+## Toolchain built: UASM + Open Watcom, ready for the next session
+
+Followed `ci_prereq.sh`'s own recipe (adapted for this sandbox's
+`apt` base instead of `zypper` — package names only, the actual
+build steps are identical) to build UASM and extract Open Watcom.
+Both work: UASM (v2.53) built clean with the seven documented CFLAGS
+fixes, zero errors; Open Watcom's `wasm`/`wlink`/`wcc` extracted per
+the documented "unzip the installer directly" method. Smoke-tested
+end to end — assembled a trivial `.COM` (correct bytes), assembled to
+OMF and linked a `.EXE` with `wlink` (valid output, one benign
+warning for the toy file having no stack segment).
+
+Pruned Open Watcom from ~300MB to ~97MB (dropped other-host-platform
+binaries, the 386-protected-mode libs, docs/samples — none of it
+needed for the DOS real-mode target on a Linux host, confirmed by the
+smoke test still passing after pruning) and packaged the whole
+toolchain as `pcmos386-toolchain.tar.gz`, with a README covering
+usage and — importantly — what's *not* yet validated: this toolchain
+hasn't touched any real module from this tree yet, only a trivial
+smoke-test file. `pcmos386-linux-native-build.md`'s own concerns
+(§3.1 `at`-addressed segments, §3.2 dialect coverage, §3.4 the
+kernel's bespoke `DEBUG.COM` EXE→raw step) still apply in full for
+anything kernel-sized; they matter much less for a narrow,
+single-driver job like the one below.
+
+**Next step, concretely**: add bisecting `int 10h` teletype markers
+through `_386.ASM`'s `build_page` (the same technique already used
+successfully in `MOSDDINT.ASM` for the `scbcom24` investigation) —
+one before `test_extmem`, one after `ext_pages` is computed, one
+before the `bpg19` page-directory-build loop, one before `mov
+cr3,eax`, one before `mov cr0,eax` (paging on), one immediately after
+— reassemble `$386.SYS` with UASM/`wlink`, boot it under DOSBox the
+same way this session did, and see exactly which marker is the last
+one printed before the stack-overflow crash. That pins the crash to
+a specific instruction range in a way the host-side `gdb` backtrace
+alone couldn't, without needing DOSBox debug symbols at all.
+
+## Bisection markers added — real assembler-dialect blocker found, worked around, still mid-debug
+
+Tried the plan above. `int 10h` markers don't work here — `build_page`
+runs after the protected-mode transition, and real-mode BIOS calls
+aren't available without a V86/DPMI trampoline. Switched to writing
+directly to video memory via `gdtzero` — a permanently flat selector
+this routine never rewrites (unlike `gdtpage`, which it deliberately
+repurposes partway through, at the "rewrite the base for gdtpage to
+simplify access to the page table" step — using `gdtpage` for a
+marker after that point would misdirect the write into whatever
+`gdtpage` currently means, not video memory).
+
+Added 7 markers through `build_page`: before the meg1-read workaround
+(A), after `test_extmem` returns (B), before the `bpg19`
+page-directory-build loop (C), after it (D), before `mov cr3,eax` (E),
+before `mov cr0,eax` (F), immediately after — paging now enabled (G).
+Each is `push ax / push es / mov ax,gdtzero-gdt / mov es,ax / <write>
+/ pop es / pop ax` — self-contained, restores everything, safe to
+drop in anywhere regardless of what's live.
+
+**UASM can't assemble this file as-is.** `_386.ASM` has its own
+`nca segment at 386h` byte-offset trick (hand-encoding opcodes via
+`db offset nca:label`, expecting a small single-byte result) — UASM
+resolves this differently than MASM did, producing ~50 "Offset
+magnitude too large for specified size" errors from unrelated
+pre-existing code, nothing to do with the markers. This is exactly
+the risk `pcmos386-linux-native-build.md` §3.1 already flagged for
+`_DPMI.ASM`; now confirmed for `_386.ASM` too, and not a quick fix —
+parked, not solved.
+
+**Worked around it entirely**: ran the original `MASM.EXE`/`LINK.EXE`
+(from `BIN/` in this tree) directly under DOSBox instead, using
+DOSBox's local-directory mount (`mount c <hostdir>`) rather than a
+floppy image, so build output lands straight back on the host
+filesystem. Zero dialect risk, since it's the literal original
+toolchain. Build script: `masm _386;` → `link _386;` → `exe2bin _386
+_386.sys`. Worked cleanly — "0 Warning Errors, 0 Severe Errors" from
+MASM, one benign "no stack segment" warning from LINK (same as the
+toy smoke test earlier), `BUILD_OK`. This is now the established
+recipe for rebuilding anything in this tree without fighting UASM's
+dialect gaps: real toolchain, running under DOSBox, mounted host
+directory for file exchange.
+
+**First bisection attempt was a false positive, caught before being
+reported as fact.** Used single-letter markers (`A` through `G`) and
+searched the crashed process's heap via `gdb`'s `find` post-mortem
+(the crash is a real, reproducible SIGSEGV — confirmed at the same
+address, `0x5555555889e2`, every run). Found what looked like a clean
+`A B C D E F` sequence with `G` missing — but a wider memory dump
+showed the ascending pattern continuing past `G` into `H I J`, which
+were never written. It's an incidental ascending-byte pattern already
+present in that heap region that happened to collide with sequential
+ASCII markers. Genuinely useful lesson, not just a wasted attempt:
+single-sequential-letter markers are a bad choice for this kind of
+forensic search, because "looks like a plausible sequence" is exactly
+what a false positive looks like too.
+
+**Second attempt found nothing at all**, using distinctive 4-byte
+tags (`ZQA1`, `ZQB2`, ... `ZQG7`) instead, spaced well apart. Searched
+every large (>5MB) `rw-p` region in the crashed process, including the
+most likely candidate for DOSBox's guest-RAM allocation. Zero matches
+for any tag. Root cause, found by re-checking the offsets rather than
+the search method: the markers were written to `0xB9000+`, which is
+**past the visible 80×25 text screen** (`0xB8000`-`0xB8FA0`). Likely
+not backed the same way as the visible region, or aliased elsewhere —
+either way, not a reliable place to look for a write that actually
+happened.
+
+**Fixed and re-verified in source, not yet reassembled or tested**:
+moved all 7 markers into the visible screen (bottom row, `0xB8F00`
+through `0xB8F67`), using correct 2-byte char+attribute cell pairs
+(the earlier 4-byte-per-cell spacing was never confirmed real — likely
+an artifact of the same heap coincidence that produced the first false
+positive) instead of the untested stride guess from the second
+attempt. All 7 markers confirmed in place in
+`/home/claude/pm_work/build/latest/_386.ASM` with tags `ZQA1`...`ZQG7`
+at `0xB8F00`, `0xB8F10`, `0xB8F20`, `0xB8F30`, `0xB8F40`, `0xB8F50`,
+`0xB8F60`.
+
+**Next step, concretely**: reassemble with the MASM-under-DOSBox
+recipe above (`dobuild.bat` in `build/latest/`, already set up),
+rebuild the boot floppy with the fresh `$386.SYS`
+(`smpsize=64/cache=16/MEMDEV=$386.SYS/FREEMEM=C0000,F0000`, no DPMI),
+and boot it. Since the markers are now genuinely inside the visible
+screen, a plain screenshot should show whichever ones got written
+before the crash — no `gdb` memory forensics needed this time, which
+removes the whole class of false-positive/false-negative risk both
+prior attempts ran into.
