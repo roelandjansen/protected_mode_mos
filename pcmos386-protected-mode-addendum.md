@@ -2254,3 +2254,188 @@ screen, a plain screenshot should show whichever ones got written
 before the crash — no `gdb` memory forensics needed this time, which
 removes the whole class of false-positive/false-negative risk both
 prior attempts ran into.
+
+## Major finding — real DOSBox Staging (with symbols) gives a definitive answer, no bisection markers needed
+
+Before finishing the marker rebuild, the person corrected an important
+environment mismatch: the pre-session work (and the original bug
+report) was done under **DOSBox Staging** — on openSUSE, the package
+literally named `dosbox` is Staging, not classic DOSBox, a point
+`run.sh` itself already documented but that got missed when this
+sandbox's `apt install dosbox` silently pulled classic 0.74 instead.
+Different codebase, different (much more actively developed) CPU
+core — worth checking before trusting any more classic-0.74 results.
+
+Downloaded the official DOSBox Staging 0.83.0 Linux release directly
+(`dosbox-staging-linux-x86_64-v0.83.0.tar.xz`, from
+`dosbox-staging.org`/GitHub releases — statically linked, no install
+needed). Boot syntax differs from classic DOSBox (`run.sh` already
+knew this too): Staging doesn't reliably support the `boot -l a`
+autoexec-command approach — the floppy image has to be passed
+directly as a command-line argument to `dosbox` instead.
+
+**Same crash reproduces under Staging.** `MEMDEV=$386.SYS`, no DPMI,
+`memsize=64` — segfaults, confirmed via a clean `timeout`-wrapped run
+(`Segmentation fault`, not a hang). This matters: the bug isn't an
+artifact of ancient classic DOSBox's implementation specifically — it
+reproduces on the current, well-maintained fork too. Along the way,
+also saw an "Illegal write/read to 4000000" (exactly the configured
+64MB memory boundary) right before the crash — that's `test_extmem`'s
+own deliberate wraparound probe doing exactly what it's supposed to,
+not a bug, and not what causes the crash.
+
+**Staging's release build has real symbols, unlike the stripped
+classic-0.74 package — and that's the actual breakthrough.** A `gdb`
+backtrace at the crash point reads, top of stack down:
+
+```
+CPU_Interrupt()
+InitPageHandler::writed()
+CPU_Push32()
+CPU_Interrupt()          <- repeats, 26,146 times, until the host
+InitPageHandler::writed()   stack overflows and segfaults
+CPU_Push32()
+...
+```
+
+This is a complete, definitive answer, not a guess. `CPU_Interrupt`
+is delivering some exception (raised right after paging is enabled —
+almost certainly a page fault, `INT 0Eh`). Delivering it means
+pushing an interrupt frame via `CPU_Push32`. That push lands on a
+page still served by `InitPageHandler` — DOSBox's placeholder handler
+for a page that hasn't yet been resolved to a real, backed memory
+handler. Writing to an `InitPageHandler`-backed page itself raises
+*another* fault, which `CPU_Interrupt` tries to deliver by pushing
+*another* frame — onto the same still-unresolved page. Forever.
+
+**In plain terms: at the moment paging is enabled, the current stack
+(`SS:ESP`) points to a linear address that `$386.SYS`'s own page
+tables don't actually map.** The exception handler can't deliver the
+very first fault because the stack it needs to deliver that fault
+*onto* is itself unmapped — so every attempt to report the problem
+becomes a new instance of the same problem. This is fully consistent
+with, and gives the mechanism for, the "self-reference" theory this
+doc considered and set aside earlier (that theory was about the page
+*directory* being unmapped, which turned out fine — this is the same
+failure shape, but for the *stack*, which is the piece that was never
+actually checked before now).
+
+**Next step, concretely, and much narrower than before:** find out
+why `SS:ESP` isn't covered by the identity map. The `build_page`
+identity-mapping loop (`bpg6`, already read in earlier entries) covers
+linear `0`-`~0x10FFFF` (the first 1MB plus "high 60K"). Check where
+the driver's own stack actually lives when `mov ax,gdtdata-gdt / mov
+ss,ax` sets it up (well before `build_page`, in this driver's own
+init) — if `$386.SYS` (or its data segment specifically) gets loaded
+somewhere outside that identity-mapped range (high memory, or past
+the "high 60K" boundary), that would explain everything observed this
+entire investigation: round 1/2 clean, static page-table construction
+clean, the crash landing exactly at paging-enable, and nothing about
+`scbcom24` or the kernel's own chain-walk being at fault at all. The
+bisection markers already patched into `_386.ASM` are no longer
+needed for this — this backtrace answers the "which instruction"
+question more precisely than they could have.
+
+## Followed it up: confirmed the fault-delivery path, found a concrete, specific candidate for why the stack is unmapped
+
+Checked whether vector 0Eh (page fault) is delivered via a task gate
+(which would switch to a *different* TSS's stack, unrelated to the
+driver's own `SS:ESP`) or an interrupt gate (which uses the current
+stack). The IDT entry's access byte (`0EEh` = `P=1, DPL=3, S=0,
+TYPE=1110b`) is type `0xE` — a 32-bit **interrupt gate**, not a task
+gate (`0x5`). So it's confirmed: fault delivery pushes the exception
+frame onto whatever `SS:ESP` currently is, no TSS switch involved.
+That means the earlier reasoning holds — the question really is
+whether `SS:ESP` at that moment is covered by the page tables.
+
+Traced where `SS:ESP` actually comes from. `build_page` sets `ss ->
+gdtdata` and `esp -> offset mmgrp:pt_stack` right before calling
+`test_extmem` (both already read in earlier entries). `gdtdata`'s
+*base* isn't fixed at assembly time — it's patched at load time
+(`spiskip:`, ~line 9336-9347): `ax = cs`, shifted into a `dl:ax`
+linear-address "relocation factor," added into every GDT descriptor's
+base field, `gdtdata` included. So `SS:ESP`'s actual linear address is
+`CS*16 + pt_stack`'s offset — wherever DOS actually loaded this
+driver, plus a small fixed offset. This part of the mechanism is
+sound in general (it's exactly how you relocate a position-independent
+real-mode-loaded driver's descriptors) — the question is just whether
+*this* load address lands inside the identity map.
+
+Confirmed the identity map's exact boundary precisely (`bpg6`,
+`256+16` PTEs × 4096 bytes/page): it covers linear `0x000000` through
+`0x10FFFF` inclusive — all of conventional memory (`0`-`0x9FFFF`) and
+the UMB range (`0xA0000`-`0xFFFFF`), plus only `0x10000` bytes (64K)
+past the 1MB mark. A driver loaded anywhere in conventional memory or
+a UMB is safely inside this. **A driver loaded into HMA (the 64K-ish
+area starting just above `0x100000`, a common place for memory-manager
+drivers specifically — loading a MEMDEV driver into HMA to save
+conventional memory is exactly the kind of thing a well-configured
+system does) sits right at the edge of this boundary.** If `$386.SYS`
+loaded high enough that `CS*16 + pt_stack's offset` lands past
+`0x10FFFF`, the stack would be unmapped, and this whole failure
+follows exactly as observed — while `build_page`'s earlier code
+(everything up through the page-directory build, all confirmed clean
+both statically and via the crash-free markers A-D) works fine simply
+because paging isn't active yet, so linear and physical addressing
+are still the same thing and nothing checks against the page tables.
+
+**Not yet directly confirmed** — this needs an actual runtime check of
+where this build's `$386.SYS` loads (its segment/`CS` value) and
+where `pt_stack` ends up relative to `0x10FFFF`, to know whether this
+candidate is the real cause or just a strong hypothesis. Two ways to
+get that, either would settle it:
+1. Extend `DUMPLOG`-style instrumentation (or the bisection markers
+   already in place) to record `CS` itself right at driver entry —
+   cheap, and this session already has the whole
+   build/floppy/boot/read pipeline working end to end.
+2. Simpler and more direct: this session's own earlier finding (the
+   "0040:0100 table" entry) already showed round 1 completing with
+   `smpsize=16`; if a `smpsize=64` boot (used throughout this `$386.SYS`
+   investigation) causes the kernel to load *this* driver differently
+   — e.g. HMA placement being tied to `smpsize` or to
+   `FREEMEM=C0000,F0000` (also present in every crashing config tested)
+   — checking whether the crash still reproduces with `FREEMEM`
+   removed, or with a smaller `smpsize`, would test the theory
+   without any new instrumentation at all.
+
+## Tested option 2 — FREEMEM and smpsize both ruled out
+
+**`FREEMEM=C0000,F0000` removed entirely** (otherwise identical:
+`smpsize=64/cache=16/MEMDEV=$386.SYS`, DOSBox Staging, clean
+`timeout`-wrapped run): same crash, confirmed via the log's identical
+"Illegal write/read to 4000000" boundary probe immediately followed
+by `Segmentation fault`. FREEMEM isn't what puts the driver wherever
+it's landing.
+
+**`smpsize=16` instead of `64`** (matching the value used in the one
+config that boots cleanly without `$386.SYS` at all, otherwise same):
+still crashes. The `timeout`-wrapped run's own backtrace looked
+completely different at first glance (`SoundBlaster::~SoundBlaster()`,
+`AUTOEXEC_SetVariable` — worth checking rather than assuming, so
+re-ran clean under `gdb` without the `timeout -s KILL` racing against
+DOSBox's own shutdown) — and under `gdb` it's the identical
+`CPU_Interrupt`/`InitPageHandler::writed`/`CPU_Push32` recursion as
+every other run. The apparently-different first backtrace was a red
+herring from `SIGKILL` landing mid-cleanup, not a second bug — good
+example of why re-confirming under a clean debugger beats trusting a
+timeout-truncated stack trace.
+
+**Conclusion: neither `FREEMEM` nor `smpsize` control whether this
+happens.** The crash is identical across all four combinations tested
+now (with/without `FREEMEM`, `smpsize` 16 or 64). That doesn't kill
+the "stack lands outside the identity map" mechanism — the
+interrupt-gate tracing and the exact `0x10FFFF` boundary are still
+solid, independently-confirmed facts — but it does mean wherever
+`$386.SYS`'s stack actually ends up isn't something these two config
+knobs influence. Looks like it may be a fixed property of how this
+particular driver loads (or of the identity-map boundary itself)
+rather than something dependent on how much memory-pool or
+extended-memory configuration surrounds it.
+
+**Next step**, since the cheap config-based test came back negative:
+actually find out where `$386.SYS` loads. `DOS_Shell::ExecuteProgram`
+appears in every backtrace's tail — DOSBox Staging's symbols mean the
+loader's own state (segment/`CS` at driver entry) may be directly
+inspectable via `gdb` breakpoints on DOS loading functions, without
+needing to modify `_386.ASM` at all. That would settle the HMA theory
+directly rather than by elimination.
