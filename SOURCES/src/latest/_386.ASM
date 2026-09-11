@@ -5171,6 +5171,25 @@ jeinat:
 ;	   common interrupt logic for virtual-8086 tasks
 ;--------------------------------------------------------------------
 contirq:
+
+; FIX (protected-mode I/O trap): if the reflected interrupt has no
+; registered v86 handler in ivtable, do NOT fall through to loading a
+; garbage vector from the real-mode IVT (which sent the task to 0:0
+; and crashed).  Instead switch the task to native mode so the MOS
+; kernel services the trapped I/O, matching the ei38->nmswitch path.
+; Stack here is [bp,ds,es,cx,bx] which is exactly what nmswitch expects.
+	xor	bx,bx
+	db	67h			; 16-bit address
+	mov	bl,ss:[iveccode]
+	shl	bx,2			; vector*4 index into ivtable
+	db	67h			; 16-bit address
+	mov	cx,ss:[bx+ivtable]	; low word of the 32-bit vector
+	db	67h			; 16-bit address
+	or	cx,ss:[bx+ivtable+2]	; or in the high word
+	jnz	cirqhndl		; a handler is registered: proceed
+	db	66h
+	jmp	nmswitch		; none registered: hand to native mode
+cirqhndl:
 	push	dx
 
 ; flags to stack
@@ -9665,6 +9684,26 @@ build_page:
 	mov	word ptr [oldnmi],ax
 	mov	word ptr [idt+16],offset mmgrp:newnmi  ; set to iret for mem tests
 
+; TEMPORARY diagnostic: bisection marker 'A' -- build_page entered,
+; before the meg1-read workaround / test_extmem. Written directly to
+; video memory via gdtzero (permanently flat, unlike gdtpage which
+; this routine rewrites partway through). See protected-mode
+; assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f00h],'Z'
+	mov	byte ptr es:[0b8f01h],07h
+	mov	byte ptr es:[0b8f02h],'Q'
+	mov	byte ptr es:[0b8f03h],07h
+	mov	byte ptr es:[0b8f04h],'A'
+	mov	byte ptr es:[0b8f05h],07h
+	mov	byte ptr es:[0b8f06h],'1'
+	mov	byte ptr es:[0b8f07h],07h
+	pop	es
+	pop	ax
+
 ; found that I had to read each dword in the first page
 ; of meg1 to satiate the compaq.  compaq tells me that some early
 ; models of the 16Mhz 386 (rev A motherboards) had a problem with
@@ -9697,6 +9736,23 @@ bpg1:
 
 	mov	ebx,100000h
 	call	test_extmem
+
+; TEMPORARY diagnostic: bisection marker 'B' -- test_extmem returned.
+; See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f10h],'Z'
+	mov	byte ptr es:[0b8f11h],07h
+	mov	byte ptr es:[0b8f12h],'Q'
+	mov	byte ptr es:[0b8f13h],07h
+	mov	byte ptr es:[0b8f14h],'B'
+	mov	byte ptr es:[0b8f15h],07h
+	mov	byte ptr es:[0b8f16h],'2'
+	mov	byte ptr es:[0b8f17h],07h
+	pop	es
+	pop	ax
 
 ; at this point, ebx holds the number of pages of extended memory
 ; found within the first range (2nd range search is later).
@@ -9820,6 +9876,24 @@ bpg17:
 	add	edi,4			; next pte
 	loop	bpg17
 
+; TEMPORARY diagnostic: bisection marker 'C' -- pte's built, about to
+; build the page directory itself. See protected-mode assessment
+; addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f20h],'Z'
+	mov	byte ptr es:[0b8f21h],07h
+	mov	byte ptr es:[0b8f22h],'Q'
+	mov	byte ptr es:[0b8f23h],07h
+	mov	byte ptr es:[0b8f24h],'C'
+	mov	byte ptr es:[0b8f25h],07h
+	mov	byte ptr es:[0b8f26h],'3'
+	mov	byte ptr es:[0b8f27h],07h
+	pop	es
+	pop	ax
+
 ; time to build the page directory
 
 	mov	ecx,[pt_pages]		; one pde per page table page
@@ -9830,6 +9904,23 @@ bpg19:
 	stosd				; write the pde
 	add	eax,1000h		; advance the pta by 1
 	loop	bpg19
+
+; TEMPORARY diagnostic: bisection marker 'D' -- page directory build
+; loop completed. See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f30h],'Z'
+	mov	byte ptr es:[0b8f31h],07h
+	mov	byte ptr es:[0b8f32h],'Q'
+	mov	byte ptr es:[0b8f33h],07h
+	mov	byte ptr es:[0b8f34h],'D'
+	mov	byte ptr es:[0b8f35h],07h
+	mov	byte ptr es:[0b8f36h],'4'
+	mov	byte ptr es:[0b8f37h],07h
+	pop	es
+	pop	ax
 
 
 ; rewrite the base for gdtpage to simplify access to the page table
@@ -9880,10 +9971,64 @@ bpg21:
 
 	mov	eax,[pd_addr]		; get phyadr of the page direcotry
 	mov	dword ptr [t2cr3],eax	; set into tss2
+
+; TEMPORARY diagnostic: bisection marker 'E' -- about to load cr3.
+; See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f40h],'Z'
+	mov	byte ptr es:[0b8f41h],07h
+	mov	byte ptr es:[0b8f42h],'Q'
+	mov	byte ptr es:[0b8f43h],07h
+	mov	byte ptr es:[0b8f44h],'E'
+	mov	byte ptr es:[0b8f45h],07h
+	mov	byte ptr es:[0b8f46h],'5'
+	mov	byte ptr es:[0b8f47h],07h
+	pop	es
+	pop	ax
+
 	mov	cr3,eax 		; and into cr3
+
+; TEMPORARY diagnostic: bisection marker 'F' -- cr3 loaded, about to
+; enable paging via cr0. See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f50h],'Z'
+	mov	byte ptr es:[0b8f51h],07h
+	mov	byte ptr es:[0b8f52h],'Q'
+	mov	byte ptr es:[0b8f53h],07h
+	mov	byte ptr es:[0b8f54h],'F'
+	mov	byte ptr es:[0b8f55h],07h
+	mov	byte ptr es:[0b8f56h],'6'
+	mov	byte ptr es:[0b8f57h],07h
+	pop	es
+	pop	ax
+
 	mov	eax,cr0
 	or	eax,ebx 		; set the "pg" bit (unless error)
 	mov	cr0,eax 		; enable paging
+
+; TEMPORARY diagnostic: bisection marker 'G' -- paging just enabled,
+; still alive. See protected-mode assessment addendum.
+	push	ax
+	push	es
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	mov	byte ptr es:[0b8f60h],'Z'
+	mov	byte ptr es:[0b8f61h],07h
+	mov	byte ptr es:[0b8f62h],'Q'
+	mov	byte ptr es:[0b8f63h],07h
+	mov	byte ptr es:[0b8f64h],'G'
+	mov	byte ptr es:[0b8f65h],07h
+	mov	byte ptr es:[0b8f66h],'7'
+	mov	byte ptr es:[0b8f67h],07h
+	pop	es
+	pop	ax
+
 	mov	ax,gdttss1-gdt
 	ltr ax				; load the task register - vm prep
 	db	66h,0eah		; direct interseg jump to
