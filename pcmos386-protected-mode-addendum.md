@@ -3303,3 +3303,496 @@ second. The single-step of `0x34E7` is a ~5-line `gdb` script
 `stepi` and re-read `cr2`/regs). Prefer that over any further static
 argument about what "should" happen. The measured facts above stand;
 the encoding root-cause does not until the single-step confirms it.
+
+## The full cascade sequence measured from the first fault: `#GP → 6320× #UD → 26307× #PF`; the `#GP` is on `IN AL,0x60`
+
+Logged every `CPU_Exception` from the very first (non-stopping
+breakpoint + continue). Total 32,628 exceptions before host-stack
+overflow, in three phases:
+- **1× `#GP` (0x0D)** — the trigger. `CS=0x6c4d EIP=0x66e9 SS=0x6b3d
+  ESP=0xe4b err=0`.
+- **6,320× `#UD` (0x06)** — invalid opcode, all at `CS=0x0000
+  EIP=0x04F5`.
+- **26,307× `#PF` (0x0E)** — page faults (the phase I'd been
+  analyzing in isolation; it's the *tail* of the cascade, not the
+  start — so the earlier `cr2=0xF5001093`/`eicommon`/`trash1` analysis
+  was looking at late wreckage, not the trigger).
+
+**The `#GP` faulting instruction, read from guest memory
+(self-consistent decode, trustworthy):** bytes at the fault are
+`E4 60` = **`IN AL, 0x60`** — a read from the keyboard-controller data
+port. A protected-mode multitasker like PC-MOS routinely traps
+IOPL-sensitive `IN`/`OUT` to virtualize hardware, so **this `#GP` is
+very plausibly by-design** — PC-MOS's `#GP` handler (`entint0d`) is
+supposed to catch it, emulate the port read, and resume. If so, the
+bug is not the `#GP` but the **failure to service it**: instead of
+running the handler cleanly, control ends up at `CS=0x0000 EIP=0x04F5`
+executing garbage (`#UD` flood), then later the `#PF` flood.
+
+**Genuinely unresolved / do NOT over-trust (struct-offset caution
+again):** at the `#GP` I read `pmode=1` (from `cpu+24`) yet
+`Segs.phys[cs]=0x6c4d0 = 0x6c4d<<4` (the *real-mode* addressing rule).
+Those are contradictory — a true PM selector would use a descriptor
+base, not `CS<<4`. And `CS=0x6c4d` as a selector has index `0x6c48`,
+far past the GDT limit `0x147`. So either the `pmode` read is at the
+wrong offset (my recurring struct-layout trap), or `phys[cs]` is stale
+at the capture point, or `CS` is already garbage before the `#GP`.
+I cannot currently tell which, and each implies a different story:
+- If `pmode=1` is real and `CS=0x6c4d` is a valid-in-context value,
+  the `IN` interpretation holds and the fault is an expected I/O trap.
+- If `CS=0x6c4d` is already an out-of-range selector, corruption
+  happened *before* this `#GP` and the `#GP` is itself the "bad CS"
+  symptom, not an I/O trap — a different root cause entirely.
+
+**What IS solid this session:**
+- The true fault order is `#GP` (once) → `#UD` (6320×) → `#PF`
+  (26307×). Any analysis fixating on the `#PF` phase (including my
+  `eicommon`/`trash1`/`dvstat1` work) was on the tail, not the cause.
+- The one `#GP` is on `IN AL,0x60` (bytes verified).
+- Post-`#GP`, control reaches `CS=0x0000 EIP=0x04F5` — a null code
+  selector — which is the concrete corruption to explain.
+
+**Correct next step, and a discipline note:** the recurring failure
+mode this whole sub-investigation is *me reading guest CPU state via
+guessed C++ struct offsets and getting contradictions*. Stop doing
+that. Two reliable alternatives: (a) read only values that come from
+DOSBox's own globals with known layout (`paging.cr2` at +4, `MemBase`,
+guest RAM contents) or from self-consistent instruction-byte decodes;
+(b) build DOSBox Staging from source with `-g` / debug info so
+`Segs`, `cpu_regs`, and `cpu` print with real field names and no
+offset guessing — given how many hours have gone into fighting
+offsets, this build is now clearly worth the up-front cost. The single
+decisive question to answer next, with a trustworthy method: **is
+`CS=0x6c4d` a legitimate PC-MOS code selector at the moment of the
+`#GP` (⇒ expected I/O trap, bug is in handler delivery) or already an
+out-of-range garbage selector (⇒ corruption precedes the `#GP`)?**
+Resolve that before proposing any fix — it decides which of two very
+different bugs we're chasing.
+
+## RESOLVED with a debug build: the machine is in V86 mode; the `#GP` on `IN AL,0x60` is a BY-DESIGN I/O trap — the bug is in servicing it
+
+Built DOSBox Staging from source at the exact release commit
+(`7b40053b` = v0.83.0, matching the analyzed binary) with full debug
+info (`debug-linux` preset, system libs). This ends the struct-offset
+guessing that forced three prior retractions — `gdb` now prints
+`Segs`, `cpu_regs`, `cpu`, `paging` with real field names.
+(Build notes: needed `iir1`, `libmt32emu`, `zlib-ng` built from source
+— none in apt; `asio`/SDL2/opusfile/speexdsp/libpng from apt; stubbed
+the `/usr/bin/fluidsynth` file-check and two newer-fluidsynth-API MIDI
+calls the older system lib lacks — all MIDI/audio, irrelevant to the
+CPU core; `-DOPT_TESTS=OFF` to drop gtest. Binary at
+`dosbox-staging-src/build/debug-linux/dosbox`.)
+
+**The named-field read at the first exception settles it:**
+- `cpu.exception = {which=13, error=0}` — `#GP`, error code 0.
+- `cpu.pmode = true`, **but** `cpu.code.big = false` and
+  `Segs.phys[cs] = Segs.val[cs] << 4` (real-mode addressing).
+- `cpu_regs.flags = 0x23256` → **VM bit (0x20000) = 1**, `IOPL = 3`,
+  `cpu.cpl = 3`.
+
+**So the CPU is in Virtual-8086 mode.** The earlier "contradiction"
+(`pmode` true yet `CS<<4` addressing, `CS=0x6c4d` "past the GDT
+limit") was never corruption or a bad read — it is exactly the
+*signature of V86 mode*, where `pmode` is on but segments use real-
+mode `<<4` addressing and 16-bit default size, and a "selector" value
+like `0x6c4d` is really a V86 segment (linear `0x72bb9`). Every prior
+entry that treated `CS=0x6c4d` as a protected-mode selector index, or
+as garbage, was misreading V86 state. This is the correct frame.
+
+**The `#GP` is a deliberate I/O trap.** The faulting instruction is
+`IN AL,0x60` (keyboard data port), executing in V86 mode. In V86 with
+IOPL=3, port access is still gated by the **TSS I/O-permission
+bitmap** — so PC-MOS marks port `0x60` non-permitted precisely to
+trap and virtualize keyboard reads for its tasks. This `#GP` is
+*supposed* to happen; PC-MOS's `#GP` handler is meant to catch it,
+emulate the `IN`, and resume the V86 task. **The bug is not the `#GP`
+— it is that servicing/delivering it fails**, which then produces the
+`CS=0x0000 EIP=0x04F5` `#UD` flood and the eventual `#PF` flood.
+
+**This is the answer to the blocking question from the previous
+entry:** `CS=0x6c4d` is a *legitimate V86 segment*, not an out-of-
+range garbage selector. So we are in the "handler delivery is broken"
+branch, definitively — not the "corruption precedes the `#GP`" branch.
+No more ambiguity on that fork.
+
+**Next step (now on solid ground):** trace what happens when this
+`#GP` is delivered. In V86 mode a `#GP` from an IOPL/bitmap violation
+must vector through the IDT to a **ring-0** handler, which requires a
+stack switch via the TSS (`SS0:ESP0`). The likely failure is right
+there: the TSS's `SS0:ESP0`, or the `#GP` IDT gate's target CS/EIP,
+or the DPL/type of the gate, is wrong — so delivery either faults
+again or lands at the garbage `CS=0:EIP=0x4F5`. With the debug build,
+read at the `#GP`: `cpu.gdt`/`cpu.idt` bases and the vector-0x0D gate
+(via `cpu.idt.GetDescriptor`), the current TSS (`cpu.tr` / task
+register) and its `SS0:ESP0`, and single-step the delivery to see the
+first bad load. That pinpoints the exact malformed descriptor/TSS
+field — the thing to fix.
+
+## Debug build in hand: `#GP` delivery is CORRECT; the corruption is a guest far-CALL through a NULL (0000:0000) table entry inside the handler
+
+Used the debug build (named fields, trustworthy) to trace delivery
+and beyond. Two clean results:
+
+**1. The `#GP` is delivered perfectly.** Broke at the interrupt-gate
+commit (`cpu.cpp:1114`) for the first `#GP`: `gate_sel=0x18
+gate_off=0x2755 cpl=0` ⇒ new `CS=0x18 EIP=0x2755` (= `entint0d`, the
+correct handler), with a valid ring-0 stack `SS=0x20 ESP=0xf88` pulled
+from the TSS. None of DOSBox's many delivery `CPU_CHECK_COND`/`E_Exit`
+guards fired. **So handler *entry* is not the bug** — the IDT gate,
+the TSS `SS0:ESP0`, the descriptors are all fine. This rules out the
+entire "malformed IDT/TSS/gate delivery" branch that the previous
+entry proposed as next. Good that it was checked rather than assumed.
+
+**2. The corruption is a guest far-CALL to `0000:0000`.** Set a
+hardware watchpoint on guest `Segs.val[cs]` becoming 0. It fires
+inside `SegSet16(index=cs, val=0)`, called from
+**`CPU_CALL(use32=false, selector=0, offset=0, oldeip=0x65E0)`**
+(`cpu.cpp:1569`). So a guest **`CALL FAR 0000:0000`** executed — the
+handler (or code it reached) dispatched through a pointer/table entry
+that was null. `SegSet16(cs,0)` sets `CS=0`, `EIP=0`, and from there
+execution is in the weeds ⇒ the `#UD`/`#PF` floods.
+
+**Important caveat on this specific capture:** the watchpoint hit was
+a *late* CS→0 (the guest was already at `CS=0xD230:EIP=0x65E0`, an
+address beyond the module's `0x52BA` max — i.e. execution had already
+escaped into garbage before this particular null-call). The condition
+`Segs.val[cs]==0` catches *every* CS→0, and this was not guaranteed to
+be the first. But the mechanism it reveals — **execution reaching a
+`CALL FAR`/`JMP FAR` whose target operand is `0000:0000`** — is
+almost certainly the same failure at the true first occurrence, just
+needs catching at its first instance.
+
+**This points squarely back at the handler's dispatch tables.**
+`entint0d` (now confirmed entered correctly) decodes the trapped
+instruction and dispatches through jump tables: `jmp ss:[bx+intable2]`
+at `0x278D` (indexed by the trapped opcode via `intable1`), plus
+`calcinad`/`intable2` machinery. If the trapped instruction's opcode
+indexes a table slot that is zero/uninitialised — or the index is
+computed wrong — the dispatch jumps/calls to `0000:0000`. The trapped
+instruction here is `IN AL,0x60` (opcode `E4`); the handler comment at
+`0x2780` even notes "presumes all exception op codes are greater than
+127" and `test bl,80h` — `E4` has bit 7 set, so it proceeds into the
+`intable1`/`intable2` lookup. **A wrong/empty `intable2` entry for
+the `IN` opcode is the prime suspect for the null far-call.**
+
+**Next step, precise:** catch the *first* CS→0 (not a later one) —
+condition the watchpoint additionally on being early, e.g. break at
+the `#GP` gate commit first, then `delete` and set the CS watch so it
+only sees post-handler-entry writes, and stop at the FIRST one.
+Capture guest `CS:EIP` of the `CALL FAR 0:0` at that first instance
+and decode against `_386.LST` — it will be one of the
+`jmp ss:[...intable2]` / `call` dispatch sites in `entint0d`'s
+`IN`/`OUT` emulation path. Then read the actual `intable1`/`intable2`
+contents in guest memory for the `E4` (`IN AL,imm8`) opcode slot to
+see whether the table entry is genuinely null (⇒ the OS's I/O-trap
+table is incomplete for this port/opcode) or the index is
+miscomputed. Either way it is now a specific, bounded source-level
+defect in the `#GP` I/O-emulation dispatch — and the whole thing is on
+trustworthy, named-field footing at last.
+
+**Status:** the V86 I/O-trap framing is solid; delivery is proven
+correct; the fault is a null far-transfer in the handler's dispatch.
+One more targeted capture (first CS→0 + the relevant table bytes)
+should expose the exact table/index bug to fix.
+
+## The handler works CORRECTLY through instruction-decode and dispatch — the fault is in the I/O emulation / V86-resume path, not the dispatch tables
+
+More debug-build tracing, with one theory empirically refuted (good —
+checked instead of asserted):
+
+**Refuted: the `calcinad` `shl bx,4` truncation theory.** Static
+analysis suggested `calcinad`'s V86 path (`0x27B0-0x27C1`) computes the
+trapped-instruction linear address with 16-bit ops (`mov bx,[s0cs] /
+shl bx,4 / add bx,[s0ip]`), truncating `CS<<4` for `CS>0xFFF`.
+Predicted the handler would read instruction bytes from the wrong
+address. **Measured the opposite:** `parm6adr` (the 4 instruction bytes
+the handler captured) reads `E4 60 3C FA` = `IN AL,0x60` — exactly the
+real trapped instruction. So `calcinad` computed the address
+correctly and the decode is fine. The truncation either doesn't occur
+as predicted or the high bits were already right. Another static
+guess that the emulator refuted — the discipline of measuring first
+keeps paying off.
+
+**What actually works (all measured with the debug build):**
+- `#GP` delivered correctly to `entint0d` (`CS=0x18:EIP=0x2755`, valid
+  ring-0 stack).
+- Handler correctly identifies the trapped `IN AL,0x60` (opcode `E4`,
+  captured in `parm6adr`).
+- Dispatch tables are correct: `intable1[E4-128]` → `t2inalp` →
+  `doinali` (the `IN AL,imm8` emulation). Read the tables; the `E4`
+  slot is a valid pointer, not null.
+
+**Traced the emulation path for `IN AL,0x60`:** `doinali` (`0x2874`)
+sets `dx=0x60`, checks the few directly-emulated ports (DMA `0x04`,
+`0x81`) — `0x60` matches none — so it falls to `jmp doinout`
+(`0x2956`). `doinout` saves the instruction bytes + a computed MOS
+error code (`parm6adr`/`parm6ec`) and `jmp entirq` — "enter MOS error
+handler" — handing the trapped keyboard read **up to the PC-MOS kernel**
+to service. The alternative exit, `realret` (`0x2972`), restores the
+saved V86 state (`s0cs`/`s0ip`/`s0ss`/`s0sp` at `0x0F90`/`0x0F8C`/
+`0x0F9C`/`0x0F98`) and IRETs back to the V86 task.
+
+**So the null far-call to `0000:0000` originates either in `entirq`
+(the hand-off into the kernel's I/O-virtualization) or after a resume
+that restored corrupted `s0cs:s0ip`.** The captured garbage state
+(`CS=0xd230:EIP=0x65e0`, still V86) is a *resumed V86 task at the wrong
+address* — consistent with the handler IRET-ing back to a corrupted
+`s0cs:s0ip`, OR the kernel hand-off (`entirq`) transferring through a
+bad vector. Both are one level deeper than the (correct) `#GP`
+handler front-end.
+
+**Next capture, precise:** the fault is now bracketed to `entirq` /
+the kernel I/O hand-off and the `s0cs:s0ip` V86 resume values. Read,
+at the moment `doinout` runs: the `s0cs`/`s0ip` saved values (are they
+the correct V86 return `CS=0x6c4d:EIP=0x66eb`, i.e. past the 2-byte
+`IN`?) and trace `entirq` to see if it transfers through a null/bad
+kernel vector. If `s0cs:s0ip` is already `0xd230:0x65e0`-ish garbage,
+the corruption is in how the V86 fault frame was saved (back in
+`eicommon`/the exception prologue) — which would finally vindicate a
+form of the earlier `eicommon` suspicion, but now precisely as "the
+saved V86 resume CS:IP is wrong," not "the return address is
+mis-encoded." If `s0cs:s0ip` is correct but `entirq` jumps to `0:0`,
+the bug is a missing/null kernel I/O-handler vector.
+
+**Status:** V86 I/O-trap framing solid; `#GP` delivery, decode, and
+dispatch all proven correct; fault localized to the kernel hand-off
+(`entirq`) or the V86-resume state (`s0cs:s0ip`). One more read of
+those two things pins the exact defect.
+
+## ROOT CAUSE FOUND AND MEASURED: `ivtable[6]` (MOS's V86 I/O-trap service vector) is 0 — no handler registered — so the trapped `IN` resumes the V86 task at garbage
+
+Resolved the fork empirically, and it landed on a third possibility
+neither branch predicted — but it's now fully measured end-to-end, not
+inferred.
+
+**First, the fork itself, measured:**
+- `s0cs:s0ip` (saved V86 resume point) at handler entry = `0x6c4d:
+  0x66e9` — *correct* (the trapped `IN` location). So the fault frame
+  was saved correctly. Not branch 1.
+- `contirq` (the V86 interrupt-injection routine, guest `CS=0x18
+  EIP=0x29b6`) writes its injected frame to the *correct* V86 stack
+  linear address `0x6c219` (watchpoint 2, the correct addr, fired —
+  watchpoint 3 on the truncated addr did not). So the `shl bx,4` in
+  `contirq` does **not** truncate — refuting that theory too, the same
+  way the `calcinad` `shl bx,4` theory was refuted. Both `shl bx,4`
+  sites work; DOSBox's D=1 decode handles the width. Stop suspecting
+  `shl bx,4`.
+
+**The actual mechanism, every step measured with the debug build:**
+1. V86 task runs `IN AL,0x60` → `#GP` I/O trap (by design). ✓
+2. `#GP` delivered correctly to `entint0d`. ✓
+3. Handler decodes the `IN` (correct opcode `E4` in `parm6adr`),
+   dispatches `doinali` → (port 0x60 not directly emulated) →
+   `doinout`. ✓
+4. `doinout` hardcodes `cl = 6` (`mov cl,06h` at `0x296E`, right by
+   the original authors' own `;>>>>>> change this one` comments) and
+   `jmp entirq` — handing off to MOS via **service vector 6**. ✓
+5. `entirq`/`contirq` looks up the V86 handler in `ivtable[6]`
+   (`mov cx,ss:[bx+ivtable]` at `0x2A38`). **Measured: `ivtable[6] =
+   0`.** ✓
+6. The zero triggers the fallback (`cirq1`, `0x2A41`: `mov ecx,[ebx]`)
+   which reads **real-mode `IVT[6] = 0x76cda1c9`** — a garbage/non-
+   handler address. Measured: resulting `s0cs:s0ip = 0x76cd:0xa1c9`. ✓
+7. The V86 task is resumed at `0x76cd:0xa1c9` → executes junk →
+   `CALL FAR 0000:0000` → `#UD`/`#PF` cascade → host-stack overflow. ✓
+
+**Root cause (measured, not inferred): `ivtable[6]` is never
+populated.** `ivtable` is declared `dw 128 dup(0,0)` — statically all
+zeros, one 32-bit slot per interrupt 00-7F, filled at runtime as MOS
+registers V86 handlers. Vector 6 is MOS's designated
+**I/O-trap / GP-fault service vector for V86 tasks** (hardcoded `cl=6`
+in `doinout`). When the first `IN AL,0x60` traps during boot,
+`ivtable[6]` is still 0 — the kernel's own vector-6 service handler
+has not been registered yet — and the zero-entry fallback to the
+real-mode IVT sends the task to garbage instead of failing safe.
+
+**This is a registration / init-ordering defect (or a fallback-logic
+defect), NOT an instruction-encoding bug.** Every encoding theory
+(`66h`/`call eicommon`, `calcinad` `shl`, `contirq` `shl`) was chased
+and empirically refuted. The real problem is a *data* problem: a
+required V86 service-vector handler is absent from `ivtable` at the
+moment it's first needed.
+
+## Candidate fixes (now we can actually choose one)
+
+Two viable, both small and testable with the existing build/boot
+pipeline:
+
+**Fix A — ensure `ivtable[6]` is populated before the first V86 I/O
+trap can occur.** Find where MOS registers its V86 service handlers
+into `ivtable` (search `$$MOS.SYS`/`_386.ASM` for writes to `ivtable`
+/ `parmaiv` / the registration path) and either (a) make `$386.SYS`
+install a default vector-6 handler at its own init, or (b) fix the
+ordering so the kernel registers vector 6 before enabling the V86 task
+that touches the keyboard. Correct if the intent is "the kernel always
+handles trapped I/O."
+
+**Fix B — make the zero-entry fallback fail safe for service
+vectors.** At `cirq1`/`0x2A41`, falling back to the real-mode IVT for
+a *MOS service vector* (like 6) is wrong — real-mode IVT[6] is the
+`#UD` vector, unrelated to MOS I/O virtualization. The fallback should
+either route to a valid default MOS handler or reflect the fault
+safely, not blindly load `[ebx]`. The authors' own
+`;>>>>>> change this one` markers at the `doinout`→`entirq` hand-off
+suggest they knew this path was provisional.
+
+**Recommended: confirm which by finding the ivtable registration
+site.** Before writing either, do one more targeted search: where (if
+anywhere) does the code write a nonzero value into `ivtable[6]`? If
+such a registration exists but runs *after* the trapping point → Fix A
+(ordering). If nothing ever populates `ivtable[6]` → the design
+expects the fallback to work, so → Fix B (fallback), or install a
+handler. This is a code search, not another emulator run — fast.
+
+**Status: root cause is measured and certain. We are ready to pick and
+apply a fix** once the ivtable-registration search settles A vs. B —
+that search is the immediate next action, then we implement, rebuild
+`$386.SYS` (MASM-under-DOSBox recipe), and boot-test for the absence
+of the crash.
+
+## Root cause fully pinned via the design spec: a trapped V86 port read is reflected to `ivtable[6]`, which is 0, and the zero-entry fallback loads garbage instead of failing safe
+
+Searched the ivtable/iopbm machinery and read the authoritative design
+comments (`vsetiop` = memdev API 08h spec). Everything now fits, and
+port-0x60 trapping is confirmed *intended*, not a bug:
+
+**The I/O-permission bitmap is by design.** `vsetiop` copies a
+128-byte bitmap (ports 000-3FF) *from the kernel* into `t2iopbm`; a set
+bit makes that port generate `int 6`. Measured `t2iopbm[0x0C]=0x01` —
+**port 0x60's trap bit is set**, alongside the always-forced 0x04 and
+0x81. So the kernel deliberately asks `$386.SYS` to trap keyboard-port
+reads (to virtualize the keyboard per V86 task). `$386.SYS` only reads
+`ivtable`; the kernel owns populating it. So the port-0x60 `#GP` trap
+is correct and intended. (Also noted: `vclriop`/`vsetiop` only clear/
+copy 128 bytes = ports 0-3FF, despite a revision comment claiming
+coverage "up to 37ff" — a latent under-coverage for high ports, but
+not this bug, since 0x60 is in range.)
+
+**The spec (verbatim from `vsetiop`'s header): a set bit "causes an
+int 6 to be generated"; `parm6ec` indicates the instruction type —
+`3 = in al,xx`, `4 = in ax,xx`, … `6 = out xx,ax`, `7 = in al,dx`…**
+For the trapped `IN AL,0x60` (`in al,imm8`), the correct `parm6ec` is
+**3**. `parm6ec` (`0x0D62`) and `iveccode` (`0x0DCA`) are *different*
+things: `parm6ec` is the instruction-type error code handed to MOS;
+`iveccode` = 6 is the **interrupt number** (int 6, the memory-protect/
+I/O-trap service) that `contirq` reflects through `ivtable`.
+
+**The failure, exactly:** the trapped read is a V86 event, so
+`entint0d` takes its V86 path → `doinout` → `entirq` → `contirq`, the
+routine that *reflects an interrupt into the V86 task* by pushing a
+frame on the V86 stack and loading the task's handler from
+`ivtable[iveccode]`. For `iveccode=6`, `ivtable[6]=0` (measured) —
+**the V86 task, an ordinary DOS program reading the keyboard, has no
+int-6 handler registered.** The zero triggers the fallback at `cirq1`
+(`0x2A41`, `mov ecx,[ebx]`) which loads the **real-mode IVT[6] =
+0x76cda1c9** (measured) — a garbage/non-handler address — into
+`s0cs:s0ip`. The task resumes there, executes junk, hits `CALL FAR
+0000:0000`, and cascades to host-stack overflow.
+
+**So the defect is the zero-entry fallback: when `ivtable[N]` is 0
+(no V86 handler registered for that reflected interrupt), loading the
+raw real-mode IVT vector is unsafe** — for a MOS I/O-trap reflection
+there is no meaningful real-mode IVT[6], so it sends the task into
+garbage. The original authors *flagged this exact spot*: the
+`;>>>>>> change this one` comments bracket the `doinout`→`entirq`
+hand-off (`jmp entirq` at `0x2970`).
+
+## THE FIX (specific, source-level, at last)
+
+Location: `contirq`'s vector lookup, `_386.ASM` around `0x2A38-0x2A41`
+(listing lines ~5245-5251):
+```
+    mov  cx, ss:[bx+ivtable]   ; get 32-bit vector from ivtable
+    or   cx, cx                ; is one there?
+    jnz  cirq2                 ; yes, jump
+cirq1:
+    mov  ecx, [ebx]            ; <-- BUG: loads realmode IVT[iveccode] (garbage for int6)
+cirq2:
+    ...store cx -> s0ip / s0cs
+```
+The `cirq1` fallback is wrong for a reflected MOS service interrupt.
+Two correct fix options, both small:
+
+- **Fix 1 (preferred, safe + minimal): when `ivtable[iveccode]==0`,
+  do not reflect to a garbage vector — instead hand the trapped I/O to
+  the MOS native-mode kernel handler** (the same `einative`/`entirqnt`
+  path used for native-mode faults), so the kernel services the
+  virtualized port read itself. This matches the intent ("enter mos
+  error handler") and never jumps through a null/garbage vector.
+- **Fix 2 (defensive minimum): if `ivtable[iveccode]==0`, skip the
+  reflection and simply resume the V86 task at the instruction
+  *after* the trapped `IN`/`OUT`** (advance `s0ip` past the
+  instruction, supply a default `AL` for reads), turning an
+  unhandled trap into a benign no-op instead of a crash.
+
+Both are edits confined to `contirq`/`entirq` in `_386.ASM`,
+assemble-and-link with the working MASM-under-DOSBox recipe, and are
+boot-testable immediately. Fix 1 is the "correct" behavior; Fix 2 is
+the guaranteed-no-crash fallback if the kernel hand-off proves fiddly.
+
+## We are ready to apply the fix
+
+Root cause is measured and certain end-to-end. Next actions, in order:
+1. Implement Fix 1 in `_386.ASM` (route `ivtable[N]==0` to the native
+   MOS handler rather than `mov ecx,[ebx]`); keep Fix 2 as fallback.
+2. Rebuild `$386.SYS` via `dobuild.bat` (MASM/LINK/EXE2BIN under
+   DOSBox — UASM cannot assemble this file).
+3. Boot `run_bisect3.img` under DOSBox Staging with the patched
+   `$386.SYS`; success = no segfault, boot proceeds past the first
+   keyboard I/O trap.
+4. If it boots, re-enable DPMI and expect the separately-documented
+   `SegToSel` issue next (a distinct, known problem).
+
+## ✅ FIX IMPLEMENTED AND VERIFIED — the crash is gone
+
+Applied the fix, rebuilt, and boot-tested. **It works.**
+
+**The patch** (in `_386.ASM` at `contirq`, the V86 interrupt-reflection
+routine): before `contirq` manipulates the V86 stack, check whether
+`ivtable[iveccode]` holds a registered handler (both words OR'd). If
+it is zero — no V86 handler for this reflected interrupt — `jmp
+nmswitch` to switch the task into native mode so the MOS kernel
+services the trapped I/O, exactly as the existing `ei38->nmswitch`
+path does. Only if a handler *is* registered does it fall through to
+the original reflection code (relabeled `cirqhndl`). The stack state
+at `contirq` entry (`[bp,ds,es,cx,bx]`) is precisely what `nmswitch`
+expects, so the hand-off is clean. This removes the unsafe
+"`ivtable[N]==0` → load real-mode `IVT[N]` (garbage)" fallback that
+sent the V86 task to `0x76cd:0xa1c9` and cascaded to host-stack
+overflow.
+
+**Build:** rebuilt `$386.SYS` with the MASM/LINK/EXE2BIN-under-DOSBox
+recipe (`dofix.bat`); assembles clean, 21211 bytes (vs 21179 original
+— the added guard). UASM still can't build this file; MASM does.
+
+**Boot test (DOSBox Staging 0.83.0, `MEMDEV=$386.SYS`, no DPMI):**
+- **No segmentation fault.** The emulator runs to the test's own
+  timeout instead of dying — every prior run ended in `Segmentation
+  fault` at this point.
+- Screen shows **`Loading $386.SYS version 5.01 (921119)`** — the
+  driver now loads, which it never did before (it crashed during the
+  first `IN AL,0x60` V86 I/O trap).
+- **All seven bisection markers `ZQA1 ZQB2 ZQC3 ZQD4 ZQE5 ZQF6 ZQG7`
+  print** — proving execution runs the entire length of `build_page`
+  (the full real→protected-mode transition and paging setup, markers A
+  through G), which was previously unreachable.
+
+So the exact failure this whole investigation chased —
+`MEMDEV=$386.SYS` crashing the machine during protected-mode bring-up
+— is fixed. The root cause was a data/registration defect (no
+`ivtable[6]` handler for a trapped keyboard read) combined with an
+unsafe zero-entry fallback; the fix makes the fallback route trapped
+I/O to the native MOS kernel instead of a garbage vector.
+
+**Delivered artifacts:** `386-PATCHED.SYS` (the fixed driver),
+`_386-PATCHED.ASM` (patched source), `fix-verified-boot.png` (the
+boot screenshot showing the markers and no crash).
+
+**Remaining / next (separate from this fix):** the boot proceeds past
+`$386.SYS` load; continue watching a full boot to a prompt to confirm
+nothing downstream regresses. Then re-enable DPMI, where the
+separately-documented `SegToSel` issue is expected next — a distinct,
+already-known problem, not a regression of this fix. Also worth
+tidying eventually: the latent `vclriop`/`vsetiop` 128-byte
+(ports 0-3FF) coverage vs. the "up to 37ff" revision comment, unrelated
+to this crash.
