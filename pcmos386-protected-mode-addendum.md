@@ -2439,3 +2439,867 @@ loader's own state (segment/`CS` at driver entry) may be directly
 inspectable via `gdb` breakpoints on DOS loading functions, without
 needing to modify `_386.ASM` at all. That would settle the HMA theory
 directly rather than by elimination.
+
+## Followed up — one theory corrected, one fact confirmed directly
+
+The "break on DOSBox's own loader" plan didn't apply: PC-MOS boots as
+a raw boot sector (`boot -l a`), entirely bypassing DOSBox Staging's
+own host-side `DOS_*` device/program-loading layer (those symbols —
+`DOS_Execute`, `DOS_AddDevice`, etc. — belong to DOSBox's *emulation*
+of a plain DOS environment for running normal `.COM`/`.EXE` programs
+under it; once `boot` hands off, none of that is in play, it's pure
+CPU emulation from there). Worth recording so a future session doesn't
+retry the same dead end.
+
+Better path, found instead: DOSBox Staging's guest CPU state lives in
+two named (if not fully typed) globals, `Segs` and `cpu_regs`, and a
+related one, `last_interrupt`. Reading `last_interrupt` at the crash
+point — reliable, since it's a single scalar, no struct-layout
+guessing involved — gives `0x0000000e`. **That's `INT 0Eh` — a
+genuine page fault, confirmed directly from DOSBox's own internal
+state, not inferred from the backtrace shape.** This directly
+confirms the theory from the last two entries: it's really a page
+fault (not some other exception this driver's IDT happens to route
+through the same recursive path), consistent with something the
+identity map doesn't cover being touched right as paging turns on.
+
+Also caught and fixed a source of run-to-run noise worth recording:
+`gdb`'s default signal handling sometimes let Staging's *own* internal
+crash handler process the `SIGSEGV` first (it prints its own
+backtrace, then calls `abort()`), so `gdb` would occasionally stop
+later, on the resulting `SIGABRT`/`pthread_kill`, in a *different*
+thread with `Segs` reading all zeros — not because anything was
+different about that run, just because of which of two signals `gdb`
+happened to catch first. `handle SIGSEGV stop nopass` before `run`
+fixes this — makes `gdb` stop at the raw first fault every time,
+before Staging's own handler can act on it. Worth keeping in any
+future `gdb` script against this binary.
+
+Attempted to read `CS`/`SS`/`ESP` out of `Segs`/`cpu_regs` directly to
+settle the HMA-loading question this session's option-2 test left
+open — not reliable without DWARF type info for these globals
+(release build symbols give addresses and names, not struct layouts),
+and a few raw values inspected look like host pointers mixed into the
+same region, not guest data, so guessing field offsets risks reporting
+something wrong with false confidence. Left undone rather than guessed
+at. **To finish this properly**: either build DOSBox Staging from
+source with debug info (`-g`, no `-DNDEBUG`/strip) so `gdb`'s `print
+Segs` and `print cpu_regs` work with real types instead of raw hex, or
+find the `SegNames`/`CPU_Regs` struct layout directly from Staging's
+source (`cpu.h`/`regs.h`) and compute the right byte offsets by hand
+against the raw dump already captured in `gdb_regs3.log`.
+
+## Session summary — where this stands
+
+Confirmed, high-confidence, in order of how this session built on
+itself:
+- `scbcom24`'s chain-walk (pointers, dispatch code, stack mechanics)
+  is fully correct, both statically and via live `DUMPLOG` readback —
+  not the source of anything.
+- The `MEMDEV=$386.SYS` crash is real, deterministic, and reproduces
+  identically on both classic DOSBox 0.74 and DOSBox Staging 0.83.0 —
+  not an artifact of either specific emulator build.
+- It's a genuine `INT 0Eh` page fault (confirmed via `last_interrupt`,
+  not inferred), delivered through a 32-bit interrupt gate (confirmed
+  via the IDT access byte) — meaning it uses the driver's own current
+  `SS:ESP`, not a TSS-switched stack.
+- The identity map built by `build_page` covers linear `0`-`0x10FFFF`
+  precisely (confirmed via source, `256+16` PTEs × 4096 bytes).
+- Neither `FREEMEM=C0000,F0000` nor `smpsize` (16 vs 64) change
+  whether the crash happens — ruled out as configuration factors.
+
+Still open: whether `$386.SYS`'s actual load segment (and hence its
+relocated stack) falls outside that `0x10FFFF` boundary — the one
+concrete question left, with two ways forward already written up
+above (source/type-info route via `gdb`, or extending the
+already-working bisection-marker pipeline to record `CS` itself).
+
+## Followed up with the real struct layout — partial answer, contamination risk identified, clean-capture attempts not yet successful
+
+Cloned DOSBox Staging's actual source (`github.com/dosbox-staging/
+dosbox-staging`) to get the real type definitions instead of guessing
+at raw hex — much faster than a full debug build. `src/cpu/
+registers.h` gives the exact layout:
+
+```cpp
+struct Segment { uint16_t val = 0; PhysPt phys = 0; };  // PhysPt = uint32_t
+struct Segments { uint16_t val[8] = {}; PhysPt phys[8] = {}; };
+enum SegNames { es = 0, cs, ss, ds, fs, gs };
+extern Segments Segs;
+```
+
+Decoded the raw dump already captured (`gdb_regs3.log`) against this:
+`val[cs] = 0x0018`, `val[ss] = 0x0020` — both small, plausible GDT
+selectors — but every entry in `phys[]`, including `phys[ss]`, reads
+`0`. That's either a real, meaningful data point (the stack's
+physical base is stuck at 0, not the `CS*16`-relocated address it
+should be) or an artifact of reading state 26,146 recursive calls
+into the crash rather than at the actual trigger moment — genuinely
+can't tell which without a clean capture, so not reporting either
+reading as confirmed.
+
+**Tried to get a clean, uncontaminated first-call capture, twice, both
+too early to be useful:**
+- `break CPU_Interrupt` alone stops on literally the first interrupt
+  of the whole DOSBox session — happens before `boot -l a` even runs.
+- `break CPU_Interrupt if $rdi==14` (vector 14 = page fault, first arg
+  per x86-64 calling convention) stops during `DOS_Shell::
+  ExecuteProgram` — still DOSBox's own internal real-mode DOS layer
+  processing the `boot` command itself, not PC-MOS's guest code yet.
+  Confirms page faults happen for benign, unrelated reasons elsewhere
+  in DOSBox's own operation, so vector number alone isn't a selective
+  enough condition.
+- `break InitPageHandler::writed` alone stops even earlier — inside
+  DOSBox's own `main → DOSBOX_InitModules → CALLBACK_Init`, before
+  any guest code, including the `boot` command, has run at all.
+
+**Not yet solved**: none of these three attempts landed anywhere near
+`$386.SYS` actually running. What's needed is a condition (or an
+`ignore N` count, tuned by trial) that skips past both DOSBox's own
+startup *and* everything PC-MOS's kernel and shell do before
+`MEMDEV=$386.SYS` loads, landing on the first `InitPageHandler::
+writed` (or `CPU_Interrupt` with vector 14) that happens *after* that
+point specifically. A cheap way to find the right skip count: use the
+already-confirmed crash backtrace's frame count (26,146) as a rough
+ceiling, binary-search an `ignore` value between 0 and some found
+upper bound, or — probably more reliable — condition the breakpoint
+on the write address being physically close to where `$386.SYS`'s
+page tables/stack should be, once that's known from source (`pt_addr`
+is computed as `pd_addr + 0x1000`, and `pd_addr` is `0x100000` or
+`0x110000` depending on the `FREEMEM` high-memory-feature bit — a
+condition like `break InitPageHandler::writed if addr >= 0x100000`
+would skip all the low-memory noise from DOSBox's own startup and
+PC-MOS's early real-mode boot, landing on the first genuinely
+high-memory unmapped access, which is exactly the crash's territory).
+
+## Tried the suggestion above and two follow-ups — all landed on legitimate-but-irrelevant DOSBox-internal activity
+
+`break InitPageHandler::writed if $rsi >= 0x100000` (fixed the
+argument register — `$rdi` holds the implicit `this` for a C++ member
+function, real args start at `$rsi`): hit at exactly `0x110000` — but
+during `EMS::EMS()`, DOSBox's *own* EMS emulation setting up its page
+frame during its own startup (`DOSBOX_InitModules → DOS_Init →
+EMS_Init`), coincidentally in the same address neighborhood as
+`$386.SYS`'s own HMA placement (`0x110000` is literally the
+`pd_addr` value when the "high-memory" `parmfeat` bit is set — pure
+coincidence of address, not related code). Confirms the address-range
+condition alone isn't selective enough; too much legitimate
+DOSBox-internal setup happens up there before PC-MOS's kernel even
+starts.
+
+Tried anchoring on the bisection markers already in `_386.ASM`
+instead — `break mem_writeb if $rdi == 0xb8f04` (marker C's second
+byte) should be about as selective as a breakpoint can get, since
+nothing else should ever write that exact address. Two problems, in
+order:
+- First attempt aborted on unrelated Xvfb flakiness (`SDL: Error
+  putting the mouse into relative mode` → DOSBox's own `E_Exit`) —
+  environment noise, not a real result, confirmed by restarting Xvfb
+  fresh and retrying.
+- Second attempt just timed out without ever reaching the marker.
+  `mem_writeb` is a very hot path — called for essentially every
+  guest-memory byte write, of which there are many thousands during
+  a normal boot — so evaluating a condition on every single call
+  slows execution by a large factor, and 30 seconds of wall-clock
+  wasn't enough to reach even the visible round-1 markers this way,
+  let alone `$386.SYS` itself loading later.
+
+**Stopping the live-`gdb` breakpoint-hunting here** — it's hit
+diminishing returns against this sandbox's performance and
+environment constraints, not against the underlying question. The
+concrete facts already gathered this session (genuine `INT 0Eh`,
+interrupt-gate delivery confirmed, `SS`/`CS` selector values `0x20`/
+`0x18` at the crash point, identity map ending at `0x10FFFF`, `FREEMEM`
+and `smpsize` both ruled out) stand regardless. The one open
+question — where `$386.SYS` actually loads — would likely go faster
+with a *hardware* watchpoint (`watch`, not a conditional breakpoint;
+watchpoints don't re-evaluate a condition on every call, they trap
+only on the actual memory write) set on the marker addresses, or with
+DOSBox Staging's own built-in debugger (compiled into most builds,
+reachable via a `Ctrl` hotkey once booted) instead of `gdb` from
+outside — either avoids the `mem_writeb`-hotpath performance problem
+entirely.
+
+## Hardware watchpoints — real progress, but with a correction that matters
+
+Fixed the address problem (`MemBase` is a named symbol, `uint8_t*`
+per source — cast explicitly, re-read fresh in every `gdb` run rather
+than reused from a stale log value) and confirmed hardware
+watchpoints on the marker addresses are the right tool: no
+`mem_writeb`-hotpath slowdown, no false-positive risk from coincidental
+byte patterns.
+
+**Result, tested down to individual bytes: none of markers A through
+G ever fire** — not even marker A, the very first one, placed a
+handful of instructions after `build_page:` itself. Confirmed this
+isn't a stale-pointer artifact (`MemBase` read fresh at
+`DOSBOX_RunMachine`'s first hit and again independently at the actual
+crash point — identical both times, `0x7ffff13e2010`).
+
+**In parallel, decoded the crash's logged `CS:IP` (`18:5272h`)
+precisely against a freshly-generated full MASM listing** (needed
+`link /MAP` for public symbols, `masm` with a `.LST` output for
+everything else, since most labels here aren't declared `public`).
+`INIT32` starts at `04740h` per the link map; `5272h - 04740h = 0B32h`
+lands exactly on `test_extmem`'s `??0031` label — the point reached
+right after the `cmp edi,1000000h` boundary check, consistent with
+`memsize=64` skipping the 16MB-specific branch. A precise, unambiguous
+match to a real, meaningful label — not a coincidence like the earlier
+ascending-byte false positive.
+
+**These two findings contradict each other.** Reaching `test_extmem`'s
+body requires marker A's code (textually and execution-wise earlier,
+un-skippable) to have already run. Spent real effort trying to
+reconcile this before writing either down as fact:
+- Ruled out `MemBase` changing between an early snapshot and the
+  crash (identical value, checked directly).
+- Ruled out `gdtzero` being relocated like `gdtcode`/`gdtdata` are
+  (checked every `add word ptr [gdtXXX+2],ax` relocation site in
+  source — `gdtzero` isn't among them, confirmed intentionally left
+  flat).
+- Ruled out marker A's `mov es, gdtzero-gdt` being misinterpreted as
+  a real-mode segment load instead of a protected-mode selector load
+  (checked that protected mode is entered before `build_page:`, and
+  that the *identical* pattern — `mov ax,gdtdata-gdt / mov ds,ax` —
+  two instructions earlier is unquestionably working, since `ds`/`ss`
+  clearly function correctly for the rest of `build_page`'s
+  execution).
+
+**Most likely explanation, not yet certain**: the logged `CS:IP` is
+probably **not** the true, original fault site. It's one arbitrary
+snapshot taken from somewhere inside an already-cascading,
+26,146-iteration-deep recursive failure, during which `CS`/`EIP` get
+repeatedly, incorrectly reloaded by failed/partial interrupt-frame
+operations. That it happens to decode to a real, valid-looking label
+(`??0031`) may be coincidence in the same way the earlier
+ascending-heap-byte pattern coincidentally matched sequential marker
+letters — a structurally plausible value that isn't actually
+meaningful. The **hardware watchpoint result is the more trustworthy
+fact of the two**: it directly, mechanically confirms marker A's
+write never happened, with no interpretation required.
+
+**This means the investigation needs to move earlier than
+`build_page` entirely.** If marker A never fires, `$386.SYS`'s
+driver-init routine may not even be reaching `build_page` at all —
+worth checking whether the driver's very first instructions (its
+`init` command-dispatch entry point, before any protected-mode
+transition) run at all. **Next step**: add one more diagnostic marker
+at that earliest possible point — even before `build_page:` is
+reached, ideally before the real-to-protected-mode transition itself
+— to establish a revised, earlier baseline for what this driver
+actually executes before failing.
+
+## FIXING SESSION — first fault is `#GP`, not `#PF`; V86 interrupt-delivery recursion identified from DOSBox source
+
+Started executing the fix plan's Step 1 (capture the first *real*
+fault directly in the emulator, not via markers). Results, in order:
+
+**`PAGING_PageFault` never fires.** Set a breakpoint on DOSBox
+Staging's `PAGING_PageFault(lin_addr, …)` — the function that raises
+every genuine page fault. Ran to the crash: **the breakpoint was
+never hit.** The runaway recursion does not go through the paging
+fault path at all. This directly falsifies the "unmapped stack →
+page fault at paging-enable" mechanism that the previous two entries
+had converged on. (The `$rdi=0xe` seen at the raw crash was stale
+register garbage, not a captured fault argument — confirmed by the
+breakpoint simply never triggering.)
+
+**The first exception is `#GP`, via the dynamic core.** Set
+breakpoints on `CPU_Exception` and `PAGING_PageFault` together. The
+one that fires is `CPU_Exception(which=0xd, errorcode=0)` —
+**`#GP`, General Protection Fault** — reached through
+`DynRunException` (the dynamic-recompilation CPU core), not the
+paging path. So the fault type is `#GP`, and it happens at the
+protected-mode-related transition, consistent with the fix plan's
+"pre-paging ⇒ #GP not #PF" note. The earlier assumption that it was a
+page fault was wrong; the fix plan's own Step-1 hedge (check `#GP`/
+`#SS`, not just `#PF`) was right to include it.
+
+**Mechanism, read directly from `CPU_Interrupt` in DOSBox source
+(`src/cpu/cpu.cpp`), not inferred:** the recursive loop is
+`CPU_Interrupt → CPU_Push32 → InitPageHandler::writed → CPU_Interrupt`.
+`CPU_Interrupt` is delivering the `#GP` through PC-MOS's IDT gate. In
+the interrupt-gate delivery path, after the "commit point" it does
+`CPU_Push32(o_ss); CPU_Push32(o_esp); …` to build the exception frame
+on the stack. Captured guest state mid-recursion shows `ESP`-range
+values already run up to `0xfffff900`/`0xfffff908` — **the stack
+pointer has climbed into the top of the 4 GB linear space**, and each
+`CPU_Push32` there hits `InitPageHandler` (the placeholder handler for
+never-touched pages), which itself raises another fault, delivered by
+another `CPU_Interrupt`, forever. So the "push targets an unbacked
+page" shape from the Staging backtrace was right — but the unbacked
+page is where it is because **`SS:ESP` for fault delivery is bad/
+wrong**, and the triggering fault is a `#GP`, not because paging was
+enabled with an unmapped stack.
+
+**What this means for the fix — the target has moved and sharpened.**
+The bug is no longer "the identity map doesn't cover the driver's
+stack at paging-enable." It is: **PC-MOS takes a `#GP` during/just
+after its protected-mode entry, and its IDT/gate/stack setup for
+delivering that `#GP` is itself malformed** (bad `SS`, bad `ESP`, or a
+gate/descriptor that sends delivery to a wild address), so the very
+act of trying to service the first fault diverges. Two distinct
+things to fix, and they must be separated:
+1. **Why the `#GP` at all** — something in PC-MOS's PM transition
+   (`_386.ASM` ~9367-9385: `lgdt`/`lidt`/`mov cr0`/`far jmp gdtcode`)
+   is raising a protection fault. Candidate causes: a GDT/IDT
+   descriptor whose relocated base is wrong (the ~9336-9355 relocation
+   block), the far-jump `gdtcode` selector/target, or a
+   segment-limit/type mismatch the real 386 tolerated but Staging's
+   stricter PM checks (all those `CPU_CHECK_COND`s) reject.
+2. **Why the `#GP` delivery diverges instead of being handled** —
+   PC-MOS's IDT entry for vector `0Dh`, and the `SS:ESP` in effect at
+   fault time, aren't a valid place to push an exception frame. Even
+   once (1) is fixed, if any *other* fault ever fires here this second
+   problem would recur — so it's worth understanding, but (1) is the
+   actual trigger to eliminate first.
+
+**Immediate next step (revised from the plan):** get the guest
+`CS:EIP` of the *first* `#GP` cleanly — the breakpoint condition
+`$rdi==0xd && guest_CS==0x18` was still too coarse (fell through to
+the crash because the early benign `#GP`s during DOSBox's own real-
+mode DOS boot also had to be stepped past). Need a condition that
+fires on the first `#GP` occurring *after* PC-MOS has loaded its own
+GDT — e.g. break on the `lgdt`/`mov cr0` region by physical address,
+or condition on `paging`/`cpu.pmode` state — then decode that
+`CS:EIP` against `_386.LST` to find the exact faulting instruction in
+the transition. That instruction, plus the `#GP` error code (which
+identifies the offending selector), points straight at which
+descriptor or selector in the ~9336-9385 block is malformed. That is
+the thing to fix.
+
+## Captured the full exception sequence — the `#GP` handler-delivery jumps to a garbage offset (0x8b00)
+
+Instead of guessing breakpoint conditions, logged *every*
+protection-class exception (vectors 0x0A-0x0E) as it fired, with full
+state, using a non-stopping `gdb` breakpoint + `commands`/`continue`.
+26,308 exceptions total before the host stack overflows. The sequence
+is unambiguous:
+
+- **Exception #1 (the trigger):** `vec=0x0D (#GP) err=0 CS=0x6c4d
+  SS=0x6b3d EIP=0x8b00`. A general-protection fault. The `CS=0x6c4d`
+  is a real-mode-style segment value — this is the fault raised
+  *during* PC-MOS's real→protected transition.
+- **Exceptions #2 through #26,308 (the runaway):** all identical:
+  `vec=0x0E (#PF) CS=0x18 EIP=0x8b00 SS=0x20 ESP=0x0`. Error code
+  flips `0 → 2` (write-access) partway through. `CS=0x18` is
+  `gdtcode`, `SS=0x20` is `gdtdata` — PC-MOS's own selectors.
+
+**The decisive detail: `EIP=0x8b00` is constant across all 26,308
+exceptions, and `0x8b00` is not a valid code location.** The whole
+driver module ends at offset `0x52BA` (per link map); `0x8b00` is far
+past it, and the literal `8b00` appears nowhere in the source. So
+this isn't the CPU wandering — it's wedged re-faulting at one fixed,
+invalid address.
+
+**Root cause, from DOSBox's `CPU_Interrupt` source
+(`src/cpu/cpu.cpp`):** when delivering an interrupt through a gate,
+line 245 does `reg_eip = gate_off`, where `gate_off = gate.GetOffset()`
+— the offset field read straight out of the IDT gate for that vector.
+`EIP=0x8b00` after delivery means **the IDT gate PC-MOS has installed
+for the fault vector contains offset `0x8b00`** — a wild value.
+Control jumps there, immediately faults again (`#PF`, since `0x8b00`
+in `gdtcode` isn't backed), and re-enters `CPU_Interrupt` to deliver
+*that* fault through the same broken gate → same `0x8b00` → forever,
+with `ESP` marching down until the host stack dies.
+
+This means the failure is **not** the `build_page` identity map, not
+the stack being unmapped at paging-enable, and not `test_extmem`. It
+is: **PC-MOS's IDT, as actually loaded into the CPU at PM-entry time,
+has garbage gate offsets** (at least for the `#GP`/`#PF` vectors). In
+source, the IDT table (`_386.ASM` ~3101+) looks correct —
+`dw mmgrp:entint0d,gdtcode-gdt,0ee00h,0` etc., with `entint0d` at
+offset `0x2755` and `entint0e` at `0x2286` in the listing, both valid.
+So the gates are *authored* correctly but end up wrong *at runtime*.
+Prime suspects, in order:
+1. **IDT relocation/fixup**: the offsets are `---- R` (relocatable) in
+   the listing. If the load-time relocation that adjusts them (or the
+   `lidt` pointer `wsvmidtr`, relocated at ~9342-9343) is wrong, every
+   gate offset is off. `0x8b00` vs. the correct `0x2286`/`0x2755`
+   isn't an obvious single-bit or single-add error, which points more
+   toward the IDT *base* being wrong (so DOSBox reads gate bytes from
+   the wrong place) than the individual offsets.
+2. **IDT overwritten before use**: something between building the IDT
+   and taking the first fault clobbers it. Note an *earlier* addendum
+   entry ("page-table construction physically overwrites the IDT")
+   explored exactly this idea, then RETRACTED it — worth revisiting
+   now with this much harder evidence, because the symptom
+   (fault-delivery reads garbage) is precisely what an overwritten
+   IDT would produce.
+3. **`lidt` pointer/limit wrong**: if `wsvmidtr`'s base or limit is
+   miscomputed, the CPU's IDT window points at the wrong memory.
+
+**Concrete next step:** read the guest IDT as the CPU actually sees it
+at the first `#GP`. The attempts this session to read `cpu.idt.base`
+via guessed `CPUBlock` struct offsets produced nonsense (`0x147`) —
+the offsets were wrong. The reliable way: break in `CPU_Interrupt`
+itself (not `CPU_Exception`) at the point it computes `gate_off`, and
+print `gate_off`, `gate_sel`, and `cpu.idt` via the *real* accessors
+(`CPU_LIDT`/`cpu.idt.GetBase()` are inlined, but the `Descriptor gate`
+local and `gate.GetOffset()` can be read at that frame). Compare the
+gate PC-MOS loaded against the correct `entint0e`=0x2286. If the base
+is wrong → fix the `lidt`/`wsvmidtr` relocation (~9342-9343). If the
+offsets are wrong → fix the IDT-entry relocation. If the IDT memory is
+correct but gets read wrong → the overwrite theory (#2) is back. Any
+of the three is a small, specific, testable fix in the
+~9336-9385 setup block or the IDT construction.
+
+**Guardrail reinforced this session:** conditional `gdb` breakpoints on
+`CPU_Exception` using *guessed* selector/struct-offset conditions kept
+silently falling through to the crash (condition never matched what I
+assumed). The reliable technique that actually worked was the
+non-stopping *log-everything-then-continue* breakpoint — it makes no
+assumptions about which values matter and shows the true sequence.
+Prefer that over clever conditions next time.
+
+## CORRECTION: the IDT is perfect — the fault is the exception-delivery STACK, and there is exactly one trigger `#GP`
+
+Read the actual guest IDT out of emulated memory (not struct-offset
+guessing this time — computed the IDT's physical address from first
+principles: `wsvmidtr` at listing offset `0x0DB6` holds base =
+`idt`@`0x18D0`, relocated by the driver's load base; driver `CS` base
+came back `0x700`, so IDT base = `0x700 + 0x18D0 = 0x1FD0`; read via
+`MemBase + 0x1FD0 + vector*8`). The gates are **correct**:
+
+- `IDT[0x0D]` = offset `0x2755`, sel `0x18`, type `0xEE` — exactly
+  `entint0d`, the real `#GP` handler.
+- `IDT[0x0E]` = offset `0x2286`, sel `0x18`, type `0xEE` — exactly
+  `entint0e`, the real `#PF` handler.
+
+**So the previous entry's headline conclusion was wrong: the IDT is
+not corrupt, the gate offsets are right, `0x8b00` did NOT come from a
+bad gate.** `0x8b00`/`ESP=0` is purely runaway-aftermath register
+state, not the cause. Retracting the "malformed IDT" root cause.
+
+**What the corrected evidence shows.** Tallying the full 26,308-
+exception log: **exactly one `#GP`** (`vec=0x0D, CS=0x6c4d`), followed
+by 26,307 identical `#PF`s (`vec=0x0E, CS=0x18`). So:
+
+- The single trigger is one `#GP`, and it fires while `CS=0x6c4d` —
+  a *real-mode* segment value. That means the `#GP` happens during
+  PC-MOS's real→protected transition, before/at the far jump to
+  `gdtcode`, while CS still holds its old real-mode value.
+- Delivering that `#GP` through the (correct) IDT gate is what
+  diverges. From `CPU_Interrupt` source: same-privilege gate delivery
+  does `CPU_Push32(reg_flags); CPU_Push32(CS); CPU_Push32(oldeip);
+  CPU_Push32(error)` onto the **current `SS:ESP`** *before* setting
+  `reg_eip = gate_off`. The `#GP` fired with `SS=0x6b3d` (also a
+  real-mode-style value) and `ESP=0x10`. **If that `SS:ESP` isn't a
+  valid, present, writable protected-mode stack, those pushes
+  themselves fault** — and because the machine is now in the middle of
+  delivering an exception onto a bad stack, each push-fault re-enters
+  delivery onto the same bad stack, forever. The constant `EIP=0x8b00`
+  is the wreckage of `oldeip`/gate math after the state is destroyed,
+  not a real target.
+
+**Corrected root-cause statement.** PC-MOS raises a `#GP` at its PM
+transition, and at that instant `SS:ESP` is not a valid protected-mode
+stack, so the CPU cannot even push the exception frame — the classic
+"fault while delivering a fault → cascade" that on real hardware would
+be a double-fault/shutdown and in DOSBox is an unbounded software
+recursion. Two things to nail down, both now sharply scoped:
+
+1. **Why the initial `#GP` at all.** Something in the transition
+   (`_386.ASM` ~9367-9385) trips DOSBox's protected-mode validity
+   checks. The `#GP` has error code 0 (not a selector error), which is
+   itself a clue — an error code of 0 points away from "bad selector
+   loaded" and toward something like an instruction that's illegal in
+   the current mode/privilege, or a descriptor-table problem. Need the
+   guest `CS:EIP` of *this specific* `#GP` (the real-mode-CS one) to
+   decode which instruction.
+2. **Why `SS:ESP` is invalid at that moment.** After PE is set but
+   before the stack is switched to a proper PM stack, an exception has
+   nowhere valid to push. Whether the fix is "set up a valid PM stack
+   (and TSS ESP0) before anything can fault" or "prevent the initial
+   `#GP`" depends on (1) — but making exception delivery survivable
+   during the transition is very likely part of the real fix, because
+   even the *correct* handler can't run if the frame can't be pushed.
+
+**Method note for next session (what finally worked):** compute guest
+physical addresses as `MemBase + linear` and read structures out of
+emulated RAM directly, deriving addresses from the `.LST`/relocation
+math rather than from DOSBox's C++ struct layouts (the struct-offset
+guesses repeatedly gave garbage). The `MemBase`-relative read of the
+IDT is the technique that produced the first solid, decisive data in
+this whole sub-investigation. Use the same approach to read the GDT
+entries for `0x18`/`0x20` and the TSS, which is the immediate next
+step to resolve (2).
+
+## Refinement: the `#GP` fires in REAL mode, and the fault sequence is `#GP → #UD → #UD → … → #PF flood` — richer than "one `#GP`"
+
+Two corrections from more careful capture this session.
+
+**The `#GP` is a real-mode fault, not a protected-mode one.** At the
+`#GP`, `CS=0x6c4d` with `Segs.phys[cs]=0x6c4d0` — i.e. `phys = CS<<4`,
+the real-mode addressing rule. So when this `#GP` fires the CPU is
+still in **real mode** (or right at the PE-set instant before the
+far-jump reloads CS). `EIP=0x8b00` in segment `0x6c4d` = linear
+`0x74fd0` (~468 KB into conventional memory) — *not* in the driver's
+own image (which loads near linear `0x700`). Caution flag: this means
+the earlier `MemBase`-relative GDT read used the wrong base
+(`0x6c4d0` instead of the driver's real load base), so those GDT bytes
+were meaningless — do not trust them. The IDT read from the prior
+entry stands (it used the correct `0x700` base, captured at a genuine
+`CS=0x18` moment), but the GDT read does not.
+
+**The exception sequence is not `#GP` then straight to `#PF`.**
+Capturing the first three exceptions in strict order (single
+`break CPU_Exception`, `continue`, `continue`) gives:
+- EXC#1: `#GP (0x0D)  CS=0x6c4d EIP=0x8b00`
+- EXC#2: `#UD (0x06)  CS=0x0000 EIP=0x8b00`   (invalid opcode)
+- EXC#3: `#UD (0x06)  CS=0x0000 EIP=0x8b00`
+
+So after the `#GP`, control ends up at `CS=0x0000:EIP=0x8b00` executing
+**invalid opcodes** (`#UD`), repeatedly, and only later does the log
+settle into the `#PF` flood the earlier non-stopping capture tallied.
+`CS=0x0` is the key new fact: execution has jumped to the **null
+segment**. This is consistent with, and sharpens, the "exception
+delivery onto a bad stack/state" picture — after the first fault,
+`CS`/`EIP` get loaded from garbage (a zero selector), and from then on
+every instruction fetch is from linear `0x8b00`-ish in a null segment,
+which is neither valid code (`#UD`) nor, once paging context shifts,
+mapped (`#PF`). The single constant `EIP=0x8b00` across everything is
+the tell: the machine is stuck re-faulting on one wild location.
+
+**Why the earlier "only one `#GP`, then 26,307 `#PF`" tally looked
+simpler:** that non-stopping log filtered to vectors `0x0A-0x0E`, so
+it never showed the `#UD` (`0x06`) exceptions at all — they fell
+outside the logged range. Both captures are correct; the tally was
+just windowed. The true early sequence is `#GP → #UD(×n) → … → #PF
+flood`, all pinned at `EIP=0x8b00`.
+
+**Net effect on the diagnosis.** Still a fault-during-transition that
+the machine can't service, cascading. But the corrected specifics
+matter for the fix:
+- The triggering `#GP` is at/near the real→protected switch while
+  still in real-mode addressing — so the suspect narrows to the exact
+  `mov cr0` / `lgdt` / `lidt` / far-jump instructions and the
+  descriptor/pointer operands they use, evaluated in *real* mode.
+- After it, control reaches a **null-selector `CS`**, which is the
+  concrete corruption to explain — most likely the far-jump or the
+  exception delivery loading a zero/garbage selector because the GDT
+  pointer (`wsgdtr`) or a descriptor isn't valid at that instant.
+
+**Immediate next step (corrected):** capture the guest `CS:EIP` and
+the *faulting instruction bytes* at EXC#1 (the `#GP`) using the
+driver's real load base — get that base from a clean `CS=0x18` moment
+first (as the IDT read did), then read `MemBase + (that base) + (the
+transition code offset ~0x0800-0x0880 from the listing)` to see the
+exact `lgdt`/`mov cr0`/far-jmp bytes as loaded, and read `wsgdtr`/
+`wsvmidtr` operands as they actually are in memory at fault time.
+That shows whether the GDT/IDT pointers or the far-jump target are
+malformed going into the switch — which is now the single remaining
+question before a fix can be written.
+
+**Environment note:** the emulator boots to this crash in ~5-8 s, but
+several `gdb` sessions this session hit the 300 s command cap for
+reasons that look like `gdb`/Xvfb startup contention, not the guest.
+Keeping each `gdb` invocation to a single focused capture (one
+breakpoint, print, quit) and writing results to a file immediately is
+the pattern that succeeds; multi-`continue` scripts are more prone to
+the hang.
+
+## IMPORTANT CORRECTION: I was reading EIP from the wrong offset — several recent `EIP=0x8b00` claims are invalid
+
+Found a measurement bug in my own instrumentation. I had been reading
+guest `EIP` from `cpu_regs+68`, but per `registers.h` the `CPU_Regs`
+layout is `GenReg32 regs[8]` (offsets 0-31), then `GenReg32 ip` at
+**offset 32**, then `flags` at 36. So `+68` was well past the struct —
+pure adjacent-memory garbage. **Every `EIP=0x8b00` I reported in the
+last few entries is invalid** and any reasoning that leaned on it (the
+"stuck at a fixed wild EIP" framing, the null-segment `#UD` EIP
+values) must be discounted. `ESP` was also being read from `+28`
+instead of the correct `+16` (`REGI_SP=4`, so `regs[4]` at byte 16).
+
+Re-captured the first three exceptions with **correct** offsets (`EIP`
+at `+32`, `ESP` at `+16`):
+- EXC#1 `#GP  err=0  CS=0x6c4d EIP=0x66e9 SS=0x6b3d ESP=0xe4b`
+- EXC#2 `#UD  err=0  CS=0x0000 EIP=0x04f5 SS=0x18   ESP=0xffde`
+- EXC#3 `#UD  err=0  CS=0x0000 EIP=0x04f5 SS=0x18   ESP=0xffd6`
+
+Real values, all different from the bogus `0x8b00`. The shape survives
+(GP → UD flood with CS=0 null segment, ESP marching down) but the
+specific addresses are now trustworthy where before they weren't.
+
+## And a second, bigger reconciliation: `test_extmem` DOES run in protected mode — the "marker A never fires" watchpoint result is now in doubt
+
+The DOSBox log line that prints right before the crash —
+`Illegal write to 4000000, CS:IP 18:5272` — is authoritative (logged
+by `IllegalPageHandler::writeb` in `src/hardware/memory.cpp`, which
+reads the *real* `SegValue(cs)`/`reg_eip`, not my mis-offset).
+`CS=0x18`, `IP=0x5272`. Decoding `0x5272` against the link map:
+`INIT32` spans `0x04740-0x052BA`, so `0x5272` is inside `INIT32`, at
+`test_extmem`'s boundary-probe code (the `??0031` region decoded many
+entries ago). **So the driver genuinely reaches `test_extmem`, running
+in 32-bit protected mode with `CS=0x18` — exactly what the very
+earliest `18:5272h` decode concluded, before the watchpoint work
+seemed to overturn it.**
+
+Critically, that `Illegal write to 4000000` is **harmless**:
+`IllegalPageHandler` for the unbacked 64 MB probe address just logs
+and returns `0xFF` / discards the write — it does not raise a fault.
+So `test_extmem`'s wraparound probe is not the crash; execution
+continues past it.
+
+**This directly contradicts the hardware-watchpoint finding that
+"markers A-G never fire."** If `test_extmem` (which is *after* marker
+A and marker B in `build_page`) is demonstrably executing, then marker
+A's code ran too, and the watchpoint should have caught its write. One
+of these is wrong, and given that I just found a real offset bug in my
+own `gdb` instrumentation, **the watchpoint result is now the prime
+suspect** — most likely the watchpoint address computation
+(`MemBase + 0xb8f00`) was off in the same family of mistakes, so it
+was watching the wrong host address and never saw a write that did
+happen. The `18:5272` log line, by contrast, comes from DOSBox's own
+code reading its own registers, so it can't be an instrumentation
+artifact on my side.
+
+**Where this leaves the diagnosis — honestly, partially reset:**
+- **Trustworthy:** the driver enters protected mode, `CS=0x18`, and
+  runs through at least `test_extmem` (`18:5272`). The crash is a
+  fault the machine can't service, cascading into host-stack overflow.
+  The IDT gates are correct (that read used the right base and a valid
+  `CS=0x18` capture).
+- **Now in doubt / to be re-verified with correct offsets:** exactly
+  where the fatal fault first occurs; whether markers A-G fire (the
+  watchpoint needs redoing with a verified address); the `#GP`-first
+  ordering (EXC#1's `CS=0x6c4d` may be a benign earlier fault from
+  DOSBox's own boot, *not* PC-MOS — needs the CS=0x6c4d region
+  identified before assuming it's the trigger).
+
+**Next step, tightly scoped and offset-correct:** redo the single most
+decisive measurement cleanly — break where DOSBox is *about to*
+overflow (or on the first `CPU_Exception` whose guest `CS==0x18`,
+i.e. genuinely inside the PM driver), and read `CS:EIP` with the
+corrected `+32` offset plus the faulting instruction bytes. That gives
+the real first in-driver fault location, decodable against `_386.LST`,
+with no reliance on any number I now know was mis-read. Everything
+downstream (which descriptor/stack/instruction to fix) follows from
+that one correct reading. Do not trust the `0x8b00`-era conclusions or
+the watchpoint "never fires" result until this is redone.
+
+## STRONG ROOT-CAUSE CANDIDATE: 16-bit-assembled exception handlers running in a 32-bit (D=1) code segment — the `call eicommon` return address is malformed
+
+Redid the decisive measurement with correct offsets and it paid off.
+Chain of solid, `MemBase`-verified findings this session:
+
+**First in-driver fault** (`break CPU_Exception if guest CS==0x18`,
+correct offsets): `#PF vec=0x0E err=0 CS=0x18 EIP=0x34EB ESP=0xF78
+SS=0x20`, driver load base `CSphys=0x700`. `EIP=0x34EB` decodes (link
+map: `RES16` = `0x00000-0x034EB`) to the **very end of `eicommon`**,
+the common exception-handler prologue — specifically right at its
+closing `jmp ss:[trash1]` (listing `0x34E7`), the indirect jump back
+to the handler via the return address `eicommon` popped on entry.
+
+**`eicommon`'s structure** (listing `0x34CD`+): first instruction is
+`66h 67h` `pop ss:[trash1]` (32-bit pop of the return address that the
+handler's `call eicommon` pushed), then it saves regs, reloads `ds`/
+`es`, and ends with `66h 67h` `jmp ss:[trash1]`. So the whole thing
+hinges on `trash1` holding a valid return address.
+
+**`trash1` holds garbage: `0x000120DE`** (read from guest memory at
+the fault). The module is only ~`0x52BA` long, so `0x120DE` is far
+outside it — jumping there lands in unmapped memory ⇒ the `#PF` at the
+`jmp`. So the fault is: `eicommon` jumps to a wild return address.
+
+**Why `trash1` is garbage — the encoding mismatch.** Read the actual
+loaded bytes at `entint0d` (the `#GP` handler that calls `eicommon`):
+`66 E8 74 0D B1 0D …`. The source is `db 66h` / `call eicommon`. MASM
+assembled `call eicommon` as a **16-bit** near call — `E8` + 2-byte
+displacement `0x0D74` (`0x2759 + 0x0D74 = 0x34CD` = `eicommon`, correct
+for 16-bit). But `entint0d` runs under `CS=gdtcode`, whose descriptor
+byte 6 is `01001111b` — **`D=1`, a 32-bit (USE32) code segment**. In a
+D=1 segment the default operand size is 32-bit, so the `66h` prefix
+*flips call to 16-bit*… except MASM already emitted a 16-bit-form
+displacement (2 bytes), so the CPU, seeing `66 E8` in a D=1 segment,
+decodes `E8` as a **32-bit** call taking a **4-byte** displacement —
+consuming `74 0D B1 0D` (the 2 real displacement bytes *plus the first
+2 bytes of the next instruction*, `B1 0D` = `mov cl,0dh`) as a bogus
+`rel32`, and pushing a **32-bit** return address. That mangled push is
+what `eicommon` later pops into `trash1` as `0x120DE`, then jumps to.
+
+**The underlying defect: assembly-time segment size ≠ runtime
+descriptor size.** These handlers live in `RES16`, a **USE16**
+segment, so MASM generates 16-bit-default encodings and 16-bit
+displacements. But at runtime they execute in `gdtcode` with **D=1
+(USE32)**. The author knew the sizes were mixed and sprinkled manual
+`db 66h`/`db 67h` prefixes to compensate instruction-by-instruction —
+but that technique cannot fix a *displacement width* that MASM chose
+based on the segment's USE16 assembly context. `call`/`jmp` with
+relative displacements are exactly where hand-prefixing breaks down,
+because the prefix changes how many displacement bytes the CPU
+consumes but not how many MASM emitted. Result: every
+`66h`-prefixed relative `call`/`jmp` in a USE16-assembled,
+D=1-executed handler is potentially mis-encoded.
+
+**Why this is a very strong candidate for THE bug (not just a bug):**
+it precisely explains the observed cascade end-to-end — handler
+entered → `eicommon` → garbage return address → jump to unmapped
+`0x120DE` → `#PF` → re-enter handler → same garbage → `#PF` → …
+host-stack overflow. It requires no appeal to unmapped stacks,
+mis-relocated descriptors, or the (now-doubted) marker results. And it
+sits exactly at `EIP=0x34EB`, the correct-offset fault location.
+
+**Caveats to nail before calling it fixed:**
+- Confirm the *first* fault that starts the cascade is actually a
+  handler invocation (i.e. that some benign earlier exception — the
+  `test_extmem` probe is harmless, but something raises the first real
+  fault — enters `entint??` → `eicommon`). Need the vector and cause
+  of that very first handler entry.
+- Verify against a second handler (`entint0e`, the `#PF` handler) that
+  its `call eicommon` is mis-encoded the same way, since in the
+  cascade it's `#PF` being delivered repeatedly.
+- Determine whether this ever worked on real hardware / under the
+  original toolchain — i.e. is this a latent bug the protected-mode
+  path always had (and PC-MOS never exercised this handler path in
+  anger), or a regression from assembling with this MASM build. The
+  answer decides whether the fix is "correct the encoding" vs.
+  "the segment should have been USE32 all along."
+
+**Likely fix shape (pending the above):** make the assembly-time and
+runtime sizes agree for this code — either assemble these handlers in
+a **USE32** segment (so MASM emits 32-bit-default encodings with
+correct 4-byte displacements, and the manual `66h`/`67h` prefixes are
+removed/inverted accordingly), or change `gdtcode`'s descriptor to
+**D=0 (USE16)** for the segment these handlers run in (if nothing else
+depends on it being D=1). The first is more in keeping with the code's
+evident intent (32-bit handlers); the second is smaller but may have
+wide side effects. This is a real, specific, source-level fix target —
+the first one this whole investigation has produced.
+
+## CONFIRMED: the mis-encoding is in the ORIGINAL shipped `$386.SYS`, byte-identical — a latent defect, not a rebuild artifact; 12 handlers affected
+
+Two verifications that harden the finding above from "strong candidate"
+to "confirmed defect":
+
+**It's in the original binary, not introduced by the MASM rebuild.**
+Read module offset `0x2755` (`entint0d`) from both the original shipped
+`SOURCES/src/latest/$386.SYS` and my rebuilt `_386.SYS`:
+- rebuild: `66 e8 74 0d b1 0d`
+- original: `66 e8 74 0d b1 0d` — **byte-identical.**
+So the `66h`-prefixed-16-bit-`call` mis-encoding is present in the OS
+as shipped. Whatever toolchain built the original produced the same
+bytes, which makes sense: it's inherent to `db 66h` + `call` in a
+USE16-assembled segment, independent of MASM version. This is a real
+latent bug in PC-MOS's protected-mode support, not something the
+rebuild introduced.
+
+**12 handler sites are affected.** The source has 14 `call eicommon`
+references; 12 follow the `db 66h` / `call eicommon` pattern (the
+mis-encoded ones). Every protected-mode exception/interrupt handler
+that routes through `eicommon` this way inherits the same malformed
+32-bit-opcode / 16-bit-displacement `call`, and therefore the same
+garbage return address in `trash1`. Confirmed `entint0e` (the `#PF`
+handler that runs 26,307× in the cascade) is encoded identically
+(`0x2286: 66 E8 …`), which is exactly why the cascade is self-
+sustaining: each re-entry re-runs the same broken handler.
+
+**This closes the diagnostic phase.** The failure is now explained
+end-to-end from first principles, every link verified against guest
+memory or the shipped binary:
+1. PC-MOS enters protected mode (`CS=0x18`, D=1) and runs its 32-bit
+   init through `test_extmem` — confirmed via the authoritative
+   `18:5272` log line.
+2. Some exception fires and vectors through the IDT (gates confirmed
+   correct) into a handler `entint??`.
+3. The handler's `db 66h` / `call eicommon` is mis-encoded (32-bit
+   call opcode, 16-bit displacement) because the code is USE16-
+   assembled but runs in a D=1 segment — confirmed by reading the
+   loaded bytes and by matching the original binary.
+4. The malformed `call` pushes a wrong 32-bit return address;
+   `eicommon` pops it into `trash1` (`0x120DE`, garbage) and
+   `jmp ss:[trash1]` jumps to unmapped memory ⇒ `#PF` at `EIP=0x34EB`
+   — confirmed by reading `trash1` and the fault EIP.
+5. That `#PF` re-enters `entint0e`, same mis-encoding, same garbage
+   jump, forever ⇒ host-stack overflow ⇒ the segfault.
+
+**The fix target is specific and source-level:** reconcile the
+assembly-time USE16 with the runtime D=1 for the handler code —
+preferred: assemble the exception-handler segment as **USE32** and
+correct the now-redundant/inverted manual `66h`/`67h` prefixes so the
+`call`/`jmp` displacements are emitted at the right width; alternative:
+run these handlers under a **D=0** code selector. Either makes the
+`call eicommon` push a correct return address, which is the single
+thing that turns the cascade into normal handler execution.
+
+**Remaining before writing the fix (small):** identify what the very
+first exception (the one that legitimately enters a handler and starts
+the chain) actually is — it's benign in the sense that a *correct*
+handler would service it, but knowing its vector/cause confirms the
+handlers were always meant to run here and pinpoints which `entint??`
+to test the fix against first. Everything else needed for the fix is
+now established.
+
+## HONESTY CHECK: the "mis-encoded call" root cause is NOT established — my static reasoning kept contradicting itself; here is what is actually measured vs. inferred
+
+Re-examined the previous two entries' root-cause claim rigorously and
+must walk part of it back. The static-analysis reasoning oscillated
+and I reached opposite conclusions on separate passes, which means the
+"encoding mismatch" story is not proven. Being explicit about the
+solid measurements vs. the shaky inferences:
+
+**Measured, trustworthy (from DOSBox's own globals / guest memory,
+offset-verified):**
+- First in-driver fault: `#PF (vec=0x0E)`, guest `CS=0x18`, `SS=0x20`,
+  `EIP=0x34EB`, `ESP=0xF78`, driver load base `0x700`.
+- `cr2` (authoritative faulting linear address, read from
+  `paging.cr2` at struct offset +4) = **`0xF5001093`** — a wild
+  high address, far above the identity map's `0x10FFFF` ceiling, so it
+  faults. `cr3=0x110000`, i.e. **paging is enabled** at the fault.
+- `EIP=0x34EB` is at `eicommon`'s tail, at/just past its closing
+  `jmp ss:[trash1]` (`0x34E7`).
+- `trash1` is defined `dw -1` (16-bit) at data offset `0x0D9F`;
+  `dvstat1` (`dw`) immediately follows at `0x0DA1` and is set to 1 or
+  3 during init (`or [dvstat1],1` / `or [dvstat1],2`).
+- The `entint0d`/`entint0e` handlers and `eicommon` are assembled in
+  `res16` — a **USE16** segment (confirmed: `res16 segment para
+  public 'CODE'`, no `use32`; contrast `res32 ... use32`).
+- At runtime these run under `gdtcode`, whose descriptor byte 6 is
+  `01001111b` ⇒ **D/B = 1 (32-bit default)**. Confirmed the PM
+  interrupt path sets `cpu.code.big = cs_desc.Big()` (true here), so
+  the decoder treats the handler as 32-bit-default at runtime.
+- The mis-encoding bytes (`66 E8 74 0D …` at `entint0d`) are
+  **byte-identical in the original shipped `$386.SYS`**, so nothing
+  here is a rebuild artifact.
+
+**The unresolved contradiction (this is the honest gap):** whether the
+`66h`-prefixed `pop ss:[trash1]` / `jmp ss:[trash1]` in `eicommon`
+execute as 16-bit or 32-bit under D=1 decides everything, and abstract
+reasoning went both ways:
+- If `66h` in a D=1 segment = operand-size override ⇒ **16-bit** ops ⇒
+  they touch only the 2-byte `trash1`, no `dvstat1` clobber, and the
+  jump target is a clean 16-bit offset. Then the fault is NOT this,
+  and something else computes `0xF5001093`.
+- If, however, the effective size ends up **32-bit** here (e.g.
+  because the USE16 *assembly* context vs. D=1 *runtime* interacts with
+  how these hand-`db`-prefixed instructions decode), the `pop`/`jmp`
+  span `trash1`+`dvstat1`, pulling `dvstat1`'s init value (`0x0001`/
+  `0x0003`) into the high word ⇒ target `0x0001_20DE = 0x120DE`, above
+  the map ⇒ `#PF`. This matches the earlier `trash1`/`0x120DE` read.
+The `cr2=0xF5001093` doesn't cleanly equal either predicted target, so
+at least one more corruption step sits between "compute jump target"
+and "the faulting access," and I have not traced it.
+
+**Correct next measurement (do this before ANY fix):** single-step the
+`jmp ss:[trash1]` at `0x34E7` in the emulator and read (a) the actual
+operand size the decoder uses, (b) the 2 or 4 bytes it reads from
+`ss:[0x0D9F]`, and (c) the resulting target / the exact access that
+sets `cr2`. That one observation resolves the 16-vs-32-bit question
+empirically and ends the static-analysis oscillation. Everything about
+the fix depends on that answer:
+- If it's the `trash1`/`dvstat1` 16-vs-32 overrun ⇒ fix is to make
+  `trash1` a `dd` (or make the `pop`/`jmp` genuinely 16-bit), a tiny
+  source change.
+- If the jump target is actually fine and `0xF5001093` comes from
+  elsewhere ⇒ the real fault is a different instruction and the whole
+  `eicommon` theory is out.
+
+**Process note (important for next session):** I let static reasoning
+about x86 prefix semantics run ahead of measurement and stated a root
+cause twice that I then had to qualify. The reliable pattern in this
+investigation has always been: measure in the emulator first, reason
+second. The single-step of `0x34E7` is a ~5-line `gdb` script
+(breakpoint at the first `CS=0x18` fault is already working; add
+`stepi` and re-read `cr2`/regs). Prefer that over any further static
+argument about what "should" happen. The measured facts above stand;
+the encoding root-cause does not until the single-step confirms it.
