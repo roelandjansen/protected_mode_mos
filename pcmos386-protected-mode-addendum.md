@@ -3796,3 +3796,599 @@ already-known problem, not a regression of this fix. Also worth
 tidying eventually: the latent `vclriop`/`vsetiop` 128-byte
 (ports 0-3FF) coverage vs. the "up to 37ff" revision comment, unrelated
 to this crash.
+
+## RESUME POINT (next session): boots past the fix, then parks at a cursor after `$386.SYS` load
+
+Fix confirmed working on the USER'S OWN real DOSBox Staging (their
+screenshot, not just the sandbox): `Loading $386.SYS version 5.01
+(921119)` prints, all seven markers `ZQA1..ZQG7` print, no crash — the
+machine sits at a blinking cursor right after the load line, with **no
+`[A:\]` prompt yet.**
+
+This is genuinely new territory: nothing past the old crash point ever
+executed before the fix, so whatever happens now is being reached for
+the first time. It stays parked at the cursor (does not advance).
+
+Hypotheses to check next, in order:
+1. **Waiting on keyboard input via the newly-rerouted path.** The fix
+   sends trapped port-0x60 reads to `nmswitch` → native MOS kernel.
+   If the kernel's native-mode int-6 / keyboard service isn't fully
+   wired, the boot could block waiting on a key that never arrives.
+   This is the most likely cause precisely because it's the path we
+   just changed.
+2. **A downstream defect that was always there but masked** by the
+   crash — first-ever execution of post-`build_page` boot code.
+3. Slow kernel init (least likely if it stays indefinitely).
+
+Method for next session (tools all ready): with the debug build,
+break after the markers / at the point the cursor appears and trace
+what the kernel does next — specifically whether it's spinning in a
+keyboard-wait loop (polling port 0x60, now trapping to `nmswitch`
+each time) or stuck elsewhere. If it's the keyboard path, the next
+fix is on the kernel/native side of the int-6 hand-off, not in
+`$386.SYS`. The bisection-marker + MemBase-relative-read + named-field
+(debug-build) techniques all apply directly.
+
+Artifacts current in outputs: `386-PATCHED.SYS`, `_386-PATCHED.ASM`,
+`fix-verified-boot.png`, this addendum.
+
+## CORRECTION to resume point: normal boot (without --testconfig) works fine
+
+User reports: **without `--testconfig`, the patched build boots
+normally.** So the parked-cursor-after-`$386.SYS` is NOT a kernel
+defect and NOT the fix failing — the fix works in the real boot path.
+The parked cursor is specific to the stripped-down TESTCONFIG floppy
+(minimal CONFIG.SYS/AUTOEXEC.BAT + marker-instrumented build used for
+isolation), which evidently just doesn't carry the boot all the way to
+a prompt the way a normal config does.
+
+So the earlier "waiting on keyboard via nmswitch" hypothesis is very
+likely a phantom — do NOT chase it first. The parked cursor is almost
+certainly a testconfig completeness issue (missing shell/driver/
+autoexec step, or a CONFIG.SYS that doesn't reach a prompt), not new
+kernel behaviour. If anyone wants to make the testconfig reach a
+prompt, diff the normal boot config against the testconfig rather than
+debugging the kernel.
+
+Bottom line: **the fix is confirmed working in normal operation.** The
+protected-mode `$386.SYS` crash is resolved.
+
+## IMPORTANT reframing: "normal boot" does NOT load $386.SYS — the stall IS the real protected-mode state
+
+Checked `run.sh`: the DEFAULT (non-`--testconfig`) boot writes a
+minimal `smpsize=16/cache=16` CONFIG.SYS with **no `MEMDEV=$386.SYS`
+line at all**. Only `--testconfig` (which uses
+`testconfig/CONFIG.SYS`, containing `MEMDEV=$386.SYS` +
+`DEVICE=$DPMI.SYS`) actually loads the protected-mode memory manager.
+
+So "normal boot works" means "the boot that doesn't exercise
+$386.SYS works" — it says nothing about the protected-mode path. The
+`--testconfig` stall-after-`$386.SYS`-load IS the true current state
+of the protected-mode bring-up. Earlier note calling the stall a
+"phantom testconfig issue" was wrong on that point (though right that
+it's not the fix failing).
+
+Corrected status of the protected-mode path with the fix applied:
+- **The crash is genuinely fixed** — `$386.SYS` no longer segfaults
+  the emulator; it loads and runs `build_page` to completion (all
+  markers A-G), in both marker and clean (marker-free) builds.
+- **It now STALLS** right after the `$386.SYS` load line instead of
+  crashing — no segfault, no `E_Exit`, emulator stays alive, but the
+  boot does not advance to process `DEVICE=$DPMI.SYS` or reach a
+  prompt. Confirmed with a complete floppy (all system files present),
+  so it is NOT a missing-file stall.
+- Adding `DEVICE=$DPMI.SYS` does NOT crash (the old `SegToSel`
+  emulator-crash is not reproduced) — but DPMI init is never reached
+  because the boot stalls before it in `$386.SYS`'s own post-paging
+  V86 continuation.
+
+**Where the stall is (code):** after `build_page` enables paging and
+far-jumps into V86 mode, execution lands at `vmstart` (`_386.ASM`
+~9405): `sti; mov ah,9; int 21h` (print `msgvm`), then set
+`parmiop+2`, hook int 13h, etc. The stall is somewhere in this
+V86-mode post-paging init — the first `int 21h` or a following op that
+now traps through the (newly-working) I/O path and doesn't return.
+
+**Clean patched artifact:** `386-PATCHED-clean.SYS` (the fix, WITHOUT
+the bisection markers, so it doesn't self-halt at the markers).
+Markers were stripped via awk (block = `; TEMPORARY diagnostic:
+bisection marker` comment through the following `pop ax`), fix
+verified still present, `build_page` verified intact, rebuilt clean
+(20672 bytes).
+
+**Next session — trace the stall:** with the debug build, break at
+`vmstart`-equivalent (or on guest `int 21h` in V86 after paging) and
+single-step / watch to see whether the first `int 21h` returns, or the
+guest spins. If it's an I/O/interrupt that traps to our new `nmswitch`
+hand-off and the native MOS handler doesn't complete it, the next fix
+is on the native-mode int-6 service side (the counterpart to the
+$386.SYS-side fix already made). The batch `gdb` `run &`/`interrupt`
+trick did NOT work (read CS=0 before guest start); instead break on a
+specific symbol/condition (e.g. CPU_Interrupt with a V86 int 21h) and
+read named fields.
+
+## Stall trace: V86 task switch SUCCEEDS, but `vmstart`'s message-print `int 21h` (AH=9) is never reached
+
+Traced the post-`build_page` stall with the debug build (named
+fields, symbol breakpoints). Findings, all measured:
+
+- **`build_page` completes and the V86 task switch fires.** Broke on
+  `cpu_switch_task`: `new_tss_sel=0x10` (gdttss2), `tstype=0` (JMP-task),
+  from `CS=0x18:EIP=0x504c` (native, build_page tail). This is the
+  `ltr ax` + `far jmp gdttss2` at build_page+~255 that enters V86 at
+  `vmstart` (offset 0x0887). So paging setup + V86 entry mechanism
+  work.
+- **V86 mode is entered (VM=1).** Just after the switch the guest is
+  running in V86 (`VM=1`, executing driver code at CS=0x70).
+- **BUT `vmstart`'s first real action never happens.** `vmstart` does
+  `sti; mov ah,9; mov dx,offset msgvm; int 21h` to print "386
+  Protected mode and paging are now active." A breakpoint on
+  `CPU_Interrupt if num==0x21 && VM && AH==9` **never fires**, and that
+  message never appears on screen. So execution enters V86 but does
+  not reach (or does not complete) the `vmstart` message print.
+- A *different* V86 `int 21h` with **AH=0x4C (terminate)** DOES fire,
+  at `CS=0x76cd:EIP=0xa29e` — the same `0x76cd` garbage-ish segment
+  that recurred in the pre-fix crash. So something in V86 is executing
+  at `0x76cd` and issuing a DOS-terminate, rather than `vmstart`
+  running cleanly.
+
+**Interpretation (measured facts, cautious inference):** the V86 task
+is entered but is NOT executing `vmstart` as intended — it lands/runs
+elsewhere (`CS=0x76cd` region) and terminates. Either the TSS2 V86
+context (CS:IP/SS:SP/EFLAGS the task switch loads) doesn't point at
+`vmstart` correctly, or `vmstart` runs briefly then control diverges
+into the `0x76cd` code before the AH=9 print. The recurring `0x76cd`
+strongly suggests the same *class* of issue as the fixed one (a V86
+context / vector pointing somewhere unintended), now in the
+task-switch / TSS2-setup path rather than the I/O-trap path.
+
+**Next step:** read the **TSS2 (gdttss2) contents** the task switch
+loads — specifically its V86 CS:IP (should be gdttss2's EIP=0x0887 /
+the driver code selector) and SS:SP and EFLAGS. Compare against what
+the guest actually has right after the switch. If TSS2's saved CS:IP
+isn't vmstart, the bug is in how gdttss2 is initialized (a TSS setup
+defect). Read gdttss2 via MemBase-relative access (its GDT descriptor
+base + the TSS field offsets) at the `cpu_switch_task` breakpoint,
+before the switch consumes it. That directly shows whether the V86
+entry target is correct.
+
+**Bottom line unchanged:** the emulator-crash is fixed; remaining work
+is getting the V86 post-paging init to actually run `vmstart` instead
+of diverging. This is a separate, smaller defect than the crash, now
+localized to the TSS2/V86-entry context.
+
+## Stall pinned to TSS2's V86 entry EIP: the task switch enters at EIP=0x4557, not vmstart (0x0887)
+
+Traced with named-field reads from `cpu_switch_task` in the debug
+build. The stall's mechanism is now precisely located:
+
+- **Exactly ONE switch to TSS2 (gdttss2, sel 0x10) happens**, and it
+  is the initial V86 entry. Measured (DOSBox's own `cpu_switch_task`
+  locals, read from the TSS at `new_tss.base`):
+  `new_cs=0x70` (correct V86 driver segment), `new_eflags=0x23002`
+  (VM=1, correct), `new_ss=0x6b3d`, `new_esp=0xe05`, `new_cr3=0x110000`
+  — **but `new_eip=0x4557`.**
+- **vmstart is at offset `0x0887`** (confirmed in a freshly
+  regenerated clean-build listing; `t2eip dw offset vmstart` = 0x0887
+  statically). So the V86 task should enter at 0x0887 but instead
+  enters at **0x4557** — the wrong address. That is exactly why
+  vmstart's `int 21h AH=9` "protected mode active" message never
+  prints and the boot stalls: the V86 task never runs vmstart.
+
+**Nothing in `_386.ASM` writes `t2eip` at runtime** — only the static
+`dw offset vmstart` init and the runtime writes to `t2cr3`/`t2cs`/
+`t2ss`/`t2sp`/`t2es`/`t2ds`/etc. (none touch eip). So 0x4557 should be
+impossible if the TSS DOSBox reads is the real, correctly-located
+tss2.
+
+**Open reconciliation (do this first next session):** confirm DOSBox
+is reading `t2eip` from the RIGHT place. Two possibilities:
+1. **`gdttss2`'s descriptor base is wrong** → DOSBox reads the TSS eip
+   field from the wrong linear address, getting 0x4557 (some unrelated
+   code/data). The `gdttss2` base is relocated at load (`add word ptr
+   [gdttss2+2],ax` / `adc [gdttss2+4],dl`, ~line 9373). If that
+   relocation is off, the whole TSS is mislocated. CHECK: read
+   `gdttss2`'s descriptor base at the switch (`new_tss.base=0x16d0`
+   was reported — verify 0x16d0 is where tss2 actually is: driver base
+   0x700 + tss2 offset. tss2's listing offset via the clean LST minus
+   any reloc should equal 0x16d0-0x700=0xFD0; but t2eip is tss2+0x20 =
+   0xFF0 listing offset — consistent with the earlier confusion).
+   If `new_tss.base` is wrong, the descriptor-base relocation is the
+   bug.
+2. **The TSS really does contain 0x4557** because something (CPU
+   write-back on a *prior* switch, or a stray write) changed it — but
+   only one switch was observed, so this is less likely.
+
+Most probable: **`gdttss2` descriptor base relocation** places the TSS
+at a linear address whose +0x20 offset isn't the real `t2eip`. Note
+`new_tss.base=0x16d0` vs. expected `0x700 + 0xFD0 = 0x16D0` — these
+MATCH, so the base looks right, which is confusing and means the eip
+field genuinely reads 0x4557 at the correct location. That pushes back
+toward "something wrote it" OR "t2eip's position within the TSS as
+DOSBox's `offsetof(TSS_32,eip)` expects differs from PC-MOS's TSS
+layout." **The latter is a strong candidate:** PC-MOS's hand-built TSS
+(the `tss2` label block) must match the hardware 386 TSS layout
+exactly; if a field size/order is off, DOSBox reads eip from the wrong
+sub-offset. CHECK: compare PC-MOS's tss2 field offsets against the
+architectural 386 TSS (eip at +0x20, eflags +0x24, cs +0x4C, etc.)
+byte-for-byte. A layout mismatch there would explain everything and
+be the real bug.
+
+**Next action:** dump the full TSS2 region (raw bytes at
+`new_tss.base` for ~0x68 bytes) at the switch and compare field-by-
+field to the architectural 386 TSS layout AND to PC-MOS's `tss2`
+source block. Whichever field is misaligned is the fix. This is a
+concrete, bounded comparison, not open-ended.
+
+Status: crash fixed; stall localized to the TSS2 V86-entry EIP being
+0x4557 instead of vmstart 0x0887; next step is a byte-level TSS layout
+comparison to find why.
+
+## TSS layout is CORRECT; the TSS2 memory is being CLOBBERED by an overlapping kernel data string
+
+Two results this session:
+
+**1. TSS2 layout matches the architectural 386 TSS exactly — not the
+bug.** Computed every `tss2` field's byte offset (from a fresh clean
+listing, tss2 base at listing 0x0FD0) relative to the TSS base and
+compared to the hardware 386 TSS:
+- link 0x00, ESP0/SS0 0x04/0x08, ESP1/SS1 0x0C, ESP2/SS2 0x14,
+  CR3 0x1C, **EIP 0x20**, EFLAGS 0x24, EAX 0x28, ... ES 0x48, CS 0x4C,
+  SS 0x50, DS 0x54, FS 0x58, GS 0x5C.
+All match. `t2eip` is correctly at TSS+0x20. So DOSBox reads eip from
+the right sub-offset. Layout theory refuted.
+
+**2. The TSS2 memory (t2eip at linear 0x16F0) is overwritten at
+runtime by a text string, not by any TSS/eip write.** Watched linear
+0x16F0 (= `new_tss.base 0x16D0` + 0x20). It gets written byte-by-byte
+with ASCII, and a memory dump at the watchpoint shows the string
+**"...occurred without MOS USEIRQ  $"**. The value `0x4557` that
+ends up in t2eip is bytes `57 45` = "WE" — part of that message text.
+Found the string: `irqwarn`/`irqw1` in **`MOSNXTSK.ASM`** (line 688),
+the kernel's task-scheduler `gdata` segment: `'IRQ ' 'occurred
+without MOS USEIRQ'` — the unhandled-hardware-IRQ warning.
+
+**So the real problem is a MEMORY OVERLAP:** `$386.SYS`'s TSS2 (loaded
+at linear ~0x16D0 in this test, because `$386.SYS` loads at segment
+0x70 / linear 0x700) occupies the same physical memory as the
+kernel's `MOSNXTSK` `gdata` where the `irqwarn` message lives. When
+that region is written (the message string is placed/used), it
+clobbers the TSS2 eip field, so the V86 task switch enters at garbage
+(0x4557 = message text) instead of vmstart (0x0887).
+
+**Important caveat / open question (resolve first next session):** the
+clobbering write was observed coming from guest `CS=0xf000` (DOSBox's
+emulated BIOS) in a `VM=0` state, which is suspicious — it may be an
+*early* write to physical 0x16F0 that happens BEFORE `$386.SYS`'s TSS
+is placed there (i.e. a spurious watchpoint hit on that physical
+address during BIOS/boot, not the actual TSS clobber). Must confirm
+the ORDERING: does the string land at 0x16F0 (a) after `$386.SYS`
+placed a valid 0x0887 there — genuine clobber — or (b) before, so the
+TSS was never correctly initialized at that address in the first
+place. Method: at the V86 task switch (cpu_switch_task, tss2), read
+t2eip; if 0x4557, walk back — set the watchpoint AFTER confirming
+t2eip==0x0887 once, and catch the specific write that changes it,
+recording guest CS:EIP and whether VM/pmode. If the writer is the
+kernel's MOSNXTSK in native/V86 mode (not BIOS), it's a true overlap.
+
+**If it's a genuine overlap, the fix direction:** either $386.SYS's
+TSS must live where the kernel won't overwrite it, or the load
+address/memory reservation for the MEMDEV driver vs. kernel gdata is
+wrong. This is a load-layout / memory-reservation issue between
+$386.SYS and $$MOS.SYS, a different class from the contirq fix.
+NOTE: this MAY be specific to our minimal test's load layout (segment
+0x70) — worth checking whether $386.SYS is supposed to load higher,
+where no overlap occurs. The user's real/normal setup may place it
+differently. Do NOT assume a kernel source bug until the load-address
+question is settled.
+
+Status: crash fixed; stall = TSS2 eip clobbered to message-text 0x4557
+by an overlapping kernel `gdata` region (the USEIRQ warning string);
+next step is confirming write ordering + whether it's a load-layout
+artifact of the test config vs. a genuine overlap bug.
+
+## Ordering NAILED: TSS2 eip is NEVER a valid 0x0887 at runtime — it only ever holds message-string bytes; the overlap is real
+
+Logged every write to linear 0x16F0 (t2eip) with full guest context.
+Definitive results:
+
+- **TSS base is genuinely correct**: at the V86 task switch
+  (cpu.cpp:670, after descriptor resolution) `new_tss.base=0x16d0`
+  (= driver load 0x700 + tss2 offset 0xFD0), GDT base 0x1e70. The
+  earlier `0xffff8fc0` was an uninitialized `new_tss` at function
+  entry — a red herring. So DOSBox reads eip from the right place.
+- **t2eip @ 0x16f0 is NEVER 0x0887 at runtime.** Every write observed
+  (4 total) came from guest `CS=0xf000:EIP=0x1145`, **real mode**
+  (VM=0, pmode=0), filling the location byte-by-byte with ASCII:
+  `0x086f → 0x636f → 0x6357 → 0x4557` ("o","co"...,"W","WE") — the
+  `MOSNXTSK` `irqwarn` string "IRQ ... occurred without MOS USEIRQ".
+  The static 0x0887 from the $386.SYS image is never present there at
+  the point the task switch reads it. So it is a genuine overlap: the
+  kernel's data write lands on $386.SYS's TSS2 eip field.
+
+- **$386.SYS loading at segment 0x70 is BY DESIGN** (MOSINIT.ASM:980
+  `mov ax,0070h ; memdev driver starts at 00700`; :1105 "lowest
+  possible segment (70:0 for grp)"). So the low load address is not a
+  test artifact — that's where PC-MOS puts MEMDEV, then relocates the
+  kernel elsewhere. TSS2 legitimately sits at ~0x16D0.
+
+- **The clobbering writer is the `irqwarn` (unhandled-IRQ warning)
+  path** in `MOSNXTSK.ASM` (`testirqw`, ~line 1806: copies the IRQ
+  warning string via `rep movsb` to display through the int-24
+  handler). It runs because **an unhandled hardware IRQ occurs during
+  boot.**
+
+**Still not fully clean (one loose thread):** at the clobbering write,
+guest `SS=0x6b3d:SP=0xd21` → linear 0x6c0f1, which is NOT 0x16f0 — so
+the write to 0x16f0 is not a simple `ss:sp` stack push as the
+`testirqw` "copy to stack" reading predicted. The write is at
+`CS=0xf000:EIP=0x1145` landing at absolute 0x16f0. Either (a) the
+`0xf000:0x1145` writer is a different routine than `testirqw` (the
+string content matches irqwarn, but the copy destination math doesn't
+match a stack at 0x6c0f1), or (b) it writes irqwarn to a FIXED
+low-memory display/scratch buffer at 0x16f0 that overlaps the TSS.
+Need to identify exactly what code is at kernel linear 0xf1145 and
+what its write destination register (es:di) resolves to.
+
+**But the CORE finding is nailed and does not depend on that thread:**
+the stall is caused by **an unhandled IRQ during boot triggering the
+kernel's `irqwarn` path, whose string write lands on $386.SYS's TSS2
+eip field (overlapping memory at ~0x16f0), corrupting the V86 entry
+point from 0x0887 to message-text 0x4557**, so the V86 task switch
+jumps to garbage and the boot stalls.
+
+**This connects directly to our fix.** Our contirq fix routes
+unregistered V86 I/O traps to `nmswitch` (native mode). It is very
+plausible that this now surfaces an IRQ the kernel considers
+"unhandled" (no `MOS USEIRQ` registered for it) — exactly the
+condition that fires `irqwarn`. So the next question is: **which IRQ
+is firing unhandled, and is our nmswitch routing causing it?** The fix
+stopped the crash but may have converted the trapped-I/O into an
+IRQ-delivery the kernel isn't configured for.
+
+**Next steps (two, independent):**
+1. Identify the unhandled IRQ: break on `testirqw`/the irqwarn path in
+   the kernel and read which IRQ number is being warned about. If it's
+   the keyboard IRQ (1) or the port our fix rerouted, the fix needs
+   refinement (route to a handler that completes, not one that raises
+   an unhandled IRQ).
+2. Independently, the TSS-overlap is a latent fragility: $386.SYS's
+   TSS2 sharing memory with a kernel display buffer means ANY use of
+   that buffer corrupts the TSS. Worth understanding whether that
+   overlap is expected (kernel should never write there during V86
+   operation) or a layout bug.
+
+Status: crash fixed; stall root cause NAILED to an unhandled-IRQ
+`irqwarn` write corrupting the overlapping TSS2 eip; remaining work is
+identifying/handling the unhandled IRQ (likely connected to the fix's
+nmswitch routing).
+
+## MAJOR CORRECTION: the TSS-clobber theory is WRONG — 0x4557 IS vmstart's correct address; the V86 task enters vmstart correctly
+
+Retracting the entire "TSS2 eip clobbered to 0x4557" conclusion from
+the last several entries. It was based on a false premise: that
+vmstart's address is 0x0887.
+
+**The facts, corrected:**
+- The listing shows `vmstart: 0x0887` and `VMSTART ... 0887 INIT16` —
+  but **0x0887 is the INIT16 SEGMENT-LOCAL offset**, not the MMGRP
+  group offset that `t2eip` needs.
+- `t2eip dw offset mmgrp:vmstart` shows `0887 R` — the **`R` = a
+  RELOCATABLE fixup**. The stored `0x0887` is pre-relocation; at link
+  time the INIT16 group base is added. INIT16 sits after RES16
+  (0x34EC) + RES32 (0x7BF) in the group, so vmstart's real group
+  offset is ~0x4557.
+- The raw `.SYS` file at the t2eip position holds `57 45` = **0x4557**
+  — which is exactly vmstart's correct relocated group address. So the
+  TSS eip is RIGHT. `0x0887` never appears in the file precisely
+  because it was relocated to 0x4557.
+- The "irqwarn message overlapping the TSS" was a **coincidence of
+  bytes**: 0x4557 = "WE", which also appears in the irqwarn text. Two
+  unrelated things sharing the byte pattern 57 45 led the last few
+  entries down a wrong path. The `0x16f0` watchpoint hits were on a
+  DIFFERENT physical use of that address, not the TSS. (This is the
+  same class of false-positive as the earlier ascending-heap-byte and
+  0x8b00 mistakes — a plausible-looking value that wasn't what it
+  seemed.)
+
+**So, corrected state:** the V86 task switch enters vmstart at the
+CORRECT address (0x4557 = vmstart). CS=0x70, VM=1, eflags correct.
+The TSS is fine. There is no clobber and no memory-overlap bug.
+
+**The REAL open question (unchanged in effect, new in location):**
+the V86 task enters vmstart correctly, but vmstart's very first
+visible action — `sti; mov ah,9; mov dx,offset msgvm; int 21h` to
+print "386 Protected mode and paging are now active" — never completes
+(the message never appears, and a breakpoint on V86 int 21h AH=9 never
+fires). So execution enters vmstart but stalls/diverges within the
+first few instructions, BEFORE or AT that int 21h.
+
+**Next step (clean, on solid ground):** single-step or trace guest
+execution from the vmstart entry (V86, CS=0x70, EIP=0x4557) forward a
+handful of instructions and see where it goes — does `sti` re-enable
+interrupts and immediately take a (mis-handled) hardware IRQ? does the
+`int 21h` reflect somewhere wrong? Given `sti` is the very first
+vmstart instruction, a pending/immediately-firing IRQ that the V86
+setup can't yet handle is a prime suspect — which loops back to the
+"unhandled IRQ" thread, but now correctly located AT vmstart entry,
+not as a TSS clobber. Break on the first V86 interrupt/exception AFTER
+the task switch to tss2 and read its vector + where it goes.
+
+Status: crash fixed; TSS/clobber theory retracted (0x4557 is correct);
+stall is that vmstart's opening `sti`/`int 21h` doesn't complete —
+likely an interrupt taken immediately on `sti` that the fresh V86
+context mis-handles. Trace forward from vmstart entry next.
+
+## Stall mechanism found: vmstart's `sti` takes an immediate timer IRQ (int 8) that reflects to a GARBAGE vector — same ivtable[N]==0 bug, but int 8 and via the UNFIXED dovmint path
+
+Traced guest execution forward from the vmstart entry. The sequence
+after the V86 task switch (all measured):
+- **INT #1: int 8 (IRQ0 timer), V86, CS=0x70 EIP=0x4558** — vmstart's
+  very first instruction `sti` (at 0x4557) re-enables interrupts and a
+  timer IRQ fires IMMEDIATELY, at EIP 0x4558 (one byte past sti).
+- INT #2: #PF CS=0x6b — fault while handling int 8.
+- INT #3: int 21h at CS=0x76cd (garbage segment).
+- INT #5-#10: int 1 / int d / #PF cascade into the weeds.
+
+So vmstart is entered correctly but never gets past its first
+instruction: `sti` immediately takes the timer IRQ, whose handling
+diverges into garbage, and the `int 21h AH=9` message print is never
+reached. That's the stall.
+
+**Root cause of the divergence — measured — is the SAME class as the
+original crash:**
+- int 8 fires in V86; the reflection looks up `ivtable[8]` → **`0`
+  (measured)** — no V86 timer handler registered.
+- fallback loads **real-mode `IVT[8] = 0x76cd:d379` (measured)** — the
+  recurring garbage `0x76cd` — and reflects the V86 task there →
+  cascade.
+
+**Why our fix didn't catch this:** there are TWO reflection routines
+with the identical `ivtable[N]==0 → real-mode-IVT fallback` defect:
+- `contirq` — which we FIXED (routes ivtable==0 to nmswitch)
+- `dovmint` (line ~7165, `nirq1` fallback) — **NOT fixed**, same bug.
+The int 8 timer path evidently reflects via `dovmint` (or another
+unfixed site), so it still falls to the garbage IVT. Our contirq fix
+was necessary but INCOMPLETE — the same guard is needed at dovmint and
+any sibling reflection sites.
+
+**But there's a deeper issue than just patching dovmint too:**
+real-mode `IVT[8]` itself is garbage (`0x76cd:d379`), not a valid
+timer handler. In a correct boot, either (a) the V86 task's IVT[8]
+should point at a real handler, or (b) ivtable[8] should be populated
+so reflection never falls back. The fact that BOTH are unset/garbage
+at first-timer-tick means the V86 environment is brought up with
+`sti` enabled BEFORE its interrupt vectors (ivtable or the V86 IVT)
+are ready. Prime suspects:
+1. vmstart does `sti` too early — before populating the V86 IVT /
+   ivtable for the hardware IRQs. Masking IRQs (or leaving IF clear)
+   until vectors are set would avoid the premature timer tick.
+2. Or the kernel is supposed to register ivtable[8] (and the V86
+   IVT[8]) before $386.SYS enables interrupts, and an ordering/
+   handshake is off.
+
+**Next steps (concrete):**
+1. Apply the SAME nmswitch-guard fix to `dovmint`'s `nirq1` fallback
+   (and audit for other `ivtable[N]` fallback sites) — mirrors the
+   contirq fix. This alone may convert the garbage-reflect into a safe
+   native-mode hand-off and let boot proceed.
+2. Investigate whether `sti` in vmstart is premature: check what sets
+   up IVT[8]/ivtable[8] and whether it runs before or after vmstart's
+   sti. If after, either defer the sti or pre-populate the timer
+   vector.
+3. Check whether IVT[8]=0x76cd:d379 is ever supposed to be valid —
+   0x76cd recurs everywhere garbage appears, so identifying what
+   0x76cd:xxxx is (uninitialized? a real MOS structure?) would clarify.
+
+Status: crash fixed; TSS theory retracted (was wrong); stall now
+correctly traced to vmstart's `sti` taking an immediate timer IRQ that
+reflects through the UNFIXED dovmint path to a garbage IVT[8]. The fix
+direction is clear: extend the ivtable-guard fix to dovmint (+ siblings)
+and/or fix the premature-sti / vector-setup ordering.
+
+## CORRECTION before patching: 0x76cd is NOT garbage — it's the valid MOS timer handler; the reflection is CORRECT. Do NOT extend the fix to dovmint.
+
+Almost applied a dovmint fix, but checked the premise first (lesson
+learned from prior wrong assumptions). Read the code at
+IVT[8]=0x76cd:d379 (linear 0x84049): bytes `53 57 1E 2E 8E 1E` =
+`push bx; push di; push ds; mov ds,cs:[...]` — a normal interrupt-
+handler prologue. And 0x76cd0 has `E8 00 00` (call) — valid code.
+
+**So `0x76cd` is the MOS kernel's relocated code segment, NOT garbage.
+IVT[8] correctly points at the MOS timer handler. The V86 reflection
+of int 8 is working correctly.** My repeated reading of 0x76cd as
+"garbage" across recent entries was WRONG — it's valid throughout.
+The "extend the ivtable guard to dovmint" plan is therefore also
+wrong: the ivtable[8]==0 → real-mode-IVT fallback is doing exactly the
+right thing (reflecting the timer to the valid MOS handler).
+
+**Corrected stall target:** the timer IRQ reflects correctly to the
+MOS handler at 0x76cd:d379, but then **INT #2: #PF at CS=0x6b
+EIP=0x4567 (VM=0)** fires — a page fault during/after the timer
+handler runs. THAT #PF is the divergence, and it cascades. So the real
+question is why a #PF occurs while servicing the (correctly-reflected)
+timer interrupt.
+
+`CS=0x6b` (the #PF site) — 0x6b is a protected-mode selector (not a
+V86 segment; VM=0 there). 0x6b = index 0xD, RPL 3. Something transitions
+to native/PM at selector 0x6b and page-faults at EIP 0x4567.
+
+**Next step (corrected):** trace what the timer handler at 0x76cd:d379
+does that leads to the #PF at 0x6b:0x4567. Is it:
+1. A legitimately-handled #PF (demand paging) that DOSBox or the setup
+   mis-handles? Check CR2 at that #PF — if it's a normal not-present
+   page the handler should map, the bug is in the page-fault handler
+   or the page tables. 
+2. Or the timer handler touching memory that isn't mapped in the V86
+   task's address space (paging enabled with an incomplete map)?
+Read CR2 and the faulting instruction at the #PF (CS=0x6b:0x4567,
+which is PM — decode against _386.LST after finding what's at group
+offset 0x4567... note 0x4567 is near vmstart's 0x4557 region!).
+
+**IMPORTANT observation:** the #PF EIP 0x4567 is only 0x10 past
+vmstart's entry 0x4557. So the #PF may be happening back in the
+$386.SYS code near vmstart, not deep in the timer handler — suggesting
+the timer interrupt is taken, reflected, the MOS handler runs and
+IRETs back toward vmstart, and THEN a #PF hits around vmstart+0x10.
+That would point at vmstart's own early instructions touching unmapped
+memory once the timer perturbs state. Get CR2 + exact faulting insn.
+
+Status: crash fixed; NO further fix applied this session (correctly
+avoided patching dovmint after disproving the "garbage IVT" premise);
+stall is a #PF near vmstart (0x6b:0x4567) taken in the wake of the
+first timer IRQ. Next: read CR2 + faulting instruction to find why.
+Do NOT assume 0x76cd is garbage — it is the valid MOS handler.
+
+## #PF pinned: vmstart's `mov ax,es:[004ch]` executes in NATIVE mode (VM=0) with a bad ES — mode/selector corruption after the timer IRQ
+
+Got CR2 + the faulting instruction (debug build, named fields):
+- **CR2 = 0x74a3074c**, errorcode = 0x4 (user, not-present, read)
+- **CS=0x6b:EIP=0x4567, VM=0, pmode=1**
+- Faulting instruction bytes `26 A1 4C 00` = **`mov ax, es:[0x004C]`**
+
+This is vmstart's own instruction: after `sti; ...int 21h...`, vmstart
+does `mov es,[zero]` (point ES at segment 0) then `mov ax,es:[004ch]`
+to save the real-mode int-13h vector. The low word of CR2 (0x074c)
+matches the `[0x4C]` displacement, so the fault is this ES:[4C] read.
+
+**The core anomaly: vmstart is a V86 task (should run at VM=1), but
+the fault shows VM=0 (native protected mode).** In V86, `es=0` makes
+`es:[4C]` = linear 0x4C (the IVT — valid). In native mode, ES holds a
+*selector* and `es:[4C]` uses the descriptor base; here ES resolves to
+base ~0x74a30000, so the read targets 0x74a3074c — unmapped → #PF.
+`CS=0x6b` is likewise a PM selector, not a V86 segment. So execution
+reached vmstart's 8th instruction but the CPU is in the WRONG MODE.
+
+**So the real bug is a mode/context corruption around the first timer
+IRQ:** vmstart enters correctly in V86, `sti` takes int 8, the timer
+reflects to the valid MOS handler (0x76cd), and somewhere in that
+round trip the CPU ends up back in vmstart's instruction stream but in
+NATIVE mode with PM selectors in CS/ES instead of V86 segments. Then
+vmstart's V86-assuming code (`mov es,[zero]` / `es:[4C]`) faults.
+
+**Two candidate explanations (need one more measurement to pick):**
+1. The int 8 IRET (or the task/handler return) fails to restore VM=1,
+   returning to vmstart in native mode. A V86 monitor must IRET with
+   VM set in the popped EFLAGS; if the saved/reflected frame has VM
+   clear, control resumes native.
+2. Execution never actually left native mode: maybe vmstart's early
+   instructions themselves run native (the task switch didn't truly
+   establish V86 for the code path that reaches 0x4567), and the
+   earlier "VM=1 at entry" reading was for a different instant.
+
+**Next step:** single-step (or breakpoint-walk) from vmstart entry
+(V86, 0x4557) through the int 8 and back, watching the VM flag and
+CS/ES at each interrupt boundary, to find the exact transition where
+VM goes 1→0. That transition is the bug site. Likely in the timer-
+interrupt reflect/return path (dovmint/contirq/the IRET), OR in how
+the task switch set up EFLAGS.VM for the running code vs. the TSS.
+
+Reminder discipline: 0x76cd = valid MOS handler (verified). Do not
+re-chase it as garbage. The bug is the VM=1→0 mode loss around the
+first timer IRQ, surfacing as vmstart's es:[4C] read faulting in
+native mode.
+
+Status: crash fixed; stall = vmstart's `mov ax,es:[4C]` faulting
+because the CPU is in native mode (VM=0) when it should be V86; root
+is a VM-flag/mode loss around the first timer IRQ. Next: find the
+exact VM 1->0 transition.
