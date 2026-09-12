@@ -4392,3 +4392,67 @@ Status: crash fixed; stall = vmstart's `mov ax,es:[4C]` faulting
 because the CPU is in native mode (VM=0) when it should be V86; root
 is a VM-flag/mode loss around the first timer IRQ. Next: find the
 exact VM 1->0 transition.
+
+## BREAKTHROUGH TEST: "always reflect via real-mode IVT" (revert the nmswitch guard) boots FAR further — protected mode active + DPMI loading, NO crash
+
+Tested the hypothesis that the nmswitch guard over-triggers. Made a
+variant (TEST v2) where the `ivtable[N]==0` case falls through to the
+ORIGINAL real-mode-IVT reflection instead of jumping to nmswitch (i.e.
+the guard is neutralized; `jmp short cirqhndl` always). Rebuilt, booted
+with MEMDEV=$386.SYS + DEVICE=$DPMI.SYS.
+
+**Result — dramatic progress, on screen:**
+- `486 Protected mode and paging are now active.` — vmstart's message
+  PRINTS (never appeared before; the stall is gone).
+- `640K RAM found in first megabyte; 65152K total RAM found; 640K
+  allocated to first megabyte.` — memory init completes.
+- `PC-MOS DPMI 1.0 HOST (910430) (c) Copyright 1991 The Software Link`
+  — **DPMI loads and initializes.**
+- No segfault (ran to timeout alive), across two runs.
+
+**This overturns the nmswitch-guard fix AND the original int-6
+"garbage IVT" diagnosis.** Key realization: `0x76cd` is the valid MOS
+kernel segment for BOTH IVT[6] and IVT[8] (verified: IVT[8] target is
+real handler code). So reflecting `ivtable[N]==0` interrupts to the
+real-mode IVT was ALWAYS correct — the original `contirq` behavior was
+fine. Our nmswitch guard broke the timer (int 8) by forcing it native,
+which lost VM=1 and made vmstart fault. Removing the guard fixes that
+AND does not reintroduce the original crash.
+
+**So what WAS the original crash, then?** The original crash
+(pre-any-fix) segfaulted at the first I/O trap. Our nmswitch guard
+"fixed" it — but if reflecting-via-IVT is actually fine, the guard
+shouldn't have been necessary. Possible reconciliation: the original
+crash's `ivtable[6]==0` → IVT[6] reflection sent the V86 task to
+0x76cd:a1c9, which then did something that crashed ONLY because of a
+DIFFERENT downstream issue that the later boot progress (now reached)
+handles. OR the original "crash" and this "stall" were the same
+mode-loss mechanism and the guard just moved it around. Needs one
+clean comparison: boot the TRULY ORIGINAL unpatched $386.SYS and
+re-confirm exactly where/how it dies, now that we understand V86/IVT
+reflection.
+
+**Current best fix candidate: remove the nmswitch guard entirely**
+(revert to original contirq reflection). It boots to protected-mode +
+DPMI with no crash. BUT: the screen shows garbled text in the middle
+region during the continued boot — something downstream is still off
+(display/cursor or a further reflection issue). Not a crash, but not a
+clean prompt yet.
+
+**Next steps:**
+1. Confirm the original unpatched $386.SYS failure mode for a clean
+   before/after comparison (did the guard ever actually help, or was
+   it solving a misdiagnosed problem?).
+2. Investigate the garbled mid-screen text in the TEST v2 boot — is it
+   a real issue or cosmetic? Let it run longer / capture later frames
+   to see if it reaches a prompt.
+3. If "remove guard" proves clean, that's the fix — simpler than the
+   guard. Keep the guard only if some vector genuinely needs it (an
+   ivtable==0 AND invalid-IVT case); test int 6 specifically.
+
+Status: MAJOR progress — removing the over-aggressive nmswitch guard
+boots to "protected mode active" + DPMI HOST loading with no crash.
+Diagnosis corrected: reflecting ivtable==0 ints via real-mode IVT is
+correct (0x76cd is valid); the guard broke the timer. Remaining:
+confirm before/after vs original, chase the mid-boot garbled text to a
+prompt, finalize the fix (likely: remove the guard).
