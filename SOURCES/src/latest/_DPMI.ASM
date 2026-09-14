@@ -3942,13 +3942,35 @@ MkErrorHandler	db	'>E-ERRORHANDLER',13,10,'$'
 ; Does not touch CF (INC doesn't affect it).
 ;
 WriteLog	proc	near
+		pushf
 		push	ax
 		push	bx
+		push	es
 		mov	bl,al
 		xor	bh,bh
 		inc	byte ptr cs:[Counters+bx]
+;
+; TEMPORARY diagnostic: also emit a VISIBLE per-step marker straight
+; to video memory (b800:0e60 + step*2, row 23), so the init progress
+; can be read off the screen without DUMPLOG. DUMPLOG cannot help
+; here: it locates Counters via int 2Fh 1687h, i.e. via the DPMI
+; host -- and when init FAILS there is no host, so it reports "No
+; DPMI host found" and the counters stay unreachable. A direct memory
+; write needs no host, no int 21h and no reflection.
+; Step -> character: 1..9 print as '1'..'9', 10 prints as ':'.
+; Last character present = last step reached. See addendum.
+		push	ax
+		mov	ax,0b800h
+		mov	es,ax
+		pop	ax
+		shl	bx,1
+		add	al,'0'
+		mov	es:[bx+0e60h],al
+		mov	byte ptr es:[bx+0e61h],07h
+		pop	es
 		pop	bx
 		pop	ax
+		popf
 		ret
 WriteLog	endp
 
@@ -3957,24 +3979,44 @@ DevLoadMsg	db	13,10,'>>> DEVICE=$DPMI.SYS NOW LOADING <<<',13,10,'$'
 InstallDriver	proc	near
 		mov	ax,cs
 		mov	ds,ax
-		mov	dx,offset DevLoadMsg
-		mov	ah,9
-		int	21h
+;
+; DIAGNOSTIC TEST: both int 21h ah=9 sign-on prints in this routine
+; are disabled. They are the suspected source of the screen garbage
+; that appears the instant $DPMI.SYS's ddinit0 is entered: the
+; garbage contains this driver's OWN image (HostInfo at image offset
+; 0181h and the Copyright text at 0E30h appear in it, with code bytes
+; between), which is what an ah=9 print does when ds:dx points near
+; the image start instead of at the intended message -- it runs
+; forward dumping memory until it happens to hit a '$' byte.
+;
+; Note DevLoadMsg was project-added instrumentation and is broken
+; independently of that: it contains a literal '$' inside the text
+; ('$DPMI.SYS'), and ah=9 terminates on '$', so it could only ever
+; have printed '>>> DEVICE='.
+;
+; If the screen comes out clean with these two removed, the prints
+; are confirmed as the garbage source and the remaining question is
+; only how to emit a sign-on safely. If the garbage persists, it
+; originates elsewhere in the init path and these were innocent.
+; See protected-mode assessment addendum.
+;		mov	dx,offset DevLoadMsg
+;		mov	ah,9
+;		int	21h
 		push	es
 		mov	ax,cs		; ah,9 above clobbered ax -- reload cs
 		push	ax		; save cs (currently in ax)
 		mov	ax,0040h
 		mov	es,ax		; es = BIOS data area segment
 		pop	ax		; ax = cs again
-		mov	es:[0f0h],ax	; record our segment at 0040:00F0
-					; regardless of install outcome --
-					; diagnostic only
+		mov	es:[0f2h],ax	; record our segment at 0040:00F2
+					; (moved off 00F0: MOSINIT2/MOSDDINT
+					; also write 00F0, contaminating it)
 		pop	es
 		mov	al,1
 		call	WriteLog
-		mov	dx,offset Copyright
-		mov	ah,9
-		int	21h
+;		mov	dx,offset Copyright
+;		mov	ah,9
+;		int	21h
 		mov	al,2
 		call	WriteLog
 ;
@@ -4034,10 +4076,10 @@ InstallDriver	proc	near
 		popf
 		jc	ErrorHandler
 		push	ax
-		mov	dx,offset MsgIns
+		mov	dx,offset ddt:MsgIns
 		mov	ah,9
 		int	21h
-		mov	dx,offset MsgMem
+		mov	dx,offset ddt:MsgMem
 		mov	ah,9
 		int	21h
 		pop	ax
@@ -4052,7 +4094,28 @@ ErrorHandler:
 		pop	dx
 		call	FreeExtend			; Free Extended memory
 		push	dx
-		mov	dx,offset MsgNotIns
+;
+; FIX (screen garbage): these prints were emitting the driver's own
+; image to the screen. Root cause is the classic MASM group/segment
+; gotcha, confirmed from _DPMI.LST: OFFSET var yields the offset
+; within var's SEGMENT, not within the GROUP, and "assume cs:ddt"
+; does NOT change that. Every message here lives in INIT16, whose
+; link base is 0E30h, while ds is set to cs = the DDT GROUP base --
+; so ds:dx landed 0E30h too low and ah=9 ran forward dumping memory
+; until it hit a '$'. The listing shows it plainly:
+;   NOMEM      L BYTE 01A7 INIT16   ->  mov dx,offset NoMem = BA 01A7
+;   real image offset is 0E30h+01A7h = 0FD7h
+; and MsgNotIns emitted BA 0080, i.e. printing from image offset 80h
+; straight through CODE32 -- which is why HostInfo (CODE32:0031,
+; image offset 0181h) appeared in the garbage.
+;
+; Qualifying the operand as "offset ddt:<msg>" makes it group-
+; relative and therefore correct against ds=cs. Note DX is genuinely
+; preserved across FreeExtend (it does push dx/pop dx on both paths),
+; so the caller's error-message pointer was never the problem --
+; an earlier reading of this routine got that wrong.
+; See protected-mode assessment addendum.
+		mov	dx,offset ddt:MsgNotIns
 		mov	ah,9
 		int	21h
 		pop	dx
@@ -4091,19 +4154,100 @@ InstallDriver   endp
 ; scbseg and tcbseg to SCB and TCB segments			     ;
 ;--------------------------------------------------------------------;
 
+;
+; TEMPORARY diagnostic: PutHex - write AX as 4 hex digits straight to
+; video memory at b800:[BX]. Same rationale as the WriteLog markers:
+; no int 21h, no BIOS call, no reflection, works during driver init.
+; Preserves every register and the flags.
+;
+PutHex		proc	near
+		pushf
+		push	ax
+		push	bx
+		push	cx
+		push	dx
+		push	es
+		mov	dx,ax			; dx = value to print
+		mov	ax,0b800h
+		mov	es,ax
+		mov	ax,dx
+		mov	cx,4
+PutHexLoop:
+		rol	ax,4
+		push	ax
+		and	al,0fh
+		cmp	al,9
+		jbe	PutHexDig
+		add	al,'A'-10
+		jmp	short PutHexPut
+PutHexDig:
+		add	al,'0'
+PutHexPut:
+		mov	es:[bx],al
+		mov	byte ptr es:[bx+1],07h
+		add	bx,2
+		pop	ax
+		loop	PutHexLoop
+		pop	es
+		pop	dx
+		pop	cx
+		pop	bx
+		pop	ax
+		popf
+		ret
+PutHex		endp
+
 CheckMOS	proc	near
 		mov	bx,-1
 		mov	ah,30h
 		int	21h
+;
+; TEMPORARY diagnostic: report the AX returned by both int 21h ah=30h
+; calls. CheckMOS is the confirmed failure point, and it can only fail
+; three ways: the two calls disagree (cmp ax,bx / jne), major < 4, or
+; version is exactly 4.00. Printing both AX values says which.
+; Row 23, columns 20 and 24.
+		push	bx
+		mov	bx,0e88h
+		call	PutHex			; first call's AX at col 20
+		pop	bx
 		push	ax
 		mov	ah,30h
 		mov	bx,ax
 		mov	cx,ax
 		mov	dx,ax
 		int	21h
+		push	bx
+		mov	bx,0e90h
+		call	PutHex			; second call's AX at col 24
 		pop	bx
-		cmp	ax,bx
-		jne	NotMos
+		pop	bx
+;
+; FIX (MOS 5.x detection): the original code did "cmp ax,bx / jne
+; NotMos" here, requiring the two int 21h ah=30h calls to return an
+; IDENTICAL AX. That does not hold on MOS 5.x. Measured:
+;
+;   MOS 5.01 (original shipped kernel):  first 0005, second 0105
+;   MOS 5.02 (our rebuilt kernel):       first 0005, second 0205
+;
+; i.e. the BX=-1 call reports minor 00 while the second call reports
+; the TRUE minor version. Same divergence on the original shipped
+; kernel as on ours, so this is genuine MOS behaviour, not a rebuild
+; regression. The driver dates from 1990-91 and was written against
+; MOS 4.10, where the two calls presumably agreed.
+;
+; The equality test is therefore dropped and the version floor is
+; checked against the second call's AX, which carries the true
+; version. This preserves the stated intent ("requires PC-MOS 4.10 or
+; higher") on every MOS version measured.
+;
+; CAUTION: the ORIGINAL intent of the double-call idiom is not fully
+; established. It may have been a MOS-vs-plain-DOS identification
+; trick rather than a sanity check, in which case dropping it removes
+; a guard against loading on non-MOS DOS. If that matters, replace it
+; with an explicit MOS check (e.g. the int 0D4h ah=2 call below
+; failing) rather than restoring the equality test, which demonstrably
+; rejects real MOS.
 		cmp	al,04h
 		jb	NotMos
 		jne	Not400
@@ -4117,9 +4261,20 @@ Not400:
 		clc
 		ret		
 NotMos:
-		mov	dx, offset NoMOS400
-;		stc
-		clc
+		mov	dx,offset ddt:NoMOS400
+;
+; TEST: stc restored (was commented out, with clc in its place).
+; Returning CLC here reports SUCCESS on a FAILED MOS detection, so
+; the caller's "jc ErrorHandler" never fires -- but scboff/scbseg are
+; only written on the success path below (int 0D4h ah=2), so they
+; stay 0. CheckFor386SYS then does "lds si,[scbadr]" -> ds:si =
+; 0000:0000 and compares [si+scbmmfg] against 'Y' while reading out
+; of the real-mode INTERRUPT VECTOR TABLE. That is almost certainly
+; why we see "386 Memory Manager required": scbmmfg is not unset, it
+; is never read. If restoring stc changes the reported error to
+; "This driver requires PC-MOS 4.10 or Higher.", CheckMOS is the
+; real failure and scbmmfg is a red herring.
+		stc
 		ret
 CheckMOS	endp
 
@@ -4134,7 +4289,7 @@ CheckDPMI	proc	near
 		int	2fh
 		or	ax,ax
 		jne	NoDPMI
-		mov	dx,offset Already
+		mov	dx,offset ddt:Already
 		stc
 		ret
 NoDPMI:
@@ -4223,7 +4378,7 @@ not386:
 		mov	[Microprocessor],bl
 		cmp	bl,I386
 		ja	CpuOk
-		mov	dx,offset No386
+		mov	dx,offset ddt:No386
  		stc
 		jmp	short CpuExit
 CpuOk:
@@ -4269,13 +4424,13 @@ CheckFor386SYS	proc	near
 ; assessment addendum for the full trace), refuse explicitly here
 ; instead of relying on the old bit-check's accidental behavior.
 ;
-		mov	dx,offset NotFin
+		mov	dx,offset ddt:NotFin
 		pop	ds
 		stc
 		ret
 NoMemdev:
 		pop	ds
-		mov	dx,offset No386Sys
+		mov	dx,offset ddt:No386Sys
 		stc
 		ret
 CheckFor386SYS  endp
@@ -4306,7 +4461,7 @@ AllocateExtend	proc	near
 ErrMem:
 		pop	cx
 ErrMem1:
-		mov	dx,offset NoMem
+		mov	dx,offset ddt:NoMem
 		stc
 		ret
 AllocateExtend  endp

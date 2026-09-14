@@ -5172,23 +5172,18 @@ jeinat:
 ;--------------------------------------------------------------------
 contirq:
 
-; FIX (protected-mode I/O trap): if the reflected interrupt has no
-; registered v86 handler in ivtable, do NOT fall through to loading a
-; garbage vector from the real-mode IVT (which sent the task to 0:0
-; and crashed).  Instead switch the task to native mode so the MOS
-; kernel services the trapped I/O, matching the ei38->nmswitch path.
-; Stack here is [bp,ds,es,cx,bx] which is exactly what nmswitch expects.
-	xor	bx,bx
-	db	67h			; 16-bit address
-	mov	bl,ss:[iveccode]
-	shl	bx,2			; vector*4 index into ivtable
-	db	67h			; 16-bit address
-	mov	cx,ss:[bx+ivtable]	; low word of the 32-bit vector
-	db	67h			; 16-bit address
-	or	cx,ss:[bx+ivtable+2]	; or in the high word
-	jnz	cirqhndl		; a handler is registered: proceed
-	db	66h
-	jmp	nmswitch		; none registered: hand to native mode
+; TEST v2 (guard removed): the nmswitch guard that used to sit here
+; is neutralized -- contirq now falls straight through to cirqhndl,
+; i.e. the ORIGINAL real-mode-IVT reflection, unconditionally, for
+; every vector including those with ivtable[N]==0.
+;
+; Rationale: the guard was added on the diagnosis that an
+; ivtable[N]==0 reflection loaded a garbage vector and crashed. That
+; diagnosis is in doubt -- 0x76cd is the valid MOS kernel segment for
+; both IVT[6] and IVT[8], so reflecting via the real-mode IVT was
+; arguably always correct, and the guard instead broke the timer
+; (int 8) by forcing it native. The vmstart V/W markers now in the
+; tree make the outcome of this test unambiguous. See addendum.
 cirqhndl:
 	push	dx
 
@@ -9404,7 +9399,31 @@ ENDIF
 ; in entry to this point in virtual 8086 mode
 
 vmstart:
+
+; TEMPORARY diagnostic: marker 'V' at vmstart's very first
+; instruction, BEFORE the sti, and marker 'W' immediately after the
+; sti. Written straight to video memory (b800:0e60 / 0e64, row 23)
+; rather than via int 10h: vmstart runs in v-86 mode, where a BIOS
+; call is trapped and reflected by the monitor, so a broken
+; reflection would suppress the marker even if vmstart HAD been
+; entered -- a false negative on exactly the question being asked.
+; A plain memory write traps nothing and needs no interrupt.
+; Deliberately uses no push/pop either, so the markers do not depend
+; on SS:SP being valid at v-86 entry; ax and es are both reloaded by
+; the code that follows, so clobbering them here is safe.
+;   no 'V'          -> vmstart was never entered
+;   'V' only        -> entered, died on the sti (timer-IRQ theory)
+;   'V' and 'W'     -> survived the sti, died later
+; See protected-mode assessment addendum.
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0e60h],'V'
+	mov	byte ptr es:[0e61h],07h
 	sti
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0e64h],'W'
+	mov	byte ptr es:[0e65h],07h
 	mov	ah,9
 	mov	dx,offset mmgrp:msgvm
 	int	21h
