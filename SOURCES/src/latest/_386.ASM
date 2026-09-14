@@ -7840,6 +7840,37 @@ i6f_tbl	label	dword
 ;
 i6f_tbl_entries equ	($-i6f_tbl)/4
 
+;
+; DPMI memory-manager function block.  _DPMI.INC declares a second set
+; of int 6fh services based at 7780h ("All DPMI related Memory manager
+; functions start from 80h...") which this driver never implemented --
+; i6f_tbl above only covers 7700h-770Fh, so every one of them fell
+; through to contirq, got reflected to the never-hooked real-mode int
+; 6fh vector, and executed whatever happened to be there.  That is why
+; $DPMI.SYS could not install.
+;
+; Implemented here as a SECOND table with its own range check rather
+; than padding i6f_tbl out to 142 mostly-empty entries.
+;
+; Note the two components disagree on numbering: this driver already
+; implements read/write debug registers at 770Eh/770Fh (labelled "VCPI\
+; DPMI functions" above) while _DPMI.ASM calls the same capability at
+; READ_DEBUG=7783h / WRITE_DEBUG=7784h.  They were evidently written
+; against diverging revisions of the same interface.  Only 86h/87h are
+; implemented so far; the rest fail cleanly rather than crashing.
+;
+i6f_dpmi_tbl label dword
+	dd	offset mmgrp:e6funimp	; 80h MEM_GET_DESC
+	dd	offset mmgrp:e6funimp	; 81h MEM_SET_DESC
+	dd	offset mmgrp:e6funimp	; 82h MEM_VIRTUAL
+	dd	offset mmgrp:e6funimp	; 83h READ_DEBUG
+	dd	offset mmgrp:e6funimp	; 84h WRITE_DEBUG
+	dd	offset mmgrp:e6funimp	; 85h MEM_DESCRIPTOR
+	dd	offset mmgrp:e6f86	; 86h SEGMENT_SELECTOR
+	dd	offset mmgrp:e6f87	; 87h SELECTOR_SEGMENT
+;
+i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
+
 
 	subttl entint6f - int6f function handler
 	page
@@ -7867,7 +7898,7 @@ e6fa:
 	cmp	ax,7700h
 	jb	e6fb
 	cmp	ax,(7700h+i6f_tbl_entries)
-	jae	e6fb
+	jae	e6fdpmi
 
 	push	ebx
 	push	ebx
@@ -7877,6 +7908,30 @@ e6fa:
 	sub	ebx,7700h
 	shl	ebx,2
 	mov	ebx,mmgrp:[i6f_tbl+ebx]
+	mov	[ebp+8],ebx
+	pop	ebp
+	pop	ebx
+	ret
+
+e6fdpmi:
+;
+; second dispatch range: the DPMI memory-manager block based at 7780h.
+; Same mechanism as above -- plant the handler address in the return
+; slot and ret to it.  Out of range still falls through to contirq.
+;
+	cmp	ax,7780h
+	jb	e6fb
+	cmp	ax,(7780h+i6f_dpmi_entries)
+	jae	e6fb
+
+	push	ebx
+	push	ebx
+	push	ebp
+	mov	ebp,esp
+	movzx	ebx,ax
+	sub	ebx,7780h
+	shl	ebx,2
+	mov	ebx,mmgrp:[i6f_dpmi_tbl+ebx]
 	mov	[ebp+8],ebx
 	pop	ebp
 	pop	ebx
@@ -8287,6 +8342,115 @@ e6f0f:
 	pop	edi
 	pop	esi
 	pop	eax
+	jmp	cgrm7
+
+;==== dpmi func 86 - convert real-mode segment to selector
+;
+; This is what _DPMI.ASM's SegToSel needs (and, through it, DPMI
+; function 0002h "Segment to Descriptor").  The hard part already
+; existed: makegdte takes a real-mode segment in ax, an owning task id
+; in dh and an access-rights byte in dl, reuses an existing descriptor
+; when one already maps the same base for the same task, otherwise
+; allocates a free slot from gdtspace/dtitable (30 user selectors), and
+; returns a selector with rpl=3 -- or ax=0 when the table is full.
+; Descriptor reuse on an identical base is exactly the DPMI 0002h
+; semantic, so this handler is only plumbing.
+;
+; in:	caller's bx = real-mode segment (saved at [bp-16] by eicommon)
+; out:	caller's bx = selector, cf clear
+;	cf set if no descriptor could be allocated
+;
+; NOTE: descriptors are tagged with the current task id, and nmswitch
+; calls cleardti for a task on every native-mode switch, which frees
+; every descriptor that task owns.  A DPMI client's selectors will not
+; survive that.  Not addressed here -- flagged in the addendum.
+;
+assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
+e6f86:
+	push	eax
+	push	edx
+	push	esi
+	push	edi
+	db	66h
+	db	67h
+	mov	ax,[bp-16]		; caller's bx = segment to translate
+	push	eax
+	db	66h
+	call	addrnca 		; esi -> tcb (clobbers ebx, si)
+	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
+	;	  01...110		; disp=byte,base=esi
+	db	tcbid
+	pop	eax			; ax = segment again
+	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001,a=0
+	db	66h
+	call	makegdte		; ax = selector, 0 = table full
+	or	ax,ax
+	jz	e6f86f
+	db	66h
+	db	67h
+	mov	[bp-16],ax		; hand the selector back in caller's bx
+	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
+	jmp	short e6f86x
+e6f86f:
+	or	byte ptr ss:[s0flags],1      ; cf set = failure
+e6f86x:
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	eax
+	jmp	cgrm7
+
+;==== dpmi func 87 - convert selector back to real-mode segment
+;
+; Inverse of the above, for _DPMI.ASM's SelToSeg.  Reads the descriptor
+; base straight out of the gdt and shifts it down.  Only meaningful for
+; a segment whose base is para-aligned and below 1Mb, which is true of
+; anything func 86 produced.
+;
+; in:	caller's bx = selector
+; out:	caller's bx = real-mode segment, cf clear
+;	cf set if the selector is outside the gdt
+;
+assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
+e6f87:
+	push	eax
+	push	edx
+	push	edi
+	db	66h
+	db	67h
+	mov	ax,[bp-16]		; caller's bx = selector
+	and	al,0f8h 		; strip rpl / ti
+	movzx	edi,ax
+	cmp	edi,gdtlen		; inside the gdt?
+	jae	e6f87f			; no, refuse
+	movzx	eax,word ptr ss:[edi+gdt+2]	; base bits 0-15
+	movzx	edx,byte ptr ss:[edi+gdt+4]	; base bits 16-23
+	shl	edx,16
+	or	eax,edx
+	shr	eax,4			; linear base -> real-mode segment
+	db	66h
+	db	67h
+	mov	[bp-16],ax
+	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
+	jmp	short e6f87x
+e6f87f:
+	or	byte ptr ss:[s0flags],1      ; cf set = failure
+e6f87x:
+	pop	edi
+	pop	edx
+	pop	eax
+	jmp	cgrm7
+
+;==== dpmi block - not yet implemented
+;
+; Everything in the 7780h block except 86h/87h lands here.  Returning
+; with cf set makes _DPMI.ASM take its documented error path instead of
+; being reflected to the real-mode int 6fh vector, which is what used
+; to take DOSBox down with it.  Failing cleanly is the point.
+;
+assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
+e6funimp:
+	or	byte ptr ss:[s0flags],1      ; cf set = not supported
 	jmp	cgrm7
 
 cgrm7:

@@ -4424,9 +4424,78 @@ CheckFor386SYS	proc	near
 ; assessment addendum for the full trace), refuse explicitly here
 ; instead of relying on the old bit-check's accidental behavior.
 ;
-		mov	dx,offset ddt:NotFin
+; REFUSAL LIFTED: SegToSel now has a real implementation. $386.SYS
+; gained a second int 6fh dispatch range for the DPMI memory-manager
+; block based at 7780h, with SEGMENT_SELECTOR (7786h) and
+; SELECTOR_SEGMENT (7787h) implemented on top of the existing
+; makegdte descriptor allocator (gdtspace/dtitable, 30 user
+; selectors, reuse-on-identical-base = DPMI 0002h semantics).
+; Everything else in that block returns cf set, so an unimplemented
+; function now fails cleanly instead of being reflected to the
+; never-hooked real-mode int 6fh vector.
+;
+; This is the first of the block, not all of it: _DPMI.ASM calls 13
+; distinct functions there across 17 sites, so expect the next
+; failure further in. That is progress, not regression.
+;
+; ALSO RESTORED: memman. It is declared "dd 0" and was never written
+; anywhere in this file -- only ever read, by AllocateExtend and
+; InitProtect, as "call cs:[memman]". With it left at 0 that call
+; lands on offset 0 of this driver's own segment, i.e. the device
+; driver header (FF FF FF FF ...), and wanders off; init hung there
+; with no error the first time the refusal above was lifted.
+; scbmmsub is the SCB's "pointer to memman entry point", so the
+; original proc must have copied it here before returning success,
+; and that got dropped when this proc was rewritten.
+;
+;
+; Load the memory manager entry point as TWO EXPLICIT WORD MOVES.
+;
+; Do NOT use "mov eax,[si+scbmmsub]" here. This is a USE16 segment and
+; MASM silently assembles the E-register forms 16-bit, with no 66h
+; operand-size prefix and no diagnostic. Verified in _DPMI.LST:
+;
+;   0547  8B 84 005F      mov eax,[si+scbmmsub]   <- mov ax,[si+5Fh]
+;   055E  0B C0           or  eax,eax             <- or  ax,ax
+;   0562  2E: A3 0059     mov cs:[memman],eax     <- mov cs:[memman],ax
+;
+; (the listing does render 66| prefixes elsewhere, 246 of them, and
+; CODE32 shows the same mnemonics prefix-free as expected for USE32 --
+; so the absence here is real, not a listing artifact.)
+;
+; The effect was that only the OFFSET half of the far pointer was read
+; and stored, leaving memman's SEGMENT word at its initialised 0. The
+; subsequent "call cs:[memman]" then far-called into segment 0, and
+; the V86 task was measured sitting at 0000:0000 with VM=1.
+;
+		mov	ax,[si+scbmmsub]	; entry point offset
+		mov	bx,[si+scbmmsub+2]	; entry point segment
+;
+; TEMPORARY diagnostic: show SEGMENT then OFFSET at row 23 cols 30/36.
+;
+		push	ax
+		push	bx
+		mov	ax,bx
+		mov	bx,0e9ch
+		call	PutHex			; segment
+		pop	bx
+		pop	ax
+		push	ax
+		push	bx
+		mov	bx,0ea8h
+		call	PutHex			; offset
+		pop	bx
+		pop	ax
+;
+; refuse on a null far pointer -- test BOTH halves
+;
+		mov	cx,ax
+		or	cx,bx
+		jz	NoMemdev
+		mov	cs:[memman],ax
+		mov	cs:[memman+2],bx
 		pop	ds
-		stc
+		clc
 		ret
 NoMemdev:
 		pop	ds
