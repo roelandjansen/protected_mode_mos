@@ -74,5 +74,5 @@ values and continue straight to the `[A:\]` prompt.
   still an open, unexplained gap in `build.sh`/`MAKEMOS.BAT` itself.
 - `ci_prereq.sh` installs `dosbox`/`mtools` for `build.sh`/`run.sh`, but
   doesn't yet install anything for a from-scratch native-toolchain build
-  (that path is still `dosemu2`/DOSBox-under-the-hood territory, not
+  (that path still runs the DOS-era toolchain under DOSBox, not
   live) — see the Linux-native-build note for where that stands.

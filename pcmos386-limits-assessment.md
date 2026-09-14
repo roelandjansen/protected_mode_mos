@@ -73,11 +73,17 @@ virtual machine" in a useful sense means:
 - more/larger EMS or XMS pool per session (a `_386.ASM`-side memory
   manager question — ties into §2 above, since it's the same allocator),
 - and, if the isolation goal is the real driver, leaning on the DPMI 1.0
-  host (`_DPMI.ASM`, already fairly complete per the protected-mode
-  assessment note) to give protected-mode-aware applications real access to
+  host (`_DPMI.ASM`) to give protected-mode-aware applications real access to
   more than 640K directly, rather than trying to stretch the 640K
   real-mode ceiling itself, which isn't a MOS limitation to fix — it's
   x86 real-mode addressing.
+
+  **Caveat (updated):** the protected-mode assessment note originally
+  described this host as "already fairly complete". Its *dispatch table* is,
+  but the driver **does not currently install at all** — `CheckFor386SYS`
+  refuses, and `SegToSel` has no working implementation. So this option is
+  not available today; it is gated behind the DPMI work in the
+  protected-mode fix plan. Treat it as a direction, not a shortcut.
 
 So the useful next step here isn't "raise 640K" (not fixable without
 dropping DOS-app compatibility) — it's tracing the actual page-table/EMS-

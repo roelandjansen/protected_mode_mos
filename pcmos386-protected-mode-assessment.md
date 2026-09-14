@@ -96,7 +96,7 @@ primitives `_386.ASM`/`_DPMI.ASM` already implement).
    clients will assume is safe to use.
 3. Exercise `AllocateLdt`/`SetDescriptor`/`CreateAlias` against a real
    32-bit DPMI client (Watcom's DOS4GW-alternative or a small hand-written
-   test client) under `dosemu`/`run.sh` to confirm 32-bit selectors survive
+   test client) under `run.sh` (DOSBox) to confirm 32-bit selectors survive
    a context switch when another user's V86 task interrupts (this is where
    Option A work would intersect `MOSCNTXT.ASM`'s save/restore — worth
    checking whether DPMI client state is preserved correctly across a
@@ -104,3 +104,61 @@ primitives `_386.ASM`/`_DPMI.ASM` already implement).
 4. Only after that: decide whether kernel-core changes (Option B) are
    actually needed, or whether Option C's thin layer gets you what you want
    without touching the DOS-compatible core at all.
+
+---
+
+## 4. STATUS UPDATE — what has since been established empirically
+
+This note was written from **source reading only**. Subsequent work booted
+and instrumented the system, and two of its conclusions need qualifying.
+The architectural analysis in §1 and §2 stands; the readiness assessment in
+§2 and §3 does not.
+
+### `$386.SYS` (§1b) — confirmed working
+
+The V86/paging supervisor does what this note describes. PC-MOS boots to a
+live, responsive prompt in protected mode with paging active, verified by
+typing at the prompt and getting real answers back. `build_page` completes,
+`CR0.PE`+`CR0.PG` are set, `vmstart` is entered and survives its `sti`, and
+the "486 Protected mode and paging are now active." message prints.
+
+One caveat: the binary confirmed clean is the **shipped 5.01.01 (940421)**
+9-user build. Our source tree builds **5.01 (921119)**. These are different
+revisions, so "the original works" is proven for a later shipped build, not
+for the source we hold.
+
+### `$DPMI.SYS` (§1c) — **does NOT install**
+
+This is the correction that matters. §1c called it "a genuine DPMI 1.0 host"
+and "far more complete than a stub", and §2's option table rated hardening it
+as **low risk / kernel untouched**. The dispatch-table inventory in §1c is
+accurate — but the driver never gets far enough to use any of it:
+
+```
+[A:\]DUMPLOG
+No DPMI host found (int 2Fh 1687h failed)
+```
+
+`CheckFor386SYS` refuses on both of its paths. One path reports "386 Memory
+Manager required" (`scbmmfg` is not `'Y'`, reproduced against the original
+`$386.SYS` too). The other is an explicit refusal, deliberately added,
+because `InitProtect` depends on `SegToSel`, which has **no working
+implementation** — it calls int 6Fh with `SEGMENT_SELECTOR=7786h`, nothing
+implements it, and it ends up executing whatever sits at the never-hooked
+real-mode int 6Fh vector. Confirmed to crash DOSBox outright, not just the
+guest.
+
+**Consequence for §2's Option A.** "Harden/complete the existing DPMI host"
+is not a low-risk audit-and-patch exercise. Before any of §3's tasks 1–3 can
+be attempted, `SegToSel` has to be genuinely implemented — building a real
+GDT descriptor rather than routing through an unimplemented int 6Fh. That is
+foundational work, not hardening. §3's tasks remain the right follow-on
+sequence *after* that, not before.
+
+Also note the refusal in `CheckFor386SYS` must stay until `SegToSel` is real.
+It looks like a bug and is not one; removing it to "make DPMI install" walks
+straight into the int 6Fh crash.
+
+See `pcmos386-protected-mode-fix-plan.md` for the ordered plan and
+`pcmos386-protected-mode-addendum.md` for the measurements behind all of the
+above.

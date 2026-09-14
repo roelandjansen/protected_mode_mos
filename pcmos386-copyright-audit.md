@@ -85,7 +85,8 @@ covers. No concern there.
 ## The complication: some of this is still load-bearing
 
 `MASM.EXE`, `LINK.EXE`, `CL.EXE`/`C1.EXE`/`C2.EXE`, `ILINK.EXE`, `LIB.EXE`
-are the toolchain the *current* `dosemu2`-based build actually uses (see
+are the toolchain the *current* DOSBox-driven build actually uses (`build.sh`
+switched from dosemu2 to DOSBox; see
 the Linux-native-build note). Pulling them now would break `build.sh` until
 the UASM/Open Watcom migration is far enough along to not need them. The
 Norton/PKWARE/Intel/Iomega tools, by contrast, aren't part of any build

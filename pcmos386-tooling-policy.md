@@ -22,7 +22,7 @@ installation, where a script needs it at all, is `zypper` (still without
   small number of `.C` files inside the OS tree itself (`COMPFILE.C`,
   `ED.C`, `ulib`/`cutils`).
 - **x86 assembly, MASM dialect** — the OS/kernel itself. Assembled via UASM
-  going forward (see the Linux-native-build note); MASM/dosemu2 remains the
+  going forward (see the Linux-native-build note); MASM under DOSBox remains the
   fallback/reference path until UASM output is validated.
 - **bash** — all scripting and build orchestration.
 
@@ -90,7 +90,7 @@ function_name() {
   tooling on a SUSE-only project (§0). It's been rewritten: `zypper`,
   no `sudo`, and it now refuses to run and explains why if it isn't
   already root, rather than escalating itself. Package/repo availability
-  for dosemu2 differs by target (Tumbleweed carries it directly at time of
+  for dosbox differs by target (Tumbleweed carries it directly at time of
   writing; Leap may need the OBS repo the script falls back to) — worth
   re-checking that fallback URL periodically rather than trusting it
   indefinitely.
