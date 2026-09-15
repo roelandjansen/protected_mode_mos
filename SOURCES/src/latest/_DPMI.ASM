@@ -4515,7 +4515,40 @@ AllocateExtend	proc	near
 		shr	cx,12
 		push	cx
 		mov	ah,1
+;
+; TEMPORARY diagnostic: marker 'M' at row 23 col 37, immediately
+; before the far call into the memory manager. Progression to look
+; for: M (this) -> S (i6fstub, reached only from v-86) -> G
+; (doi6fgate, reached only in the monitor). The last marker present
+; localises where the runaway starts.
+;
+		push	ax
+		push	es
+		mov	ax,0b800h
+		mov	es,ax
+		mov	byte ptr es:[0eaah],'M'
+		mov	byte ptr es:[0eabh],07h
+		pop	es
+		pop	ax
 		call	cs:[memman]
+;
+; TEMPORARY diagnostic: marker 'Z' at row 23 col 47, immediately after
+; the memman far call returns. M (col 37) proved we reach the call;
+; R/A/I proved rhentry/valloc run and reach the int 6fh; the caller
+; latch proved the int 6fh reaches the dispatcher with a correct
+; return ip (0070:05F4) and that valloc is entered 16+ times. If Z
+; never fires, the far call does not return and the loop is inside
+; rhentry/valloc; if Z fires, the call returns and the failure is
+; after it, in AllocateExtend's own checks.
+;
+		push	ax
+		push	es
+		mov	ax,0b800h
+		mov	es,ax
+		mov	byte ptr es:[0ebeh],'Z'
+		mov	byte ptr es:[0ebfh],07h
+		pop	es
+		pop	ax
 		or	ax,ax
 		jnz	ErrMem
 		or	cx,cx
@@ -4523,13 +4556,49 @@ AllocateExtend	proc	near
 		pop	ax
 		cmp	cx,ax
 		jb	ErrMem1
+;
+; TEMPORARY diagnostic: K = success path reached, F = error path
+; reached. Row 23 cols 48/49.
+;
+		push	ax
+		push	es
+		mov	ax,0b800h
+		mov	es,ax
+		mov	byte ptr es:[0ec0h],'K'
+		mov	byte ptr es:[0ec1h],07h
+		pop	es
+		pop	ax
 		mov	[ExtendMem],cx
 		mov	[ExtendHand],bx
 		clc
+;
+; TEMPORARY diagnostic: marker 'Q' at row 23 col 50, immediately
+; before the ret. K fires (success path taken, allocation succeeded)
+; but marker 7 in InstallDriver never does, though only these few
+; instructions separate them. If Q fires, the ret itself is landing
+; somewhere unexpected and the return address on the stack is the
+; thing to dump next. Nothing here disturbs CF, so the clc survives.
+;
+		push	ax
+		push	es
+		mov	ax,0b800h
+		mov	es,ax
+		mov	byte ptr es:[0ec4h],'Q'
+		mov	byte ptr es:[0ec5h],07h
+		pop	es
+		pop	ax
 		ret
 ErrMem:
 		pop	cx
 ErrMem1:
+		push	ax
+		push	es
+		mov	ax,0b800h
+		mov	es,ax
+		mov	byte ptr es:[0ec2h],'F'
+		mov	byte ptr es:[0ec3h],07h
+		pop	es
+		pop	ax
 		mov	dx,offset ddt:NoMem
 		stc
 		ret

@@ -643,3 +643,358 @@ also made the driver report its own errors. Two earlier claims
 corrected. DPMI does not install because `CheckFor386SYS` refuses —
 currently on the `scbmmfg != 'Y'` path, and by explicit design on the
 other path pending a real `SegToSel`.
+
+
+## CONSOLIDATION — ROOT CAUSE FOUND: the V86 monitor emulates only I/O instructions. This supersedes most of what precedes it, including three of my own conclusions
+
+One defect explains the whole investigation. Several earlier entries
+in this addendum — and several conclusions in the sections above —
+are wrong and are retracted here.
+
+### The finding
+
+`uioplb` (`db 00110000b` = IOPL 3) is OR'd into `t2eflags+1` during
+init (`or byte ptr [t2eflags+1],al`). That is what fills in the
+`iopl=??` the TSS2 comment was unsure about. Set it to 0, rebuild,
+boot:
+
+```
+row 23:  V              <- vmstart entered, NO 'W'
+CS=0018 EIP=299D VM=0 vec=06 v86frame=76CD:0000A1E1
+CS=76CD EIP=A1E1 VM=1 vec=06
+```
+
+`vec=06` is the `mov cl,6` "unsupported opcode -> reflect int 6" path.
+**The monitor treats `STI` as an invalid opcode.**
+
+The V86 monitor in this `$386.SYS` emulates **only I/O instructions** —
+exactly what the opcode dispatch table at `2776h`/`27E2h` contains
+(IN/OUT, DMA port translation, as disassembled in the first entry). It
+has no emulation for the IOPL-sensitive instructions: `CLI`, `STI`,
+`PUSHF`, `POPF`, `INT n`, `IRET`.
+
+IOPL=3 is therefore a deliberate and self-consistent choice: at IOPL=3
+none of those instructions trap, so the missing emulation never
+matters. I/O still traps through the TSS permission bitmap
+(`t2iopbm`), which is all the monitor can actually service.
+
+### Why DPMI cannot work in this build
+
+- `valloc` runs **in virtual mode by design** — the `dovmrh`/`rhentry`
+  dispatch, commented in the source as "call allocation routine in
+  virtual mode" — and re-enters native mode via `int 6fh` AX=7705h.
+  That requires `INT n` to trap, i.e. **IOPL < 3**.
+- The monitor cannot survive IOPL < 3, because `vmstart`'s first `sti`
+  traps and is reflected as `#UD`.
+
+Both cannot hold simultaneously. **No amount of work inside
+`_DPMI.ASM` can make DPMI install on this `$386.SYS`.** Supporting
+measurement: `IVT[6Fh]` = `F000:1060`, the untouched BIOS default stub,
+identical to the unused `IVT[6Eh]`; `$386.SYS` never hooks it.
+
+### RETRACTIONS — do not act on these any more
+
+**1. There was never an `ivtable[6]==0` reflection bug (§3562), and the
+`nmswitch` guard (§3700, "THE FIX") never fixed anything.**
+Removing the guard restored the boot only because at IOPL=3 the `sti`
+never traps in the first place. The guard was treating a symptom of
+the incomplete monitor. This finally answers the question the fix plan
+has carried since step 1: the guard did not help, and the earlier
+entry above that credits guard removal as "the fix for the stall" is
+overstated — it is a workaround that avoids the defect, not a fix.
+
+**2. My own "V86 task loops on `HLT` at `0000:0008`" entry described a
+symptom, not a cause.** The mechanism was right; the framing was
+wrong. It is downstream of the same monitor gap.
+
+**3. My own `AllocateExtend` conclusion was wrong** (already corrected
+above, repeated here because it propagated): `WriteLog` fires *after*
+a check returns but *before* its `jc`, so the last marker present
+names the step that FAILED. The failing step was `CheckFor386SYS`.
+
+**4. My own "`ErrorHandler`'s DX is clobbered by `FreeExtend`" reading
+was wrong.** `FreeExtend` preserves DX on both paths. The garbage was
+the MASM group/segment `OFFSET` bug.
+
+The pattern across this whole investigation: **five confident
+root-cause claims, four of them wrong** — `ivtable[6]==0`, the
+mis-encoded `call eicommon`, `AllocateExtend`, the clobbered DX, and
+finally this one. Every wrong turn came from plausible source reading
+or a mid-cascade register dump. Only the ones backed by a mechanical
+before/after measurement survived.
+
+### What DOES survive as real fixes
+
+These are independent of the monitor defect and all verified:
+
+- **`OFFSET ddt:`** on message pointers in INIT16. MASM's `OFFSET`
+  is segment-relative, not group-relative; `assume cs:ddt` does not
+  change it, and LINK does not fix it up despite the `R` flag.
+  Verified in emitted bytes: `BA A7 01` -> `BA D7 0F`.
+- **`stc` restored** on `CheckMOS`'s `NotMos` path (was reporting
+  success on failure, leaving `scbadr` at 0:0).
+- **MOS 5.x version detection.** The two-call `int 21h` ah=30h
+  equality test rejects real MOS: measured `0005`/`0105` on the
+  original 5.01 kernel and `0005`/`0205` on ours.
+- **`memman` far pointer**, and with it a MASM trap worth remembering:
+  **E-register forms in a USE16 segment assemble 16-bit, silently** —
+  no `66h` prefix, no warning. `mov eax,[si+scbmmsub]` became
+  `mov ax,...`, loading only the offset half. Use word pairs in CODE16
+  and INIT16. This class of bug may exist elsewhere in the driver and
+  has never been audited; a naive grep cannot scope it, because the
+  listing shows per-segment offsets and cannot separate USE16 hits
+  from legitimate prefix-free USE32 ones.
+- **int 6Fh DPMI block** in `$386.SYS`: second dispatch table,
+  `SEGMENT_SELECTOR` (7786h) and `SELECTOR_SEGMENT` (7787h) on top of
+  the existing `makegdte` allocator, and `e6funimp` so unimplemented
+  functions fail cleanly rather than being reflected to the unhooked
+  real-mode vector.
+
+Also established and worth keeping: `valloc` **is** AH=1 in `rhtable`;
+the memman ABI is AH=function, BX=handle, CX=count, ES=target;
+`$386.SYS` publishes `rhentry` via `parmrhad`; `AllocateExtend`'s page
+arithmetic is correct (both labels in CODE32, CX=1).
+
+### Two ways forward
+
+**(a) Implement the missing emulation.** Add `CLI`/`STI`/`PUSHF`/
+`POPF`/`INT`/`IRET` to the monitor's opcode dispatcher with a virtual
+interrupt flag. This is the correct fix and what a real V86 monitor
+does. Substantial, and it makes every one of those instructions a
+trap.
+
+**(b) Keep IOPL=3 and give int 6Fh a path that still traps.** Hook
+`IVT[6Fh]` with a small real-mode stub in `$386.SYS` that reaches
+native mode by a mechanism which does trap at IOPL=3 — the I/O
+permission bitmap being the obvious lever — then dispatch into the
+existing `i6f_tbl`. Much smaller, contained, and it leaves the working
+boot intact.
+
+**(b) first.** It is testable in one rebuild and does not disturb a
+system that currently boots to a live prompt.
+
+### Tree state
+
+`uioplb` reverted to `00110000b` and rebuilt; boots again (`V123456`,
+`0070 04B6`, protected mode active, DPMI init reaching
+`AllocateExtend`). The IOPL=0 rationale is kept as a source comment
+above `uioplb`.
+
+Status: root cause identified and reproduced on demand. PC-MOS/386
+boots to a live prompt in protected mode with paging. DPMI is blocked
+by an architectural gap in the V86 monitor, not by any remaining bug
+in `$DPMI.SYS`.
+
+
+## DESIGN NOTE — CLI/STI virtualization: read this before attempting option (a)
+
+Recorded before anyone starts, because a partial implementation here is
+worse than none and the failures are the kind that surface in
+production rather than in a boot test.
+
+### There is no foundation to build on
+
+The only interrupt-related state in the entire monitor is `wshalt` —
+one byte, "1 if hlt is pending", used solely to bump a return address
+past a `HLT`. There is **no virtual interrupt flag, and no
+pending-interrupt mask**, per-task or otherwise.
+
+`contirq` reflects hardware interrupts **unconditionally**. It never
+consults any IF state, because none exists.
+
+### The instruction set is not {CLI, STI}
+
+From the monitor's own opcode tables:
+
+| opcode | instruction | handler |
+| --- | --- | --- |
+| `9C` | PUSHF | `0` |
+| `9D` | POPF | `0` |
+| `CF` | IRET | `0` |
+| `FA` | CLI | `0` |
+| `FB` | STI | `0` |
+| `F4` | HLT | `t2hlt` (implemented) |
+
+All five unimplemented, plus `INT n`.
+
+**Why a subset is dangerous.** The universal DOS critical-section
+idiom is:
+
+```
+        pushf
+        cli
+        ...
+        popf
+```
+
+Virtualize CLI/STI but not PUSHF/POPF and `pushf` reads the REAL IF —
+which the monitor must keep at 1 to retain control — pushing a flags
+image claiming "interrupts enabled" at the exact moment the guest has
+disabled them. `popf` then writes that back and VIF says enabled
+inside the critical section. VIF desynchronizes from guest belief
+precisely where it matters most, intermittently, and with no
+attributable symptom.
+
+`IRET` is the same hazard on the hottest path: every reflected
+interrupt returns through it and it pops flags. Wrong IRET breaks
+every interrupt return in the system.
+
+### The STI one-instruction delay is load-bearing in THIS codebase
+
+On real hardware STI enables interrupts only after the following
+instruction, which is what makes `sti / hlt` safe. This monitor
+implements `HLT` and carries `wshalt` machinery for it, and `contirq`
+has an explicit `wshalt` return-address fixup — so the idiom is live
+here and they were already bitten by a HLT edge case once.
+
+A VIF implementation that delivers pending interrupts on STI itself,
+rather than honouring the delay, produces the classic lost wakeup:
+deliver, return, execute HLT with nothing pending, task sleeps
+forever. Timing-dependent, shows up under load.
+
+### What a correct implementation actually requires
+
+- per-task VIF **and** a pending-interrupt mask
+- `contirq` retrofitted to defer rather than deliver when VIF=0
+- STI draining the pending set with correct delay semantics
+- PUSHF/POPF/IRET synthesizing and consuming VIF in the flags image
+- INT n clearing VIF and pushing a VIF-bearing flags image
+- the deliver-from-inside-STI path builds a V86 interrupt frame while
+  already inside the trap handler on the `s0` frame; reusing
+  `contirq`'s frame construction from a second entry point needs care
+  about stack discipline
+
+### Cost, and a reinterpretation
+
+At IOPL=0 every one of those instructions traps, and DOS executes
+PUSHF/POPF/IRET constantly — every `INT 21h` does. On period hardware
+that is a heavy tax.
+
+**IOPL=3 should therefore be read as a deliberate engineering decision
+by TSL, not an oversight.** They built an I/O-virtualizing monitor,
+not an interrupt-virtualizing one, and set IOPL to match. The
+`uioplb` tunable and the `iopl=??` comment are consistent with that.
+
+### Recommendation
+
+**Do (b). Do not touch CLI/STI for it.** The I/O gateway needs no VIF,
+keeps IOPL=3, and unblocks `valloc` and DPMI. Contained, and it leaves
+a working system working.
+
+If (a) is ever attempted:
+
+1. implement the **entire** instruction set at once, never a subset
+2. put it behind a build switch, with IOPL=3 remaining the default
+   until it is proven
+3. **build the test harness first.** "It booted" must not be the
+   acceptance criterion — these bugs do not show up in a boot test.
+   Targeted deterministic cases: `sti`/`hlt` wakeup; nested
+   `pushf`/`cli`/`popf`; IRET restoring a masked state; an IRQ
+   arriving while VIF=0. The headless rig can script all of these.
+
+### One option worth knowing about, not recommending
+
+On 486+ with `CR4.VME` the hardware provides VIF/VIP and an
+interrupt-redirection bitmap, making all of the above nearly free. The
+driver already distinguishes 386 from 486 (`MicroProcessor`, 3 or 4).
+Costs: 386 hosts lose the feature, and it is unknown whether DOSBox
+Staging emulates VME — check that before anyone gets attached to the
+idea.
+
+
+## GATEWAY ATTEMPT — built, unexercised; two of my hypotheses disproved; a build trap worth knowing about
+
+### A build trap that invalidated three "builds"
+
+`exe2bin` rebuilds `$386.SYS` from a **stale `_386.EXE`** when MASM
+fails. Byte-identical output, fresh timestamp, no visible error, boot
+behaves exactly as before. Three of my builds were silently stale
+before I noticed the file size never changed.
+
+The failing error was `A2053: Jump out of range`. `dooutali`'s short
+jumps have **zero headroom** — anything inserted between them and
+their targets (`doout04i`, `doout81i`, `dooutald`) breaks the build.
+
+**Rule: delete `_386.obj` and `_386.exe` first, always assemble with a
+listing (`masm _386,_386,_386;`), and check the error count.** The
+`.ASM.SYS` recipe in `MAKEUTIL.MAK` has no error gate.
+
+Consequence for the gateway: its body cannot live near `dooutali`. It
+is placed next to `i6fstub` and reached by a near jump, with only the
+existing `jmp` retargeted (`jmp dooutali9`, same encoding size) so
+zero bytes are added inside the short-jump range.
+
+### Built (option b)
+
+- port `0E0h` force-protected in `t2iopbm` at all three sites that
+  already force `04h`/`81h` (byte `1Ch`, bit 0), including inside
+  `vsetiop`
+- `i6fstub` hooked into `IVT[6Fh]` at init; `out 0e0h,al` to trigger
+  the trap, then propagates CF into the caller's saved flags image at
+  `[bp+6]` before `iret`
+- `doi6fgate` advances `s0ip` past both bytes of `out imm8,al`, sets
+  `debugint`/`iveccode`, `jmps32 e6fa`
+- `oldint6f` stores the previous vector
+
+Assembles clean. Hook verified live: `IVT[6Fh] = 0070:01B8`.
+
+### DISPROVED — hypothesis 1: per-task IVT remapping
+
+Guessed the v-86 task saw a different page 0 than the one patched at
+init. **Wrong.** `CR3=00110000`, `PDE[0]=00111027`, `PTE[0]=00000067`
+— linear page 0 maps to physical page 0, identity mapped. No per-task
+remapping. The task does see the hooked vector.
+
+### DISPROVED — hypothesis 2: rhentry/valloc are dual-mode
+
+Guessed `res16` code on the v-86 path would have its `66h`/`67h`
+prefixes invert meaning. **Wrong.** `rhentry`..`valloc` contains
+**zero** prefixes — it is prefix-free throughout, hence correct 16-bit
+code. `rhentry`'s stack discipline also checks out by inspection
+(`rhe2` pops the two saved registers into `pop_junk`, `retf`s, and
+deliberately preserves flags).
+
+### Marker results, and why they are NOT conclusive
+
+Markers: `R` rhentry entered, `A` valloc entered, `I` immediately
+before its `int 6fh`, `S` i6fstub, `G` doi6fgate, `E` entint6f,
+`N` e6f05 entered, `P` nalloc returned.
+
+Observed: **`R A I E N P`** — all except `S` and `G`.
+
+Read naively that says int 6fh reaches the IDT dispatcher directly,
+the whole service chain works, and the stub/gateway are unnecessary.
+**Do not bank that.** The markers do not identify the CALLER. `E`,
+`N`, `P` fire on any `int 6fh` AX=7705h, including the kernel's own
+memory-manager traffic, so they may be recording kernel activity
+rather than the DPMI call.
+
+Decisive against the naive reading: `s0ip` latched at `e6f05` entry
+reads **0000**, not `05F2` (valloc's `int 6fh`) nor `05F4` (the next
+instruction). So the trap that reached `e6f05` had no v-86 frame at
+all — it was not our v-86 caller.
+
+`R`/`A`/`I` are prefix-free 16-bit code, so those three ARE the v-86
+DPMI path. It still dies at or around its `int 6fh`.
+
+Also note `s0ip` is far too volatile to sample live — a read at 24s
+returned a BIOS timer context (`FFF8:D048`). Anything about a specific
+trap must be latched at the handler.
+
+### Status
+
+Boot still parks at `[<`; `AllocateExtend` never returns; marker 7
+never fires. The gateway is built, installed, and **unexercised** — it
+may be correct or not.
+
+### Next step
+
+Make the markers caller-specific before drawing any conclusion: gate
+`E`/`N`/`P` on the latched `s0cs` matching the DPMI driver's segment,
+or latch `s0cs:s0ip` per entry and read both. Until the caller is
+identified, the `int 6fh` question is open.
+
+Running tally of confident root-cause claims in this investigation:
+seven made, six wrong. The ones that survived were backed by a
+mechanical before/after measurement; every casualty came from reading
+source or from a single ambiguous sample.

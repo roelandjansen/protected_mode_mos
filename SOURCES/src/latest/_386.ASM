@@ -688,6 +688,111 @@ int13tab label word
 ;
 ; out:	int13 exit registers
 ;
+;=====================================================================
+; i6fstub - real-mode/v-86 int 6fh entry point.
+;
+; Hooked into IVT[6Fh] at init. At IOPL=3 an INT n in v-86 mode is not
+; trapped, so int 6fh from a v-86 caller lands here instead of at
+; entint6f. "out 0e0h,al" IS trapped, by the TSS i/o permission bitmap
+; (bit force-set alongside 04h/81h), landing in doi6fgate, which hands
+; over to the normal int 6fh dispatcher.
+;
+; out imm8,al only READS al, so the caller's ax -- the int 6fh
+; function number -- reaches the dispatcher untouched. Values the
+; handler returns in ax/bx/cx survive; only bp and the flags are
+; touched here.
+;
+; CF carries success/failure. The handler sets it in s0flags, which
+; cgrm7's iretd restores into the live flags -- but a plain iret would
+; then pop the caller's own flags image off the v-86 stack and discard
+; that result, so propagate CF into the saved image first. "retf 2"
+; would also preserve CF, but would leave IF as int 6fh cleared it.
+;=====================================================================
+
+i6fstub:
+;
+; TEMPORARY diagnostic: marker 'S' at row 23 col 38. i6fstub is only
+; ever entered from v-86, so plain prefix-free 16-bit code is correct
+; here. ax must survive -- it carries the int 6fh function number.
+;
+	push	ax
+	push	es
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0each],'S'
+	mov	byte ptr es:[0eadh],07h
+	pop	es
+	pop	ax
+	out	0e0h,al 		; traps -> doi6fgate -> e6fa
+	push	bp
+	mov	bp,sp			; caller's flags image at [bp+6]
+	jc	i6fstub1
+	and	word ptr [bp+6],0fffeh	; cf clear = success
+	jmp	short i6fstub2
+i6fstub1:
+	or	word ptr [bp+6],0001h	; cf set = failure
+i6fstub2:
+	pop	bp
+	iret
+
+dooutali9:
+	cmp	ch,0e0h
+	je	doi6fgate
+	db	66h
+	jmp	doinout
+
+; int 6fh gateway.
+;
+; The v-86 task runs at IOPL=3 (uioplb), so INT n is NOT trapped -- it
+; dispatches through the real-mode IVT and never reaches entint6f.
+; That severs valloc, which runs in virtual mode by design and
+; re-enters native mode via int 6fh. I/O, however, still traps at
+; IOPL=3 through the TSS permission bitmap, so an I/O instruction is a
+; usable doorway.
+;
+; i6fstub (hooked into IVT[6Fh] at init) executes "out 0e0h,al", whose
+; bit is force-set in t2iopbm alongside 04h/81h. That faults here with
+; the caller's ax untouched -- out imm8,al only reads al -- so we can
+; hand straight to the normal int 6fh dispatcher.
+;
+; Advance s0ip past both bytes of the 2-byte "out imm8,al" first,
+; exactly as doout04i + dooutbye do between them, or the iretd out of
+; cgrm7 would re-execute the faulting instruction forever.
+;
+; Safe to jump into e6fa: both paths come through one eicommon and
+; share one frame (measured -- all five pushes are 4 bytes, because
+; gdtcode has d=1 and res16 executes 32-bit despite assembling USE16).
+; bp is p0stack-40 here, below p0stack-28, which is the v-86 case e6fa
+; expects. See addendum.
+;
+doi6fgate:
+;
+; TEMPORARY diagnostic: marker 'G' at row 23 col 39. This runs in the
+; monitor, i.e. 32-bit, so it cannot use the b800 real-mode trick and
+; cannot reach 0b8xxxh with the 16-bit addressing MASM emits for
+; res16. Use the gdtvideo selector, whose base is already b8000.
+;
+	push	ax
+	push	es
+	mov	ax,gdtvideo-gdt
+	mov	es,ax
+	db	67h
+	mov	byte ptr es:[0eaeh],'G'
+	db	67h
+	mov	byte ptr es:[0eafh],07h
+	pop	es
+	pop	ax
+	db	67h
+	inc	word ptr ss:[s0ip]	; past the e6 opcode
+	db	67h
+	inc	word ptr ss:[s0ip]	; past the imm8 port byte
+	mov	ch,6fh
+	db	67h
+	mov	ss:[debugint],ch
+	db	67h
+	mov	ss:[iveccode],ch
+	jmps32	e6fa
+
 ;,fe
 ;=====================================================================
 entinr13:
@@ -1229,6 +1334,24 @@ i13error:
 	assume	ds:nothing,es:nothing,ss:nothing
 rhentry:
 
+;
+; TEMPORARY diagnostic: marker 'R' at row 23 col 41. Prefix-free, so
+; correct under 16-bit/v-86 execution -- which is what this routine is
+; written for; rhentry..valloc contains no 66h/67h prefixes at all.
+; Flag-preserving, because rhe2 goes out of its way to return without
+; changing any register or flag.
+;
+	pushf
+	push	ax
+	push	es
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0eb2h],'R'
+	mov	byte ptr es:[0eb3h],07h
+	pop	es
+	pop	ax
+	popf
+
 IF RHTRACE
 	call	rhdebug 		; display request handler debugging
 ENDIF
@@ -1451,8 +1574,34 @@ fullboot:
 ;=====================================================================
 	assume	ds:nothing,es:nothing,ss:nothing
 valloc  proc	near
+;
+; TEMPORARY diagnostic: marker 'A' at row 23 col 42 (valloc entered),
+; and 'I' at col 43 immediately before the int 6fh. Prefix-free and
+; flag-preserving, as for rhentry. cx carries the page count in, so it
+; must not be disturbed.
+;
+	pushf
+	push	ax
+	push	es
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0eb4h],'A'
+	mov	byte ptr es:[0eb5h],07h
+	pop	es
+	pop	ax
+	popf
 	mov	word ptr mmgrp:[ntrash1],cx
 	mov	word ptr mmgrp:[ntrash1+2],0
+	pushf
+	push	ax
+	push	es
+	mov	ax,0b800h
+	mov	es,ax
+	mov	byte ptr es:[0eb6h],'I'
+	mov	byte ptr es:[0eb7h],07h
+	pop	es
+	pop	ax
+	popf
 	mov	ax,7705h		; the native mode valloc proc
 	int	6fh			; will have to modify the page table
 	mov	ax,word ptr mmgrp:[ntrash1]
@@ -1729,6 +1878,7 @@ vsetiop  proc  near
 	pop	di
 	or	byte ptr mmgrp:[t2iopbm],10h	; protect port 04h
 	or	byte ptr mmgrp:[t2iopbm+10h],02h  ; and port 81h
+	or	byte ptr mmgrp:[t2iopbm+1ch],01h  ; and port 0e0h (int 6fh gateway)
 	xor	ax,ax
 	ret
 vsetiop  endp
@@ -1765,6 +1915,7 @@ vclriop  proc  near
 	pop	di
 	or	byte ptr mmgrp:[t2iopbm],10h	; protect port 04h
 	or	byte ptr mmgrp:[t2iopbm+10h],02h  ; and port 81h
+	or	byte ptr mmgrp:[t2iopbm+1ch],01h  ; and port 0e0h (int 6fh gateway)
 	ret
 vclriop  endp
 
@@ -2856,6 +3007,7 @@ parmpfa dw	0			; address of 4k page frame in staging buffer
 ; dma staging buffer parameters
 
 	even
+oldint6f	dd	0		; original real-mode int 6fh vector
 oldint13	dd	0		; original int13 vector
 buffaddr	dw	0		; disk staging buffer seg address
 buffsize	dw	18*512		; disk staging buffer size
@@ -2899,7 +3051,46 @@ wsvmidtr	dw	idtlen-1,offset mmgrp:idt,0  ;	   and idt
 wsrmidtr	dw	3ffh,0,0	; idtr for real mode
 wscr0		dw	0001h,8000h	; to initialize cr0
 wshalt		db	0,0		;031388  1 if hlt is pending
-uioplb		db	00110000b	; user i/o privilege level * 16
+;
+; TEMPORARY diagnostic: eicommon frame capture. Plain movs only --
+; no flags touched (handlers read flags after eicommon) and ax is not
+; clobbered (entint6f does "cmp ax,7700h" immediately after).
+; Values reflect the most recent trap; bp identifies which kind:
+;   p0stack-24/-28 = native, p0stack-40/-44 = v-86.
+;
+eidbgsp		dw	0		; sp after the return-address pop
+eidbgbp		dw	0		; bp after "mov bp,sp"
+eidbgsp2	dw	0		; sp after all five pushes
+e5dbgip		dw	0		; s0ip latched at e6f05 entry (v86 return ip)
+e6dbgcs		dw	0		; s0cs of the last V-86-ORIGINATED int 6fh
+e6dbgip		dw	0		; s0ip of same
+e6dbgax		dw	0		; ax (function) of same
+e6dbgn		db	0		; count of v-86-originated int 6fh entries
+;
+; TEST (int 6fh reachability from v-86): user IOPL forced to 0.
+;
+; Was 00110000b = IOPL 3, OR'd into t2eflags+1 during init (see "mov
+; al,[uioplb]" further down), which is what fills in the "iopl=??" in
+; the t2eflags comment.
+;
+; At IOPL=3 the INT n instruction is NOT trapped in v-86 mode -- it
+; dispatches through the real-mode IVT. IVT[6Fh] was measured as
+; F000:1060, the untouched BIOS default stub (identical to the unused
+; IVT[6Eh]), so int 6fh issued from a v-86 task never reaches
+; entint6f. That severs valloc, which runs in virtual mode BY DESIGN
+; ("call allocation routine in virtual mode", the dovmrh/rhentry
+; dispatch) and re-enters native mode via int 6fh AX=7705h.
+;
+; I/O still traps at IOPL=3 through the TSS permission bitmap
+; (t2iopbm), which is why the IN/OUT trap path works; INT n has no
+; equivalent backstop. t2eflags itself starts the task at IOPL=0,
+; which is what the whole dovmint/ivtable reflection path assumes.
+;
+; Caveat: IOPL=0 also traps CLI/STI/PUSHF/POPF/IRET, so each becomes
+; a monitor round-trip. Expect it to be slower, and expect any latent
+; bug in those emulation paths to surface immediately.
+;
+uioplb		db	00110000b	; user i/o privilege level * 16  (TEST of 0 = IOPL 0 reverted; see comment above)
 realsw		db	'N'		; if entering real mode on purpose
 iveccode	db	0		; saves interrupt number
 dmaindex	db	0
@@ -4993,7 +5184,10 @@ dooutali:				; out imm,al enters here
 	cmp	ch,81h
 	je	doout81i
 	db	66h
-	jmp	doinout
+	jmp	dooutali9		; 0e0h test lives out of line: anything
+					;  inserted here pushes the two short
+					;  jumps above out of range
+;
 doout04i:
 	db	67h
 	inc	word ptr ss:[s0ip]
@@ -7619,12 +7813,18 @@ eicommon proc  near
 	db	66h			; 16-bit data
 	db	67h			; 16-bit address
 	pop	ss:[trash1]		; return address
+	db	67h
+	mov	ss:[eidbgsp],sp 	; TEMPORARY diagnostic
 	push	bp
 	mov	bp,sp			; bp is at [bp]
+	db	67h
+	mov	ss:[eidbgbp],bp 	; TEMPORARY diagnostic
 	push	ds			; ds is at [bp-4]
 	push	es			; es is at [bp-8]
 	push	cx			; cx is at [bp-12]
 	push	bx			; bx is at [bp-16]
+	db	67h
+	mov	ss:[eidbgsp2],sp	; TEMPORARY diagnostic
 
 ;------------- let's see where we stand at this point: --------------
 ;   bp = p0stack-24		means native mode, no error code
@@ -7888,6 +8088,44 @@ assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 
 entint6f:
 	calls32 eicommon		; kludge until eicommon is moved to use32
+;
+; TEMPORARY diagnostic: marker 'E' at row 23 col 44. This is the IDT
+; path. If E fires, int 6fh from the v-86 task IS being trapped and
+; reaches the dispatcher directly -- which would mean the stub/gateway
+; are unnecessary and the failure is further in, in e6f05. res32, so
+; disp32 addressing is natural; gdtvideo's base is already b8000.
+;
+	push	eax
+	push	es
+	mov	ax,gdtvideo-gdt
+	mov	es,ax
+	mov	byte ptr es:[0eb8h],'E'
+	mov	byte ptr es:[0eb9h],07h
+	pop	es
+	pop	eax
+;
+; TEMPORARY diagnostic: latch caller identity, but ONLY for v-86
+; originated calls. The earlier E/N/P markers were useless because
+; they fire for ANY int 6fh AX=7705h, including the kernel's own
+; memory-manager traffic, so they could not tell our v-86 caller from
+; the kernel. bp is the existing native-vs-v86 discriminator that
+; entint6f itself uses two instructions below; reuse it. Kernel calls
+; (native, bp >= p0stack-28) now leave these alone.
+;
+; e6dbgn counts v-86 entries; if it stays 0, no int 6fh from any v-86
+; task ever reaches the IDT dispatcher and the gateway IS required.
+;
+	cmp	bp,offset mmgrp:p0stack-28
+	jnb	e6fnolatch
+	push	eax
+	mov	ax,ss:[s0cs]
+	mov	ss:[e6dbgcs],ax
+	mov	ax,ss:[s0ip]
+	mov	ss:[e6dbgip],ax
+	pop	eax
+	mov	ss:[e6dbgax],ax
+	inc	byte ptr ss:[e6dbgn]
+e6fnolatch:
 	mov	ch,6fh
 	mov	ss:[debugint],ch
 	mov	ss:[iveccode],ch
@@ -8012,10 +8250,42 @@ e6f04:
 
 assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 e6f05:
+;
+; TEMPORARY diagnostic: marker 'N' at row 23 col 45 (native valloc
+; handler entered) and 'P' at col 46 (nalloc returned).
+;
+	push	eax
+	push	es
+	mov	ax,gdtvideo-gdt
+	mov	es,ax
+	mov	byte ptr es:[0ebah],'N'
+	mov	byte ptr es:[0ebbh],07h
+	pop	es
+	pop	eax
+;
+; TEMPORARY diagnostic: latch the v-86 return ip for THIS trap. s0ip
+; itself is rewritten by every subsequent trap (a live read at 24s
+; showed a BIOS timer context, FFF8:D048), so it has to be captured
+; here. valloc's int 6fh is at offset 05F2; the next instruction is
+; 05F4. If this latches 05F2, the monitor is not advancing the v-86 ip
+; past the int and cgrm7's iretd re-executes it forever.
+;
+	push	eax
+	mov	ax,ss:[s0ip]
+	mov	ss:[e5dbgip],ax
+	pop	eax
 	call	adrpage 		; ds -> driver data, es -> page table
 	assume	ds:mmgrp,es:nothing
 	mov	ecx,mmgrp:[ntrash1]
 	call	nalloc
+	push	eax
+	push	es
+	mov	ax,gdtvideo-gdt
+	mov	es,ax
+	mov	byte ptr es:[0ebch],'P'
+	mov	byte ptr es:[0ebdh],07h
+	pop	es
+	pop	eax
 	mov	mmgrp:[ntrash1],eax
 	mov	mmgrp:[ntrash2],ebx
 	mov	mmgrp:[ntrash3],ecx
@@ -9603,6 +9873,19 @@ vmstart:
 	mov	es:[004eh],cs		; set new int 13h vector
 	mov	word ptr es:[004ch],offset mmgrp:entinr13
 
+; hook the real-mode int 6fh vector so v-86 callers can reach the
+; int 6fh services. At IOPL=3 an INT n in v-86 mode is not trapped, so
+; without this hook int 6fh from v-86 went to the BIOS default stub
+; (measured: IVT[6Fh] = F000:1060, identical to the unused IVT[6Eh]).
+; See i6fstub / doi6fgate and the addendum.
+
+	mov	ax,es:[01bch]		; save int 6fh vector
+	mov	word ptr [oldint6f],ax
+	mov	ax,es:[01beh]
+	mov	word ptr [oldint6f+2],ax
+	mov	es:[01beh],cs		; set new int 6fh vector
+	mov	word ptr es:[01bch],offset mmgrp:i6fstub
+
 ; init some more pointers
 
 	mov	[mysegadr],cs
@@ -9733,6 +10016,7 @@ bufadrok:
 
 	or	[t2iopbm],10h		; protect port 04h
 	or	[t2iopbm+10h],02h	; and port 81h
+	or	[t2iopbm+1ch],01h	; and port 0e0h (int 6fh gateway)
 
 ; write message
 
