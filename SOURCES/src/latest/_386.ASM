@@ -1341,16 +1341,20 @@ rhentry:
 ; Flag-preserving, because rhe2 goes out of its way to return without
 ; changing any register or flag.
 ;
-	pushf
 	push	ax
 	push	es
+	lahf				; NOT pushf: PUSHF/POPF are opcode-table 0
+	push	ax			;  in this monitor and would trap as #UD.
+					;  lahf destroys AH, so the original ax is
+					;  saved FIRST and restored LAST.
 	mov	ax,0b800h
 	mov	es,ax
 	mov	byte ptr es:[0eb2h],'R'
 	mov	byte ptr es:[0eb3h],07h
+	pop	ax
+	sahf
 	pop	es
 	pop	ax
-	popf
 
 IF RHTRACE
 	call	rhdebug 		; display request handler debugging
@@ -1580,28 +1584,34 @@ valloc  proc	near
 ; flag-preserving, as for rhentry. cx carries the page count in, so it
 ; must not be disturbed.
 ;
-	pushf
 	push	ax
 	push	es
+	lahf				; lahf destroys AH, so ax is saved FIRST
+	push	ax			;  and restored LAST. Not pushf/popf:
+					;  those are opcode-table 0 in this monitor.
 	mov	ax,0b800h
 	mov	es,ax
 	mov	byte ptr es:[0eb4h],'A'
 	mov	byte ptr es:[0eb5h],07h
+	pop	ax
+	sahf
 	pop	es
 	pop	ax
-	popf
 	mov	word ptr mmgrp:[ntrash1],cx
 	mov	word ptr mmgrp:[ntrash1+2],0
-	pushf
 	push	ax
 	push	es
+	lahf				; lahf destroys AH, so ax is saved FIRST
+	push	ax			;  and restored LAST. Not pushf/popf:
+					;  those are opcode-table 0 in this monitor.
 	mov	ax,0b800h
 	mov	es,ax
 	mov	byte ptr es:[0eb6h],'I'
 	mov	byte ptr es:[0eb7h],07h
+	pop	ax
+	sahf
 	pop	es
 	pop	ax
-	popf
 	mov	ax,7705h		; the native mode valloc proc
 	int	6fh			; will have to modify the page table
 	mov	ax,word ptr mmgrp:[ntrash1]
@@ -3066,6 +3076,8 @@ e6dbgcs		dw	0		; s0cs of the last V-86-ORIGINATED int 6fh
 e6dbgip		dw	0		; s0ip of same
 e6dbgax		dw	0		; ax (function) of same
 e6dbgn		db	0		; count of v-86-originated int 6fh entries
+nestcur		db	0		; current trap nesting depth
+nestmax		db	0		; maximum nesting depth seen
 ;
 ; TEST (int 6fh reachability from v-86): user IOPL forced to 0.
 ;
@@ -5203,6 +5215,8 @@ dooutbye:
 	db	67h
 	inc	word ptr ss:[s0ip]
 dohexit:
+	db	67h
+	dec	byte ptr ss:[nestcur]	; TEMPORARY diagnostic
 	pop	bx
 	pop	cx
 	pop	es
@@ -7825,6 +7839,25 @@ eicommon proc  near
 	push	bx			; bx is at [bp-16]
 	db	67h
 	mov	ss:[eidbgsp2],sp	; TEMPORARY diagnostic
+;
+; TEMPORARY diagnostic: trap nesting depth. eicommon is the common
+; entry for every trap, and cgrm7/dohexit are the exits. The s0 save
+; area (s0ip/s0cs/s0flags/s0sp/s0ss/...) is a SINGLE global frame with
+; no per-level saving, so if depth ever exceeds 1 a nested trap
+; overwrites the outer trap's return context. Plain inc/cmp only --
+; no flag-sensitive callers downstream of here, and the handlers
+; re-derive their own flags.
+;
+	db	67h
+	inc	byte ptr ss:[nestcur]
+	db	67h
+	mov	ch,ss:[nestcur]
+	db	67h
+	cmp	ch,ss:[nestmax]
+	jbe	eicnomax
+	db	67h
+	mov	ss:[nestmax],ch
+eicnomax:
 
 ;------------- let's see where we stand at this point: --------------
 ;   bp = p0stack-24		means native mode, no error code
@@ -8724,6 +8757,8 @@ e6funimp:
 	jmp	cgrm7
 
 cgrm7:
+	db	67h
+	dec	byte ptr ss:[nestcur]	; TEMPORARY diagnostic
 	pop	ebx
 	pop	ecx
 	pop	es

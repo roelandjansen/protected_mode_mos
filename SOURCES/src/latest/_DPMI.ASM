@@ -91,6 +91,8 @@ old2f		dd	0		; orginal int 2fh handler
 memman		dd	0		; memory manger function handler
 MicroProcessor	db	-1		; 3 = 386, 4 = 486
 ExtendMem  	dw	0		; 0	if extended memory allocated failed
+retdbg		dw	0		; [sp] latched at AllocateExtend's ret
+callseq		db	0		; AllocateExtend entry counter, pairs the samples
 ExtendHand 	dw	0		; extend memory handle
 RUnreg		dd	0		; Real Mode Unregister handler
 OUnreg		dd	0		; Orginal Unregister handle (RUnreg)
@@ -4509,6 +4511,34 @@ CheckFor386SYS  endp
 ;---------------------------------------------------------------------;
 
 AllocateExtend	proc	near
+;
+; TEMPORARY diagnostic: show SP on entry, row 23 cols 62-65. Compared
+; against SP at Z (cols 67-70, captured right after the far call into
+; memman returns), the difference tells us whether that path is
+; stack-balanced. Expect exactly 2 (the "push cx" below). Anything
+; else means rhentry's hand-rolled push/ret dispatch, its two
+; pop_junk pops, or the retf, is off by a fixed amount.
+;
+		push	ax
+		push	bx
+		mov	ax,sp
+		add	ax,4			; undo the two pushes above
+		mov	bx,0edch
+		call	PutHex
+		mov	ax,ss
+		mov	bx,0ee6h
+		call	PutHex			; SS on entry, cols 67-70
+		inc	byte ptr cs:[callseq]
+		mov	al,cs:[callseq]
+		add	al,'0'
+		push	es
+		mov	bx,0b800h
+		mov	es,bx
+		mov	es:[0dc0h],al		; entry seq, row 22 col 0
+		mov	byte ptr es:[0dc1h],07h
+		pop	es
+		pop	bx
+		pop	ax
 		lea	cx,EndProtect+4095	; round up 4k
 		lea	ax,BeginProtect
 		sub	cx,ax		
@@ -4549,6 +4579,39 @@ AllocateExtend	proc	near
 		mov	byte ptr es:[0ebfh],07h
 		pop	es
 		pop	ax
+;
+; TEMPORARY diagnostic: show the return-address slot HERE, right after
+; the far call returns, at row 23 cols 57-60. At Q (just before the
+; ret) it reads 6FEB instead of the expected 1200. If it is already
+; wrong here, the far call into memman corrupted it; if it is correct
+; here, the corruption happens in AllocateExtend's own tail.
+; Stack at this point: [sp]=pushed cx, [sp+2]=return address.
+;
+		push	bp
+		mov	bp,sp
+		push	ax
+		push	bx
+		mov	ax,[bp+4]
+		mov	bx,0ed2h
+		call	PutHex
+		mov	ax,bp
+		add	ax,2			; sp as it was before "push bp"
+		mov	bx,0eeah
+		call	PutHex			; SP at Z, cols 69-72... see note
+		mov	ax,ss
+		mov	bx,0ef4h
+		call	PutHex			; SS at Z
+		mov	al,cs:[callseq]
+		add	al,'0'
+		push	es
+		mov	bx,0b800h
+		mov	es,bx
+		mov	es:[0dc4h],al		; Z seq, row 22 col 2
+		mov	byte ptr es:[0dc5h],07h
+		pop	es
+		pop	bx
+		pop	ax
+		pop	bp
 		or	ax,ax
 		jnz	ErrMem
 		or	cx,cx
@@ -4587,6 +4650,26 @@ AllocateExtend	proc	near
 		mov	byte ptr es:[0ec5h],07h
 		pop	es
 		pop	ax
+;
+; TEMPORARY diagnostic: show the word the ret is about to consume,
+; on screen at row 23 cols 52-55. Reading it out of memory afterwards
+; does not work -- the driver's CODE16 cannot be located reliably in
+; the guest (every image-base inference this session has misled;
+; every screen marker has told the truth). bp is saved/restored so
+; the stack is undisturbed; [bp+2] is what sp pointed at on entry
+; here, i.e. the return address. Expect 1200h (InstallDriver's
+; "pushf" after "call AllocateExtend": INIT16 03D0h + base 0E30h).
+;
+		push	bp
+		mov	bp,sp
+		push	ax
+		push	bx
+		mov	ax,[bp+2]
+		mov	bx,0ec8h
+		call	PutHex
+		pop	bx
+		pop	ax
+		pop	bp
 		ret
 ErrMem:
 		pop	cx

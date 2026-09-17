@@ -1,0 +1,1271 @@
+--- /tmp/pristine/SOURCES/src/latest/_386.ASM	2026-09-13 14:23:16.798560121 +0000
++++ /home/claude/pm/SOURCES/src/latest/_386.ASM	2026-09-16 16:26:29.698410289 +0000
+@@ -688,6 +688,111 @@
+ ;
+ ; out:	int13 exit registers
+ ;
++;=====================================================================
++; i6fstub - real-mode/v-86 int 6fh entry point.
++;
++; Hooked into IVT[6Fh] at init. At IOPL=3 an INT n in v-86 mode is not
++; trapped, so int 6fh from a v-86 caller lands here instead of at
++; entint6f. "out 0e0h,al" IS trapped, by the TSS i/o permission bitmap
++; (bit force-set alongside 04h/81h), landing in doi6fgate, which hands
++; over to the normal int 6fh dispatcher.
++;
++; out imm8,al only READS al, so the caller's ax -- the int 6fh
++; function number -- reaches the dispatcher untouched. Values the
++; handler returns in ax/bx/cx survive; only bp and the flags are
++; touched here.
++;
++; CF carries success/failure. The handler sets it in s0flags, which
++; cgrm7's iretd restores into the live flags -- but a plain iret would
++; then pop the caller's own flags image off the v-86 stack and discard
++; that result, so propagate CF into the saved image first. "retf 2"
++; would also preserve CF, but would leave IF as int 6fh cleared it.
++;=====================================================================
++
++i6fstub:
++;
++; TEMPORARY diagnostic: marker 'S' at row 23 col 38. i6fstub is only
++; ever entered from v-86, so plain prefix-free 16-bit code is correct
++; here. ax must survive -- it carries the int 6fh function number.
++;
++	push	ax
++	push	es
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0each],'S'
++	mov	byte ptr es:[0eadh],07h
++	pop	es
++	pop	ax
++	out	0e0h,al 		; traps -> doi6fgate -> e6fa
++	push	bp
++	mov	bp,sp			; caller's flags image at [bp+6]
++	jc	i6fstub1
++	and	word ptr [bp+6],0fffeh	; cf clear = success
++	jmp	short i6fstub2
++i6fstub1:
++	or	word ptr [bp+6],0001h	; cf set = failure
++i6fstub2:
++	pop	bp
++	iret
++
++dooutali9:
++	cmp	ch,0e0h
++	je	doi6fgate
++	db	66h
++	jmp	doinout
++
++; int 6fh gateway.
++;
++; The v-86 task runs at IOPL=3 (uioplb), so INT n is NOT trapped -- it
++; dispatches through the real-mode IVT and never reaches entint6f.
++; That severs valloc, which runs in virtual mode by design and
++; re-enters native mode via int 6fh. I/O, however, still traps at
++; IOPL=3 through the TSS permission bitmap, so an I/O instruction is a
++; usable doorway.
++;
++; i6fstub (hooked into IVT[6Fh] at init) executes "out 0e0h,al", whose
++; bit is force-set in t2iopbm alongside 04h/81h. That faults here with
++; the caller's ax untouched -- out imm8,al only reads al -- so we can
++; hand straight to the normal int 6fh dispatcher.
++;
++; Advance s0ip past both bytes of the 2-byte "out imm8,al" first,
++; exactly as doout04i + dooutbye do between them, or the iretd out of
++; cgrm7 would re-execute the faulting instruction forever.
++;
++; Safe to jump into e6fa: both paths come through one eicommon and
++; share one frame (measured -- all five pushes are 4 bytes, because
++; gdtcode has d=1 and res16 executes 32-bit despite assembling USE16).
++; bp is p0stack-40 here, below p0stack-28, which is the v-86 case e6fa
++; expects. See addendum.
++;
++doi6fgate:
++;
++; TEMPORARY diagnostic: marker 'G' at row 23 col 39. This runs in the
++; monitor, i.e. 32-bit, so it cannot use the b800 real-mode trick and
++; cannot reach 0b8xxxh with the 16-bit addressing MASM emits for
++; res16. Use the gdtvideo selector, whose base is already b8000.
++;
++	push	ax
++	push	es
++	mov	ax,gdtvideo-gdt
++	mov	es,ax
++	db	67h
++	mov	byte ptr es:[0eaeh],'G'
++	db	67h
++	mov	byte ptr es:[0eafh],07h
++	pop	es
++	pop	ax
++	db	67h
++	inc	word ptr ss:[s0ip]	; past the e6 opcode
++	db	67h
++	inc	word ptr ss:[s0ip]	; past the imm8 port byte
++	mov	ch,6fh
++	db	67h
++	mov	ss:[debugint],ch
++	db	67h
++	mov	ss:[iveccode],ch
++	jmps32	e6fa
++
+ ;,fe
+ ;=====================================================================
+ entinr13:
+@@ -1229,6 +1334,28 @@
+ 	assume	ds:nothing,es:nothing,ss:nothing
+ rhentry:
+ 
++;
++; TEMPORARY diagnostic: marker 'R' at row 23 col 41. Prefix-free, so
++; correct under 16-bit/v-86 execution -- which is what this routine is
++; written for; rhentry..valloc contains no 66h/67h prefixes at all.
++; Flag-preserving, because rhe2 goes out of its way to return without
++; changing any register or flag.
++;
++	push	ax
++	push	es
++	lahf				; NOT pushf: PUSHF/POPF are opcode-table 0
++	push	ax			;  in this monitor and would trap as #UD.
++					;  lahf destroys AH, so the original ax is
++					;  saved FIRST and restored LAST.
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0eb2h],'R'
++	mov	byte ptr es:[0eb3h],07h
++	pop	ax
++	sahf
++	pop	es
++	pop	ax
++
+ IF RHTRACE
+ 	call	rhdebug 		; display request handler debugging
+ ENDIF
+@@ -1451,8 +1578,40 @@
+ ;=====================================================================
+ 	assume	ds:nothing,es:nothing,ss:nothing
+ valloc  proc	near
++;
++; TEMPORARY diagnostic: marker 'A' at row 23 col 42 (valloc entered),
++; and 'I' at col 43 immediately before the int 6fh. Prefix-free and
++; flag-preserving, as for rhentry. cx carries the page count in, so it
++; must not be disturbed.
++;
++	push	ax
++	push	es
++	lahf				; lahf destroys AH, so ax is saved FIRST
++	push	ax			;  and restored LAST. Not pushf/popf:
++					;  those are opcode-table 0 in this monitor.
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0eb4h],'A'
++	mov	byte ptr es:[0eb5h],07h
++	pop	ax
++	sahf
++	pop	es
++	pop	ax
+ 	mov	word ptr mmgrp:[ntrash1],cx
+ 	mov	word ptr mmgrp:[ntrash1+2],0
++	push	ax
++	push	es
++	lahf				; lahf destroys AH, so ax is saved FIRST
++	push	ax			;  and restored LAST. Not pushf/popf:
++					;  those are opcode-table 0 in this monitor.
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0eb6h],'I'
++	mov	byte ptr es:[0eb7h],07h
++	pop	ax
++	sahf
++	pop	es
++	pop	ax
+ 	mov	ax,7705h		; the native mode valloc proc
+ 	int	6fh			; will have to modify the page table
+ 	mov	ax,word ptr mmgrp:[ntrash1]
+@@ -1729,6 +1888,7 @@
+ 	pop	di
+ 	or	byte ptr mmgrp:[t2iopbm],10h	; protect port 04h
+ 	or	byte ptr mmgrp:[t2iopbm+10h],02h  ; and port 81h
++	or	byte ptr mmgrp:[t2iopbm+1ch],01h  ; and port 0e0h (int 6fh gateway)
+ 	xor	ax,ax
+ 	ret
+ vsetiop  endp
+@@ -1765,6 +1925,7 @@
+ 	pop	di
+ 	or	byte ptr mmgrp:[t2iopbm],10h	; protect port 04h
+ 	or	byte ptr mmgrp:[t2iopbm+10h],02h  ; and port 81h
++	or	byte ptr mmgrp:[t2iopbm+1ch],01h  ; and port 0e0h (int 6fh gateway)
+ 	ret
+ vclriop  endp
+ 
+@@ -2856,6 +3017,7 @@
+ ; dma staging buffer parameters
+ 
+ 	even
++oldint6f	dd	0		; original real-mode int 6fh vector
+ oldint13	dd	0		; original int13 vector
+ buffaddr	dw	0		; disk staging buffer seg address
+ buffsize	dw	18*512		; disk staging buffer size
+@@ -2899,7 +3061,48 @@
+ wsrmidtr	dw	3ffh,0,0	; idtr for real mode
+ wscr0		dw	0001h,8000h	; to initialize cr0
+ wshalt		db	0,0		;031388  1 if hlt is pending
+-uioplb		db	00110000b	; user i/o privilege level * 16
++;
++; TEMPORARY diagnostic: eicommon frame capture. Plain movs only --
++; no flags touched (handlers read flags after eicommon) and ax is not
++; clobbered (entint6f does "cmp ax,7700h" immediately after).
++; Values reflect the most recent trap; bp identifies which kind:
++;   p0stack-24/-28 = native, p0stack-40/-44 = v-86.
++;
++eidbgsp		dw	0		; sp after the return-address pop
++eidbgbp		dw	0		; bp after "mov bp,sp"
++eidbgsp2	dw	0		; sp after all five pushes
++e5dbgip		dw	0		; s0ip latched at e6f05 entry (v86 return ip)
++e6dbgcs		dw	0		; s0cs of the last V-86-ORIGINATED int 6fh
++e6dbgip		dw	0		; s0ip of same
++e6dbgax		dw	0		; ax (function) of same
++e6dbgn		db	0		; count of v-86-originated int 6fh entries
++nestcur		db	0		; current trap nesting depth
++nestmax		db	0		; maximum nesting depth seen
++;
++; TEST (int 6fh reachability from v-86): user IOPL forced to 0.
++;
++; Was 00110000b = IOPL 3, OR'd into t2eflags+1 during init (see "mov
++; al,[uioplb]" further down), which is what fills in the "iopl=??" in
++; the t2eflags comment.
++;
++; At IOPL=3 the INT n instruction is NOT trapped in v-86 mode -- it
++; dispatches through the real-mode IVT. IVT[6Fh] was measured as
++; F000:1060, the untouched BIOS default stub (identical to the unused
++; IVT[6Eh]), so int 6fh issued from a v-86 task never reaches
++; entint6f. That severs valloc, which runs in virtual mode BY DESIGN
++; ("call allocation routine in virtual mode", the dovmrh/rhentry
++; dispatch) and re-enters native mode via int 6fh AX=7705h.
++;
++; I/O still traps at IOPL=3 through the TSS permission bitmap
++; (t2iopbm), which is why the IN/OUT trap path works; INT n has no
++; equivalent backstop. t2eflags itself starts the task at IOPL=0,
++; which is what the whole dovmint/ivtable reflection path assumes.
++;
++; Caveat: IOPL=0 also traps CLI/STI/PUSHF/POPF/IRET, so each becomes
++; a monitor round-trip. Expect it to be slower, and expect any latent
++; bug in those emulation paths to surface immediately.
++;
++uioplb		db	00110000b	; user i/o privilege level * 16  (TEST of 0 = IOPL 0 reverted; see comment above)
+ realsw		db	'N'		; if entering real mode on purpose
+ iveccode	db	0		; saves interrupt number
+ dmaindex	db	0
+@@ -4993,7 +5196,10 @@
+ 	cmp	ch,81h
+ 	je	doout81i
+ 	db	66h
+-	jmp	doinout
++	jmp	dooutali9		; 0e0h test lives out of line: anything
++					;  inserted here pushes the two short
++					;  jumps above out of range
++;
+ doout04i:
+ 	db	67h
+ 	inc	word ptr ss:[s0ip]
+@@ -5009,6 +5215,8 @@
+ 	db	67h
+ 	inc	word ptr ss:[s0ip]
+ dohexit:
++	db	67h
++	dec	byte ptr ss:[nestcur]	; TEMPORARY diagnostic
+ 	pop	bx
+ 	pop	cx
+ 	pop	es
+@@ -5172,23 +5380,18 @@
+ ;--------------------------------------------------------------------
+ contirq:
+ 
+-; FIX (protected-mode I/O trap): if the reflected interrupt has no
+-; registered v86 handler in ivtable, do NOT fall through to loading a
+-; garbage vector from the real-mode IVT (which sent the task to 0:0
+-; and crashed).  Instead switch the task to native mode so the MOS
+-; kernel services the trapped I/O, matching the ei38->nmswitch path.
+-; Stack here is [bp,ds,es,cx,bx] which is exactly what nmswitch expects.
+-	xor	bx,bx
+-	db	67h			; 16-bit address
+-	mov	bl,ss:[iveccode]
+-	shl	bx,2			; vector*4 index into ivtable
+-	db	67h			; 16-bit address
+-	mov	cx,ss:[bx+ivtable]	; low word of the 32-bit vector
+-	db	67h			; 16-bit address
+-	or	cx,ss:[bx+ivtable+2]	; or in the high word
+-	jnz	cirqhndl		; a handler is registered: proceed
+-	db	66h
+-	jmp	nmswitch		; none registered: hand to native mode
++; TEST v2 (guard removed): the nmswitch guard that used to sit here
++; is neutralized -- contirq now falls straight through to cirqhndl,
++; i.e. the ORIGINAL real-mode-IVT reflection, unconditionally, for
++; every vector including those with ivtable[N]==0.
++;
++; Rationale: the guard was added on the diagnosis that an
++; ivtable[N]==0 reflection loaded a garbage vector and crashed. That
++; diagnosis is in doubt -- 0x76cd is the valid MOS kernel segment for
++; both IVT[6] and IVT[8], so reflecting via the real-mode IVT was
++; arguably always correct, and the guard instead broke the timer
++; (int 8) by forcing it native. The vmstart V/W markers now in the
++; tree make the outcome of this test unambiguous. See addendum.
+ cirqhndl:
+ 	push	dx
+ 
+@@ -7624,12 +7827,37 @@
+ 	db	66h			; 16-bit data
+ 	db	67h			; 16-bit address
+ 	pop	ss:[trash1]		; return address
++	db	67h
++	mov	ss:[eidbgsp],sp 	; TEMPORARY diagnostic
+ 	push	bp
+ 	mov	bp,sp			; bp is at [bp]
++	db	67h
++	mov	ss:[eidbgbp],bp 	; TEMPORARY diagnostic
+ 	push	ds			; ds is at [bp-4]
+ 	push	es			; es is at [bp-8]
+ 	push	cx			; cx is at [bp-12]
+ 	push	bx			; bx is at [bp-16]
++	db	67h
++	mov	ss:[eidbgsp2],sp	; TEMPORARY diagnostic
++;
++; TEMPORARY diagnostic: trap nesting depth. eicommon is the common
++; entry for every trap, and cgrm7/dohexit are the exits. The s0 save
++; area (s0ip/s0cs/s0flags/s0sp/s0ss/...) is a SINGLE global frame with
++; no per-level saving, so if depth ever exceeds 1 a nested trap
++; overwrites the outer trap's return context. Plain inc/cmp only --
++; no flag-sensitive callers downstream of here, and the handlers
++; re-derive their own flags.
++;
++	db	67h
++	inc	byte ptr ss:[nestcur]
++	db	67h
++	mov	ch,ss:[nestcur]
++	db	67h
++	cmp	ch,ss:[nestmax]
++	jbe	eicnomax
++	db	67h
++	mov	ss:[nestmax],ch
++eicnomax:
+ 
+ ;------------- let's see where we stand at this point: --------------
+ ;   bp = p0stack-24		means native mode, no error code
+@@ -7843,7 +8071,38 @@
+ 	dd	offset mmgrp:e6f0e	; read debug registers
+ 	dd	offset mmgrp:e6f0f	; write debug registers
+ ;
+-i6f_tbl_entries equ	($-i6f_tbl)/4
++i6f_tbl_entries equ	($-i6f_tbl)/4
++
++;
++; DPMI memory-manager function block.  _DPMI.INC declares a second set
++; of int 6fh services based at 7780h ("All DPMI related Memory manager
++; functions start from 80h...") which this driver never implemented --
++; i6f_tbl above only covers 7700h-770Fh, so every one of them fell
++; through to contirq, got reflected to the never-hooked real-mode int
++; 6fh vector, and executed whatever happened to be there.  That is why
++; $DPMI.SYS could not install.
++;
++; Implemented here as a SECOND table with its own range check rather
++; than padding i6f_tbl out to 142 mostly-empty entries.
++;
++; Note the two components disagree on numbering: this driver already
++; implements read/write debug registers at 770Eh/770Fh (labelled "VCPI\
++; DPMI functions" above) while _DPMI.ASM calls the same capability at
++; READ_DEBUG=7783h / WRITE_DEBUG=7784h.  They were evidently written
++; against diverging revisions of the same interface.  Only 86h/87h are
++; implemented so far; the rest fail cleanly rather than crashing.
++;
++i6f_dpmi_tbl label dword
++	dd	offset mmgrp:e6funimp	; 80h MEM_GET_DESC
++	dd	offset mmgrp:e6funimp	; 81h MEM_SET_DESC
++	dd	offset mmgrp:e6funimp	; 82h MEM_VIRTUAL
++	dd	offset mmgrp:e6funimp	; 83h READ_DEBUG
++	dd	offset mmgrp:e6funimp	; 84h WRITE_DEBUG
++	dd	offset mmgrp:e6funimp	; 85h MEM_DESCRIPTOR
++	dd	offset mmgrp:e6f86	; 86h SEGMENT_SELECTOR
++	dd	offset mmgrp:e6f87	; 87h SELECTOR_SEGMENT
++;
++i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
+ 
+ 
+ 	subttl entint6f - int6f function handler
+@@ -7862,6 +8121,44 @@
+ 
+ entint6f:
+ 	calls32 eicommon		; kludge until eicommon is moved to use32
++;
++; TEMPORARY diagnostic: marker 'E' at row 23 col 44. This is the IDT
++; path. If E fires, int 6fh from the v-86 task IS being trapped and
++; reaches the dispatcher directly -- which would mean the stub/gateway
++; are unnecessary and the failure is further in, in e6f05. res32, so
++; disp32 addressing is natural; gdtvideo's base is already b8000.
++;
++	push	eax
++	push	es
++	mov	ax,gdtvideo-gdt
++	mov	es,ax
++	mov	byte ptr es:[0eb8h],'E'
++	mov	byte ptr es:[0eb9h],07h
++	pop	es
++	pop	eax
++;
++; TEMPORARY diagnostic: latch caller identity, but ONLY for v-86
++; originated calls. The earlier E/N/P markers were useless because
++; they fire for ANY int 6fh AX=7705h, including the kernel's own
++; memory-manager traffic, so they could not tell our v-86 caller from
++; the kernel. bp is the existing native-vs-v86 discriminator that
++; entint6f itself uses two instructions below; reuse it. Kernel calls
++; (native, bp >= p0stack-28) now leave these alone.
++;
++; e6dbgn counts v-86 entries; if it stays 0, no int 6fh from any v-86
++; task ever reaches the IDT dispatcher and the gateway IS required.
++;
++	cmp	bp,offset mmgrp:p0stack-28
++	jnb	e6fnolatch
++	push	eax
++	mov	ax,ss:[s0cs]
++	mov	ss:[e6dbgcs],ax
++	mov	ax,ss:[s0ip]
++	mov	ss:[e6dbgip],ax
++	pop	eax
++	mov	ss:[e6dbgax],ax
++	inc	byte ptr ss:[e6dbgn]
++e6fnolatch:
+ 	mov	ch,6fh
+ 	mov	ss:[debugint],ch
+ 	mov	ss:[iveccode],ch
+@@ -7872,7 +8169,7 @@
+ 	cmp	ax,7700h
+ 	jb	e6fb
+ 	cmp	ax,(7700h+i6f_tbl_entries)
+-	jae	e6fb
++	jae	e6fdpmi
+ 
+ 	push	ebx
+ 	push	ebx
+@@ -7887,6 +8184,30 @@
+ 	pop	ebx
+ 	ret
+ 
++e6fdpmi:
++;
++; second dispatch range: the DPMI memory-manager block based at 7780h.
++; Same mechanism as above -- plant the handler address in the return
++; slot and ret to it.  Out of range still falls through to contirq.
++;
++	cmp	ax,7780h
++	jb	e6fb
++	cmp	ax,(7780h+i6f_dpmi_entries)
++	jae	e6fb
++
++	push	ebx
++	push	ebx
++	push	ebp
++	mov	ebp,esp
++	movzx	ebx,ax
++	sub	ebx,7780h
++	shl	ebx,2
++	mov	ebx,mmgrp:[i6f_dpmi_tbl+ebx]
++	mov	[ebp+8],ebx
++	pop	ebp
++	pop	ebx
++	ret
++
+ e6fb:
+ 	jmps32 contirq
+ 
+@@ -7962,10 +8283,42 @@
+ 
+ assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
+ e6f05:
++;
++; TEMPORARY diagnostic: marker 'N' at row 23 col 45 (native valloc
++; handler entered) and 'P' at col 46 (nalloc returned).
++;
++	push	eax
++	push	es
++	mov	ax,gdtvideo-gdt
++	mov	es,ax
++	mov	byte ptr es:[0ebah],'N'
++	mov	byte ptr es:[0ebbh],07h
++	pop	es
++	pop	eax
++;
++; TEMPORARY diagnostic: latch the v-86 return ip for THIS trap. s0ip
++; itself is rewritten by every subsequent trap (a live read at 24s
++; showed a BIOS timer context, FFF8:D048), so it has to be captured
++; here. valloc's int 6fh is at offset 05F2; the next instruction is
++; 05F4. If this latches 05F2, the monitor is not advancing the v-86 ip
++; past the int and cgrm7's iretd re-executes it forever.
++;
++	push	eax
++	mov	ax,ss:[s0ip]
++	mov	ss:[e5dbgip],ax
++	pop	eax
+ 	call	adrpage 		; ds -> driver data, es -> page table
+ 	assume	ds:mmgrp,es:nothing
+ 	mov	ecx,mmgrp:[ntrash1]
+ 	call	nalloc
++	push	eax
++	push	es
++	mov	ax,gdtvideo-gdt
++	mov	es,ax
++	mov	byte ptr es:[0ebch],'P'
++	mov	byte ptr es:[0ebdh],07h
++	pop	es
++	pop	eax
+ 	mov	mmgrp:[ntrash1],eax
+ 	mov	mmgrp:[ntrash2],ebx
+ 	mov	mmgrp:[ntrash3],ecx
+@@ -8294,7 +8647,118 @@
+ 	pop	eax
+ 	jmp	cgrm7
+ 
++;==== dpmi func 86 - convert real-mode segment to selector
++;
++; This is what _DPMI.ASM's SegToSel needs (and, through it, DPMI
++; function 0002h "Segment to Descriptor").  The hard part already
++; existed: makegdte takes a real-mode segment in ax, an owning task id
++; in dh and an access-rights byte in dl, reuses an existing descriptor
++; when one already maps the same base for the same task, otherwise
++; allocates a free slot from gdtspace/dtitable (30 user selectors), and
++; returns a selector with rpl=3 -- or ax=0 when the table is full.
++; Descriptor reuse on an identical base is exactly the DPMI 0002h
++; semantic, so this handler is only plumbing.
++;
++; in:	caller's bx = real-mode segment (saved at [bp-16] by eicommon)
++; out:	caller's bx = selector, cf clear
++;	cf set if no descriptor could be allocated
++;
++; NOTE: descriptors are tagged with the current task id, and nmswitch
++; calls cleardti for a task on every native-mode switch, which frees
++; every descriptor that task owns.  A DPMI client's selectors will not
++; survive that.  Not addressed here -- flagged in the addendum.
++;
++assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
++e6f86:
++	push	eax
++	push	edx
++	push	esi
++	push	edi
++	db	66h
++	db	67h
++	mov	ax,[bp-16]		; caller's bx = segment to translate
++	push	eax
++	db	66h
++	call	addrnca 		; esi -> tcb (clobbers ebx, si)
++	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
++	;	  01...110		; disp=byte,base=esi
++	db	tcbid
++	pop	eax			; ax = segment again
++	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001,a=0
++	db	66h
++	call	makegdte		; ax = selector, 0 = table full
++	or	ax,ax
++	jz	e6f86f
++	db	66h
++	db	67h
++	mov	[bp-16],ax		; hand the selector back in caller's bx
++	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
++	jmp	short e6f86x
++e6f86f:
++	or	byte ptr ss:[s0flags],1      ; cf set = failure
++e6f86x:
++	pop	edi
++	pop	esi
++	pop	edx
++	pop	eax
++	jmp	cgrm7
++
++;==== dpmi func 87 - convert selector back to real-mode segment
++;
++; Inverse of the above, for _DPMI.ASM's SelToSeg.  Reads the descriptor
++; base straight out of the gdt and shifts it down.  Only meaningful for
++; a segment whose base is para-aligned and below 1Mb, which is true of
++; anything func 86 produced.
++;
++; in:	caller's bx = selector
++; out:	caller's bx = real-mode segment, cf clear
++;	cf set if the selector is outside the gdt
++;
++assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
++e6f87:
++	push	eax
++	push	edx
++	push	edi
++	db	66h
++	db	67h
++	mov	ax,[bp-16]		; caller's bx = selector
++	and	al,0f8h 		; strip rpl / ti
++	movzx	edi,ax
++	cmp	edi,gdtlen		; inside the gdt?
++	jae	e6f87f			; no, refuse
++	movzx	eax,word ptr ss:[edi+gdt+2]	; base bits 0-15
++	movzx	edx,byte ptr ss:[edi+gdt+4]	; base bits 16-23
++	shl	edx,16
++	or	eax,edx
++	shr	eax,4			; linear base -> real-mode segment
++	db	66h
++	db	67h
++	mov	[bp-16],ax
++	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
++	jmp	short e6f87x
++e6f87f:
++	or	byte ptr ss:[s0flags],1      ; cf set = failure
++e6f87x:
++	pop	edi
++	pop	edx
++	pop	eax
++	jmp	cgrm7
++
++;==== dpmi block - not yet implemented
++;
++; Everything in the 7780h block except 86h/87h lands here.  Returning
++; with cf set makes _DPMI.ASM take its documented error path instead of
++; being reflected to the real-mode int 6fh vector, which is what used
++; to take DOSBox down with it.  Failing cleanly is the point.
++;
++assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
++e6funimp:
++	or	byte ptr ss:[s0flags],1      ; cf set = not supported
++	jmp	cgrm7
++
+ cgrm7:
++	db	67h
++	dec	byte ptr ss:[nestcur]	; TEMPORARY diagnostic
+ 	pop	ebx
+ 	pop	ecx
+ 	pop	es
+@@ -9404,7 +9868,31 @@
+ ; in entry to this point in virtual 8086 mode
+ 
+ vmstart:
++
++; TEMPORARY diagnostic: marker 'V' at vmstart's very first
++; instruction, BEFORE the sti, and marker 'W' immediately after the
++; sti. Written straight to video memory (b800:0e60 / 0e64, row 23)
++; rather than via int 10h: vmstart runs in v-86 mode, where a BIOS
++; call is trapped and reflected by the monitor, so a broken
++; reflection would suppress the marker even if vmstart HAD been
++; entered -- a false negative on exactly the question being asked.
++; A plain memory write traps nothing and needs no interrupt.
++; Deliberately uses no push/pop either, so the markers do not depend
++; on SS:SP being valid at v-86 entry; ax and es are both reloaded by
++; the code that follows, so clobbering them here is safe.
++;   no 'V'          -> vmstart was never entered
++;   'V' only        -> entered, died on the sti (timer-IRQ theory)
++;   'V' and 'W'     -> survived the sti, died later
++; See protected-mode assessment addendum.
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0e60h],'V'
++	mov	byte ptr es:[0e61h],07h
+ 	sti
++	mov	ax,0b800h
++	mov	es,ax
++	mov	byte ptr es:[0e64h],'W'
++	mov	byte ptr es:[0e65h],07h
+ 	mov	ah,9
+ 	mov	dx,offset mmgrp:msgvm
+ 	int	21h
+@@ -9420,6 +9908,19 @@
+ 	mov	es:[004eh],cs		; set new int 13h vector
+ 	mov	word ptr es:[004ch],offset mmgrp:entinr13
+ 
++; hook the real-mode int 6fh vector so v-86 callers can reach the
++; int 6fh services. At IOPL=3 an INT n in v-86 mode is not trapped, so
++; without this hook int 6fh from v-86 went to the BIOS default stub
++; (measured: IVT[6Fh] = F000:1060, identical to the unused IVT[6Eh]).
++; See i6fstub / doi6fgate and the addendum.
++
++	mov	ax,es:[01bch]		; save int 6fh vector
++	mov	word ptr [oldint6f],ax
++	mov	ax,es:[01beh]
++	mov	word ptr [oldint6f+2],ax
++	mov	es:[01beh],cs		; set new int 6fh vector
++	mov	word ptr es:[01bch],offset mmgrp:i6fstub
++
+ ; init some more pointers
+ 
+ 	mov	[mysegadr],cs
+@@ -9550,6 +10051,7 @@
+ 
+ 	or	[t2iopbm],10h		; protect port 04h
+ 	or	[t2iopbm+10h],02h	; and port 81h
++	or	[t2iopbm+1ch],01h	; and port 0e0h (int 6fh gateway)
+ 
+ ; write message
+ 
+@@ -10092,4 +10594,4 @@
+ 	end   begin
+ 
+ 
+-
+\ No newline at end of file
++
+--- /tmp/pristine/SOURCES/src/latest/_DPMI.ASM	2026-09-05 18:30:34.801912390 +0000
++++ /home/claude/pm/SOURCES/src/latest/_DPMI.ASM	2026-09-16 16:08:20.760710113 +0000
+@@ -90,7 +90,9 @@
+ old2f		dd	0		; orginal int 2fh handler
+ memman		dd	0		; memory manger function handler
+ MicroProcessor	db	-1		; 3 = 386, 4 = 486
+-ExtendMem  	dw	0		; 0	if extended memory allocated failed
++ExtendMem  	dw	0		; 0	if extended memory allocated failed
++retdbg		dw	0		; [sp] latched at AllocateExtend's ret
++callseq		db	0		; AllocateExtend entry counter, pairs the samples
+ ExtendHand 	dw	0		; extend memory handle
+ RUnreg		dd	0		; Real Mode Unregister handler
+ OUnreg		dd	0		; Orginal Unregister handle (RUnreg)
+@@ -3942,13 +3944,35 @@
+ ; Does not touch CF (INC doesn't affect it).
+ ;
+ WriteLog	proc	near
++		pushf
+ 		push	ax
+ 		push	bx
++		push	es
+ 		mov	bl,al
+ 		xor	bh,bh
+ 		inc	byte ptr cs:[Counters+bx]
++;
++; TEMPORARY diagnostic: also emit a VISIBLE per-step marker straight
++; to video memory (b800:0e60 + step*2, row 23), so the init progress
++; can be read off the screen without DUMPLOG. DUMPLOG cannot help
++; here: it locates Counters via int 2Fh 1687h, i.e. via the DPMI
++; host -- and when init FAILS there is no host, so it reports "No
++; DPMI host found" and the counters stay unreachable. A direct memory
++; write needs no host, no int 21h and no reflection.
++; Step -> character: 1..9 print as '1'..'9', 10 prints as ':'.
++; Last character present = last step reached. See addendum.
++		push	ax
++		mov	ax,0b800h
++		mov	es,ax
++		pop	ax
++		shl	bx,1
++		add	al,'0'
++		mov	es:[bx+0e60h],al
++		mov	byte ptr es:[bx+0e61h],07h
++		pop	es
+ 		pop	bx
+ 		pop	ax
++		popf
+ 		ret
+ WriteLog	endp
+ 
+@@ -3957,24 +3981,44 @@
+ InstallDriver	proc	near
+ 		mov	ax,cs
+ 		mov	ds,ax
+-		mov	dx,offset DevLoadMsg
+-		mov	ah,9
+-		int	21h
++;
++; DIAGNOSTIC TEST: both int 21h ah=9 sign-on prints in this routine
++; are disabled. They are the suspected source of the screen garbage
++; that appears the instant $DPMI.SYS's ddinit0 is entered: the
++; garbage contains this driver's OWN image (HostInfo at image offset
++; 0181h and the Copyright text at 0E30h appear in it, with code bytes
++; between), which is what an ah=9 print does when ds:dx points near
++; the image start instead of at the intended message -- it runs
++; forward dumping memory until it happens to hit a '$' byte.
++;
++; Note DevLoadMsg was project-added instrumentation and is broken
++; independently of that: it contains a literal '$' inside the text
++; ('$DPMI.SYS'), and ah=9 terminates on '$', so it could only ever
++; have printed '>>> DEVICE='.
++;
++; If the screen comes out clean with these two removed, the prints
++; are confirmed as the garbage source and the remaining question is
++; only how to emit a sign-on safely. If the garbage persists, it
++; originates elsewhere in the init path and these were innocent.
++; See protected-mode assessment addendum.
++;		mov	dx,offset DevLoadMsg
++;		mov	ah,9
++;		int	21h
+ 		push	es
+ 		mov	ax,cs		; ah,9 above clobbered ax -- reload cs
+ 		push	ax		; save cs (currently in ax)
+ 		mov	ax,0040h
+ 		mov	es,ax		; es = BIOS data area segment
+ 		pop	ax		; ax = cs again
+-		mov	es:[0f0h],ax	; record our segment at 0040:00F0
+-					; regardless of install outcome --
+-					; diagnostic only
++		mov	es:[0f2h],ax	; record our segment at 0040:00F2
++					; (moved off 00F0: MOSINIT2/MOSDDINT
++					; also write 00F0, contaminating it)
+ 		pop	es
+ 		mov	al,1
+ 		call	WriteLog
+-		mov	dx,offset Copyright
+-		mov	ah,9
+-		int	21h
++;		mov	dx,offset Copyright
++;		mov	ah,9
++;		int	21h
+ 		mov	al,2
+ 		call	WriteLog
+ ;
+@@ -4034,10 +4078,10 @@
+ 		popf
+ 		jc	ErrorHandler
+ 		push	ax
+-		mov	dx,offset MsgIns
++		mov	dx,offset ddt:MsgIns
+ 		mov	ah,9
+ 		int	21h
+-		mov	dx,offset MsgMem
++		mov	dx,offset ddt:MsgMem
+ 		mov	ah,9
+ 		int	21h
+ 		pop	ax
+@@ -4052,7 +4096,28 @@
+ 		pop	dx
+ 		call	FreeExtend			; Free Extended memory
+ 		push	dx
+-		mov	dx,offset MsgNotIns
++;
++; FIX (screen garbage): these prints were emitting the driver's own
++; image to the screen. Root cause is the classic MASM group/segment
++; gotcha, confirmed from _DPMI.LST: OFFSET var yields the offset
++; within var's SEGMENT, not within the GROUP, and "assume cs:ddt"
++; does NOT change that. Every message here lives in INIT16, whose
++; link base is 0E30h, while ds is set to cs = the DDT GROUP base --
++; so ds:dx landed 0E30h too low and ah=9 ran forward dumping memory
++; until it hit a '$'. The listing shows it plainly:
++;   NOMEM      L BYTE 01A7 INIT16   ->  mov dx,offset NoMem = BA 01A7
++;   real image offset is 0E30h+01A7h = 0FD7h
++; and MsgNotIns emitted BA 0080, i.e. printing from image offset 80h
++; straight through CODE32 -- which is why HostInfo (CODE32:0031,
++; image offset 0181h) appeared in the garbage.
++;
++; Qualifying the operand as "offset ddt:<msg>" makes it group-
++; relative and therefore correct against ds=cs. Note DX is genuinely
++; preserved across FreeExtend (it does push dx/pop dx on both paths),
++; so the caller's error-message pointer was never the problem --
++; an earlier reading of this routine got that wrong.
++; See protected-mode assessment addendum.
++		mov	dx,offset ddt:MsgNotIns
+ 		mov	ah,9
+ 		int	21h
+ 		pop	dx
+@@ -4091,19 +4156,100 @@
+ ; scbseg and tcbseg to SCB and TCB segments			     ;
+ ;--------------------------------------------------------------------;
+ 
++;
++; TEMPORARY diagnostic: PutHex - write AX as 4 hex digits straight to
++; video memory at b800:[BX]. Same rationale as the WriteLog markers:
++; no int 21h, no BIOS call, no reflection, works during driver init.
++; Preserves every register and the flags.
++;
++PutHex		proc	near
++		pushf
++		push	ax
++		push	bx
++		push	cx
++		push	dx
++		push	es
++		mov	dx,ax			; dx = value to print
++		mov	ax,0b800h
++		mov	es,ax
++		mov	ax,dx
++		mov	cx,4
++PutHexLoop:
++		rol	ax,4
++		push	ax
++		and	al,0fh
++		cmp	al,9
++		jbe	PutHexDig
++		add	al,'A'-10
++		jmp	short PutHexPut
++PutHexDig:
++		add	al,'0'
++PutHexPut:
++		mov	es:[bx],al
++		mov	byte ptr es:[bx+1],07h
++		add	bx,2
++		pop	ax
++		loop	PutHexLoop
++		pop	es
++		pop	dx
++		pop	cx
++		pop	bx
++		pop	ax
++		popf
++		ret
++PutHex		endp
++
+ CheckMOS	proc	near
+ 		mov	bx,-1
+ 		mov	ah,30h
+ 		int	21h
++;
++; TEMPORARY diagnostic: report the AX returned by both int 21h ah=30h
++; calls. CheckMOS is the confirmed failure point, and it can only fail
++; three ways: the two calls disagree (cmp ax,bx / jne), major < 4, or
++; version is exactly 4.00. Printing both AX values says which.
++; Row 23, columns 20 and 24.
++		push	bx
++		mov	bx,0e88h
++		call	PutHex			; first call's AX at col 20
++		pop	bx
+ 		push	ax
+ 		mov	ah,30h
+ 		mov	bx,ax
+ 		mov	cx,ax
+ 		mov	dx,ax
+ 		int	21h
++		push	bx
++		mov	bx,0e90h
++		call	PutHex			; second call's AX at col 24
+ 		pop	bx
+-		cmp	ax,bx
+-		jne	NotMos
++		pop	bx
++;
++; FIX (MOS 5.x detection): the original code did "cmp ax,bx / jne
++; NotMos" here, requiring the two int 21h ah=30h calls to return an
++; IDENTICAL AX. That does not hold on MOS 5.x. Measured:
++;
++;   MOS 5.01 (original shipped kernel):  first 0005, second 0105
++;   MOS 5.02 (our rebuilt kernel):       first 0005, second 0205
++;
++; i.e. the BX=-1 call reports minor 00 while the second call reports
++; the TRUE minor version. Same divergence on the original shipped
++; kernel as on ours, so this is genuine MOS behaviour, not a rebuild
++; regression. The driver dates from 1990-91 and was written against
++; MOS 4.10, where the two calls presumably agreed.
++;
++; The equality test is therefore dropped and the version floor is
++; checked against the second call's AX, which carries the true
++; version. This preserves the stated intent ("requires PC-MOS 4.10 or
++; higher") on every MOS version measured.
++;
++; CAUTION: the ORIGINAL intent of the double-call idiom is not fully
++; established. It may have been a MOS-vs-plain-DOS identification
++; trick rather than a sanity check, in which case dropping it removes
++; a guard against loading on non-MOS DOS. If that matters, replace it
++; with an explicit MOS check (e.g. the int 0D4h ah=2 call below
++; failing) rather than restoring the equality test, which demonstrably
++; rejects real MOS.
+ 		cmp	al,04h
+ 		jb	NotMos
+ 		jne	Not400
+@@ -4117,9 +4263,20 @@
+ 		clc
+ 		ret		
+ NotMos:
+-		mov	dx, offset NoMOS400
+-;		stc
+-		clc
++		mov	dx,offset ddt:NoMOS400
++;
++; TEST: stc restored (was commented out, with clc in its place).
++; Returning CLC here reports SUCCESS on a FAILED MOS detection, so
++; the caller's "jc ErrorHandler" never fires -- but scboff/scbseg are
++; only written on the success path below (int 0D4h ah=2), so they
++; stay 0. CheckFor386SYS then does "lds si,[scbadr]" -> ds:si =
++; 0000:0000 and compares [si+scbmmfg] against 'Y' while reading out
++; of the real-mode INTERRUPT VECTOR TABLE. That is almost certainly
++; why we see "386 Memory Manager required": scbmmfg is not unset, it
++; is never read. If restoring stc changes the reported error to
++; "This driver requires PC-MOS 4.10 or Higher.", CheckMOS is the
++; real failure and scbmmfg is a red herring.
++		stc
+ 		ret
+ CheckMOS	endp
+ 
+@@ -4134,7 +4291,7 @@
+ 		int	2fh
+ 		or	ax,ax
+ 		jne	NoDPMI
+-		mov	dx,offset Already
++		mov	dx,offset ddt:Already
+ 		stc
+ 		ret
+ NoDPMI:
+@@ -4223,7 +4380,7 @@
+ 		mov	[Microprocessor],bl
+ 		cmp	bl,I386
+ 		ja	CpuOk
+-		mov	dx,offset No386
++		mov	dx,offset ddt:No386
+  		stc
+ 		jmp	short CpuExit
+ CpuOk:
+@@ -4269,13 +4426,82 @@
+ ; assessment addendum for the full trace), refuse explicitly here
+ ; instead of relying on the old bit-check's accidental behavior.
+ ;
+-		mov	dx,offset NotFin
++; REFUSAL LIFTED: SegToSel now has a real implementation. $386.SYS
++; gained a second int 6fh dispatch range for the DPMI memory-manager
++; block based at 7780h, with SEGMENT_SELECTOR (7786h) and
++; SELECTOR_SEGMENT (7787h) implemented on top of the existing
++; makegdte descriptor allocator (gdtspace/dtitable, 30 user
++; selectors, reuse-on-identical-base = DPMI 0002h semantics).
++; Everything else in that block returns cf set, so an unimplemented
++; function now fails cleanly instead of being reflected to the
++; never-hooked real-mode int 6fh vector.
++;
++; This is the first of the block, not all of it: _DPMI.ASM calls 13
++; distinct functions there across 17 sites, so expect the next
++; failure further in. That is progress, not regression.
++;
++; ALSO RESTORED: memman. It is declared "dd 0" and was never written
++; anywhere in this file -- only ever read, by AllocateExtend and
++; InitProtect, as "call cs:[memman]". With it left at 0 that call
++; lands on offset 0 of this driver's own segment, i.e. the device
++; driver header (FF FF FF FF ...), and wanders off; init hung there
++; with no error the first time the refusal above was lifted.
++; scbmmsub is the SCB's "pointer to memman entry point", so the
++; original proc must have copied it here before returning success,
++; and that got dropped when this proc was rewritten.
++;
++;
++; Load the memory manager entry point as TWO EXPLICIT WORD MOVES.
++;
++; Do NOT use "mov eax,[si+scbmmsub]" here. This is a USE16 segment and
++; MASM silently assembles the E-register forms 16-bit, with no 66h
++; operand-size prefix and no diagnostic. Verified in _DPMI.LST:
++;
++;   0547  8B 84 005F      mov eax,[si+scbmmsub]   <- mov ax,[si+5Fh]
++;   055E  0B C0           or  eax,eax             <- or  ax,ax
++;   0562  2E: A3 0059     mov cs:[memman],eax     <- mov cs:[memman],ax
++;
++; (the listing does render 66| prefixes elsewhere, 246 of them, and
++; CODE32 shows the same mnemonics prefix-free as expected for USE32 --
++; so the absence here is real, not a listing artifact.)
++;
++; The effect was that only the OFFSET half of the far pointer was read
++; and stored, leaving memman's SEGMENT word at its initialised 0. The
++; subsequent "call cs:[memman]" then far-called into segment 0, and
++; the V86 task was measured sitting at 0000:0000 with VM=1.
++;
++		mov	ax,[si+scbmmsub]	; entry point offset
++		mov	bx,[si+scbmmsub+2]	; entry point segment
++;
++; TEMPORARY diagnostic: show SEGMENT then OFFSET at row 23 cols 30/36.
++;
++		push	ax
++		push	bx
++		mov	ax,bx
++		mov	bx,0e9ch
++		call	PutHex			; segment
++		pop	bx
++		pop	ax
++		push	ax
++		push	bx
++		mov	bx,0ea8h
++		call	PutHex			; offset
++		pop	bx
++		pop	ax
++;
++; refuse on a null far pointer -- test BOTH halves
++;
++		mov	cx,ax
++		or	cx,bx
++		jz	NoMemdev
++		mov	cs:[memman],ax
++		mov	cs:[memman+2],bx
+ 		pop	ds
+-		stc
++		clc
+ 		ret
+ NoMemdev:
+ 		pop	ds
+-		mov	dx,offset No386Sys
++		mov	dx,offset ddt:No386Sys
+ 		stc
+ 		ret
+ CheckFor386SYS  endp
+@@ -4285,13 +4511,107 @@
+ ;---------------------------------------------------------------------;
+ 
+ AllocateExtend	proc	near
++;
++; TEMPORARY diagnostic: show SP on entry, row 23 cols 62-65. Compared
++; against SP at Z (cols 67-70, captured right after the far call into
++; memman returns), the difference tells us whether that path is
++; stack-balanced. Expect exactly 2 (the "push cx" below). Anything
++; else means rhentry's hand-rolled push/ret dispatch, its two
++; pop_junk pops, or the retf, is off by a fixed amount.
++;
++		push	ax
++		push	bx
++		mov	ax,sp
++		add	ax,4			; undo the two pushes above
++		mov	bx,0edch
++		call	PutHex
++		mov	ax,ss
++		mov	bx,0ee6h
++		call	PutHex			; SS on entry, cols 67-70
++		inc	byte ptr cs:[callseq]
++		mov	al,cs:[callseq]
++		add	al,'0'
++		push	es
++		mov	bx,0b800h
++		mov	es,bx
++		mov	es:[0dc0h],al		; entry seq, row 22 col 0
++		mov	byte ptr es:[0dc1h],07h
++		pop	es
++		pop	bx
++		pop	ax
+ 		lea	cx,EndProtect+4095	; round up 4k
+ 		lea	ax,BeginProtect
+ 		sub	cx,ax		
+ 		shr	cx,12
+ 		push	cx
+ 		mov	ah,1
++;
++; TEMPORARY diagnostic: marker 'M' at row 23 col 37, immediately
++; before the far call into the memory manager. Progression to look
++; for: M (this) -> S (i6fstub, reached only from v-86) -> G
++; (doi6fgate, reached only in the monitor). The last marker present
++; localises where the runaway starts.
++;
++		push	ax
++		push	es
++		mov	ax,0b800h
++		mov	es,ax
++		mov	byte ptr es:[0eaah],'M'
++		mov	byte ptr es:[0eabh],07h
++		pop	es
++		pop	ax
+ 		call	cs:[memman]
++;
++; TEMPORARY diagnostic: marker 'Z' at row 23 col 47, immediately after
++; the memman far call returns. M (col 37) proved we reach the call;
++; R/A/I proved rhentry/valloc run and reach the int 6fh; the caller
++; latch proved the int 6fh reaches the dispatcher with a correct
++; return ip (0070:05F4) and that valloc is entered 16+ times. If Z
++; never fires, the far call does not return and the loop is inside
++; rhentry/valloc; if Z fires, the call returns and the failure is
++; after it, in AllocateExtend's own checks.
++;
++		push	ax
++		push	es
++		mov	ax,0b800h
++		mov	es,ax
++		mov	byte ptr es:[0ebeh],'Z'
++		mov	byte ptr es:[0ebfh],07h
++		pop	es
++		pop	ax
++;
++; TEMPORARY diagnostic: show the return-address slot HERE, right after
++; the far call returns, at row 23 cols 57-60. At Q (just before the
++; ret) it reads 6FEB instead of the expected 1200. If it is already
++; wrong here, the far call into memman corrupted it; if it is correct
++; here, the corruption happens in AllocateExtend's own tail.
++; Stack at this point: [sp]=pushed cx, [sp+2]=return address.
++;
++		push	bp
++		mov	bp,sp
++		push	ax
++		push	bx
++		mov	ax,[bp+4]
++		mov	bx,0ed2h
++		call	PutHex
++		mov	ax,bp
++		add	ax,2			; sp as it was before "push bp"
++		mov	bx,0eeah
++		call	PutHex			; SP at Z, cols 69-72... see note
++		mov	ax,ss
++		mov	bx,0ef4h
++		call	PutHex			; SS at Z
++		mov	al,cs:[callseq]
++		add	al,'0'
++		push	es
++		mov	bx,0b800h
++		mov	es,bx
++		mov	es:[0dc4h],al		; Z seq, row 22 col 2
++		mov	byte ptr es:[0dc5h],07h
++		pop	es
++		pop	bx
++		pop	ax
++		pop	bp
+ 		or	ax,ax
+ 		jnz	ErrMem
+ 		or	cx,cx
+@@ -4299,14 +4619,70 @@
+ 		pop	ax
+ 		cmp	cx,ax
+ 		jb	ErrMem1
++;
++; TEMPORARY diagnostic: K = success path reached, F = error path
++; reached. Row 23 cols 48/49.
++;
++		push	ax
++		push	es
++		mov	ax,0b800h
++		mov	es,ax
++		mov	byte ptr es:[0ec0h],'K'
++		mov	byte ptr es:[0ec1h],07h
++		pop	es
++		pop	ax
+ 		mov	[ExtendMem],cx
+ 		mov	[ExtendHand],bx
+ 		clc
++;
++; TEMPORARY diagnostic: marker 'Q' at row 23 col 50, immediately
++; before the ret. K fires (success path taken, allocation succeeded)
++; but marker 7 in InstallDriver never does, though only these few
++; instructions separate them. If Q fires, the ret itself is landing
++; somewhere unexpected and the return address on the stack is the
++; thing to dump next. Nothing here disturbs CF, so the clc survives.
++;
++		push	ax
++		push	es
++		mov	ax,0b800h
++		mov	es,ax
++		mov	byte ptr es:[0ec4h],'Q'
++		mov	byte ptr es:[0ec5h],07h
++		pop	es
++		pop	ax
++;
++; TEMPORARY diagnostic: show the word the ret is about to consume,
++; on screen at row 23 cols 52-55. Reading it out of memory afterwards
++; does not work -- the driver's CODE16 cannot be located reliably in
++; the guest (every image-base inference this session has misled;
++; every screen marker has told the truth). bp is saved/restored so
++; the stack is undisturbed; [bp+2] is what sp pointed at on entry
++; here, i.e. the return address. Expect 1200h (InstallDriver's
++; "pushf" after "call AllocateExtend": INIT16 03D0h + base 0E30h).
++;
++		push	bp
++		mov	bp,sp
++		push	ax
++		push	bx
++		mov	ax,[bp+2]
++		mov	bx,0ec8h
++		call	PutHex
++		pop	bx
++		pop	ax
++		pop	bp
+ 		ret
+ ErrMem:
+ 		pop	cx
+ ErrMem1:
+-		mov	dx,offset NoMem
++		push	ax
++		push	es
++		mov	ax,0b800h
++		mov	es,ax
++		mov	byte ptr es:[0ec2h],'F'
++		mov	byte ptr es:[0ec3h],07h
++		pop	es
++		pop	ax
++		mov	dx,offset ddt:NoMem
+ 		stc
+ 		ret
+ AllocateExtend  endp
+@@ -4439,4 +4815,4 @@
+ 
+ 		end
+ 
+-
+\ No newline at end of file
++

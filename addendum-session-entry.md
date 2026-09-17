@@ -998,3 +998,97 @@ Running tally of confident root-cause claims in this investigation:
 seven made, six wrong. The ones that survived were backed by a
 mechanical before/after measurement; every casualty came from reading
 source or from a single ambiguous sample.
+
+
+## LEADING HYPOTHESIS — the `s0` save area is single-level, so nested traps destroy the outer return context
+
+Not yet confirmed. Recorded because it accounts for every measurement
+in this investigation with one mechanism, and because it is the same
+*shape* of defect as the CLI/STI gap: a monitor built for a simpler
+world than DPMI puts it in.
+
+### The measurement that prompted it
+
+Paired samples (sequence counter proves both are from the SAME
+invocation — `AllocateExtend` is entered exactly once; the earlier
+`count=16` was kernel traffic):
+
+```
+                SS      SP
+entry           D120    0E07     <-- ODD
+at Z (after the D120    2428
+memman far call)
+```
+
+Same SS, but SP moved by +1621h inside a single call whose code is
+push/pop balanced. That is not a leak or an off-by-N shift. The v-86
+task came back from its `int 6fh` on a different stack position.
+
+Return address in that slot reads **`6FEB`** at both Z and Q, where
+`1200h` is expected (`call AllocateExtend` = `E8 057D`, 3 bytes, at
+INIT16 `03CD`; INIT16 base `0E30h`).
+
+### The mechanism
+
+`cgrm7` ends `mov sp,offset mmgrp:s0ip` / `iretd`. For a v-86 return
+that `iretd` restores **SS:ESP from the `s0` frame**.
+
+`s0error`/`s0ip`/`s0cs`/`s0flags`/`s0sp`/`s0ss`/`s0es`/`s0ds`/`s0fs`/
+`s0gs` is a **single global save area**. There is no per-nesting-level
+save.
+
+So any trap taken while another is being handled — a timer IRQ during
+our `int 6fh`, with interrupts enabled — overwrites `s0*`, and the
+outer `iretd` then restores the INNER trap's context. The task resumes
+with the wrong SP, the wrong return address, or both.
+
+### What it explains
+
+- the odd `SP` (`0E07`) on entry
+- the return slot wrong (`6FEB`) from the instant the far call returns
+- `SP` `0E07` -> `2428` across one balanced call
+- the earlier live `s0ip` read returning a BIOS timer context
+  (`FFF8:D048`) rather than ours — that was this, visible directly
+- why the allocation SUCCEEDS but the return is destroyed: `nalloc`
+  completes fine; only the return path is corrupted
+
+### Confirming test (do this before acting on it)
+
+A nesting counter incremented at `eicommon` entry and decremented
+before `cgrm7`, with maximum depth displayed. **If it ever exceeds 1,
+traps nest on a single-level save area and the monitor is
+re-entrant-unsafe by construction.**
+
+### If confirmed
+
+This is not a DPMI bug and must not be fixed in `_DPMI.ASM`. It
+belongs with the CLI/STI design note as a second structural limit of
+the v-86 monitor. Any fix means giving the save area depth — a stack
+of frames rather than one — which touches every exception path, so it
+carries the same "implement it properly or not at all, and build the
+test harness first" warning as the CLI/STI work.
+
+### Confirming test ATTEMPTED — result INCONCLUSIVE
+
+Counters added: `inc ss:[nestcur]` at `eicommon` entry, `dec` at both
+`cgrm7` and `dohexit`, with `nestmax` tracking the peak.
+
+Result: `nestcur=124  nestmax=255`.
+
+**This does not confirm the hypothesis.** `nestmax` is a `db` and
+saturated at 255, so it carries no information. `nestcur` drifting up
+to 124 shows only that increments vastly outnumber decrements — i.e.
+`eicommon` has exit paths that bypass BOTH `cgrm7` and `dohexit`
+(`contirq`, `nmswitch`, the `dovmint`/`dovmrh` routes). The counter
+was never balanced by construction, so the drift is an artifact of
+incomplete instrumentation, not evidence of nesting.
+
+To redo it properly: make the counter a word, place the `dec` at every
+exit from `eicommon` (enumerate them from the source first — at
+minimum `cgrm7`, `dohexit`, `contirq`, `nmswitch`), and only then
+read `nestmax`. Alternatively, instrument far more narrowly: set a
+flag on entry to the int 6fh handler, check-and-report it if a second
+trap arrives while set.
+
+The nesting hypothesis therefore remains **unconfirmed but still the
+best fit** for the measurements in the section above.
