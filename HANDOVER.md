@@ -10,23 +10,91 @@ paging active.** Verified by typing at the prompt and getting real
 answers back, not by screen inspection. The tree started this session
 hanging with no prompt at all.
 
-`$DPMI.SYS` still does not install. The failure is narrowed to a
-corrupted return address, with one leading (unconfirmed) hypothesis.
+`$DPMI.SYS` still does not install, but the `6FEB` return-address
+corruption is **solved and fixed**: an assembler encoding defect in
+original TSL code, not a monitor bug. The driver now fails cleanly with
+its own error message and the boot continues. See UPDATE 10.
+
+## Current state (2026-09-17, after UPDATE 11)
+
+Tree = baseline (below) plus the `_DPMI.ASM` work: three encoding fixes,
+all diagnostics stripped, and the driver's own sign-on print restored.
+Measured:
+
+- `DEVICE=$DPMI.SYS`: boot reaches `[A:\]`; driver prints its banner
+  (`PC-MOS DPMI Driver Version 1.00 (910430)` + TSL copyright) then
+  `Dos Protected Mode Insterface Not Installed.` /
+  `Protected Code Initialization failed.`
+- no DPMI: live prompt, `VER` answers
+
+`_386.ASM` still carries its diagnostics **and must for now**: removing
+the `R` marker in `rhentry` alone stops the boot after `$386.SYS` loads,
+and it is neither layout nor the video page (UPDATE 11 has the bisection).
+Those markers write absolute video cells, so they appear in scrolled
+shell output — cosmetic only.
+
+Next work is the protected-mode entry. **Read
+`pcmos386-protected-mode-entry-design.md` first** — it supersedes the
+options in `pcmos386-dpmi-native-entry-design.md`. Short version: the
+monitor already implements a 32-bit ring-3 native mode
+(`int 0D4h AH=10h` -> `nmswitch`, back via `einfun90`), `goprot`/`goreal`
+are those two calls, and the measured next gap is that int 6Fh from native
+mode is never dispatched to the `77xx` tables.
+
+`goprot`/`goreal` are implemented and measured but **deliberately not in
+the tree** (`goprot-goreal.diff`): alone they turn the clean failure into
+a hang. Apply them with the driver-side `scbsel` change (C2a).
+
+## Baseline (set 2026-09-17, supersedes the UPDATE 8 tree)
+
+The working baseline is **UPDATE 8 source minus the trap-nesting
+counter**. `pcmos386-baseline.diff` (`patch -p1` from the repo root) is
+the whole change: the counter code, its comment and its label, 13
+code lines plus comment, `_386.ASM` only. `nestcur`/`nestmax`
+declarations stay for now (removing them shifts layout; strip with the
+other diagnostics).
+
+Why: the UPDATE 8 build, with the counter in, **never reaches
+`$DPMI.SYS`**. It parks right after `$386.SYS` returns (`V W`,
+`>{}()]`, no pass-2 device markers, v-86 spinning at `76CD:FC8x`),
+2 of 2 boots. The measurements below were taken on the build *before*
+the counter. Without it the tree reproduces them exactly, including
+`6FEB 6FEB 0E07 2428 D120`, 2 of 2 boots. No DPMI config: live prompt,
+`VER` answers.
+
+Verified at each step, not assumed:
+
+- rebuilt from scratch with an error gate (obj/exe deleted first,
+  listing checked): 0 warnings, 0 severe errors
+- removing the comment and label is byte-identical to the tested
+  code-only removal
+- tree `$386.SYS` = that build; tree `$DPMI.SYS` = `DPMI.SYS.built`
+  (itself byte-identical to a rebuild of the tree's `_DPMI.ASM`)
 
 ## Read these, in this order
 
 1. `pcmos386-protected-mode-fix-plan.md` — rewritten; the old version
    planned a hunt for a crash that turned out not to exist
-2. `addendum-session-entry.md` — 8 sections, chronological; append to
+2. `addendum-session-entry.md` — 11 sections, chronological; append to
    `pcmos386-protected-mode-addendum.md`
 3. `CHANGES.md` — every code change, split into REAL FIXES vs
    DIAGNOSTICS TO STRIP
 4. `pcmos386-changes.diff` — unified diff against the tree as
-   uploaded; `patch -p0` from the repo root reproduces this state
+   uploaded; `patch -p0` from the repo root reproduces the UPDATE 8
+   state
+5. `386-baseline.diff` — `_386.ASM` against the tree as uploaded: removes the nesting
+   counter; `patch -p1` from the repo root gives the baseline
+6. `pcmos386-protected-mode-entry-design.md` — **read before any
+   further DPMI work**; the architecture and the ordered plan
+7. `dpmi-all-changes.diff` — on top of 5, all `_DPMI.ASM` work: the three
+   encoding fixes (UPDATE 10) and the strip (UPDATE 11); in the tree
+8. `goprot-goreal.diff` — `_DPMI.INC` mode-switch macros; measured,
+   **not applied** (see UPDATE 10)
 
-## Four real fixes (keep)
+## Seven real fixes (keep)
 
-All original-source bugs, all verified:
+All original-source bugs, all verified. The last three are UPDATE 10
+(see CHANGES.md for the measurements behind them):
 
 | fix | file | what |
 | --- | --- | --- |
@@ -34,6 +102,9 @@ All original-source bugs, all verified:
 | `stc` restored | `_DPMI.ASM` | `CheckMOS`'s `NotMos` path returned SUCCESS on failure, leaving `scbadr` at 0:0 |
 | MOS 5.x detection | `_DPMI.ASM` | the two-call `int 21h` ah=30h equality test rejects real MOS (measured `0005`/`0105` on the original 5.01 kernel, `0005`/`0205` on ours) |
 | `memman` far pointer | `_DPMI.ASM` | never populated; now loaded from `scbmmsub` as two explicit word moves |
+| page count via label difference | `_DPMI.ASM` | `lea cx,EndProtect+4095` / `lea ax,BeginProtect` in INIT16 emit a 32-bit displacement with no `67h`; the bytes ran as `ENTER 0E9C1h,12`. Root cause of the `6FEB` return address |
+| `offset ddt:No32` | `_DPMI.ASM` | error message pointer was segment-relative; the driver printed memory instead of its own text |
+| `db 67h` before `mov [DriverRealCS],ax` | `_DPMI.ASM` | same missing prefix; trailing 2 bytes ran as `add [bx+si],al` |
 
 Plus the `nmswitch` guard removal in `_386.ASM` — but see "corrected
 history" below; it is a workaround, not a fix.
@@ -51,6 +122,17 @@ no warning, no error. `mov eax,[si+x]` becomes `mov ax,[si+x]`.
 - `_DPMI.ASM` / `INIT16` — genuinely runs 16-bit. Prefix-free
   `mov eax,...` really does truncate. Use word pairs.
 
+**32-bit addresses in 16-bit segments emit no `67h` prefix.** Any
+reference from CODE16/INIT16 to a label in a USE32 segment assembles as a
+4-byte displacement with no address-size prefix, so the trailing bytes
+execute as a separate instruction and the stream desynchronises. Three
+instances existed in `_DPMI.ASM`, all original TSL code. A `ddt:` group
+override does **not** help (byte-identical output); use a label
+*difference* where only the difference is needed, `offset ddt:` for a
+plain pointer, or an explicit `db 67h`. The linker fills these fields
+group-relative, so a listing showing `0000000E` may still be correct in
+the binary — always check the linked bytes, not the listing.
+
 **`exe2bin` rebuilds from a stale `_386.EXE` when MASM fails.**
 Byte-identical output, fresh timestamp, no visible error. Three builds
 were silently stale before the unchanged file size gave it away. The
@@ -58,6 +140,13 @@ were silently stale before the unchanged file size gave it away. The
 
 Always: `del _386.obj` + `del _386.exe`, assemble with a listing
 (`masm _386,_386,_386;`), check the error count.
+
+**Packaging: ship binaries built from the shipped source.** The
+2026-09-17 tarball carried UPDATE 8 `.ASM` next to older `$386.SYS`/
+`$DPMI.SYS` (21883/5410 vs 21915/5538), and the two boot differently.
+Before trusting any tree, rebuild both drivers and `cmp` against what
+is in `latest/`. A checker that renames over the target must do so
+before comparing, or it compares the file with itself.
 
 The usual failure is `A2053: Jump out of range` — `dooutali`'s short
 jumps have **zero headroom**. Anything inserted between them and
@@ -114,10 +203,28 @@ restores SS:ESP from it. Any trap nested inside another overwrites it,
 so the outer return is destroyed. Fits every measurement including the
 earlier live `s0ip` read that returned a BIOS timer context.
 
-The confirming test was attempted and came back **inconclusive** —
-the counter was unbalanced by construction because `eicommon` has
-exits that bypass both `cgrm7` and `dohexit`. See the addendum for how
-to redo it.
+The confirming test was attempted and is **void**, not merely
+inconclusive. The counter was unbalanced by construction (`eicommon`
+has exits bypassing both `cgrm7` and `dohexit`), and the build that
+read `nestcur=124` never loaded `$DPMI.SYS` at all, so it could not
+have measured the DPMI path.
+
+The counter's breakage is itself a lead, not yet a finding:
+
+- **CH is ruled out.** The counter clobbered live CH after `push cx`.
+  Keeping `inc`/`dec` but dropping every CH use still fails the same
+  way.
+- **Full removal restores the boot.**
+- **So something downstream of `eicommon` does not tolerate a
+  flag-modifying `inc`/`dec`** (or the code shift it causes). This
+  contradicts the counter's own comment ("no flag-sensitive callers
+  downstream"). Which of the two, and where, is unmeasured.
+
+Any redo must keep flags intact on the trap path — `mov`-only latches
+like `eidbgsp`, or the full flags saved around any arithmetic
+(`lahf`/`sahf` does not cover OF, which `inc`/`dec` change) — and must
+first show the instrumented build still boots
+to the baseline screen. A reading from a build that does not is void.
 
 ## Known structural limits of the v-86 monitor
 
@@ -143,12 +250,18 @@ never fire because nothing needs them.
 
 ## Diagnostics to strip before committing
 
-`_386.ASM`: A–G bisection markers, `V`/`W` vmstart markers, `R`/`A`/`I`
+**Do not strip the gateway** (`i6fstub`/`doi6fgate`/`dooutali9`): it is
+load-bearing, not diagnostic — see UPDATE 11. Its `S`/`G` markers are
+safe to remove. The `R` marker in `rhentry` currently cannot be removed
+at all without stopping the boot.
+
+`_386.ASM` (blocked, see above): A–G bisection markers, `V`/`W` vmstart markers, `R`/`A`/`I`
 markers, `E`/`N`/`P` markers, `eidbgsp`/`eidbgbp`/`eidbgsp2`,
 `e5dbgip`, `e6dbgcs`/`e6dbgip`/`e6dbgax`/`e6dbgn`,
-`nestcur`/`nestmax`, the whole gateway.
+the `nestcur`/`nestmax` declarations (code already removed in the
+baseline). NOT the gateway (see above).
 
-`_DPMI.ASM`: `WriteLog` video markers, `PutHex`, the version dumps,
+`_DPMI.ASM`: DONE in UPDATE 11 — was: `WriteLog` video markers, `PutHex`, the version dumps,
 `Z`/`K`/`F`/`Q` markers, `retdbg`, `callseq`, the SP/SS readouts, the
 disabled sign-on prints. Delete `DevLoadMsg` outright — it contains a
 literal `'$'` inside `'$DPMI.SYS'` and is printed with ah=9, so it

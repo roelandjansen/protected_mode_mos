@@ -1092,3 +1092,229 @@ trap arrives while set.
 
 The nesting hypothesis therefore remains **unconfirmed but still the
 best fit** for the measurements in the section above.
+
+
+## BASELINE: the UPDATE 8 nesting counter broke the boot before `$DPMI.SYS`; removed. The nesting test is void, not inconclusive
+
+### How it surfaced
+
+The tree as handed over (UPDATE 8 source) did not match the
+`$386.SYS`/`$DPMI.SYS` shipped with it: rebuilding gave 21915/5538
+bytes against 21883/5410, 9737 differing bytes in `$386.SYS`. The
+handover zip's `386.SYS.built`/`DPMI.SYS.built` are byte-identical to
+the rebuild, so the source is UPDATE 8 and the shipped binaries were an
+earlier build.
+
+The two boot differently, repeatably:
+
+```
+UPDATE 8 build (2/2):
+row 17:  >{}()]
+row 23:  V W                                      RAIENP
+v-86 at 76CD:FC8x, VM=1, no further progress
+
+older shipped binaries (3/3):
+row 17:  >{}()]1[<>)]2[<>)]3[<>)]4[<>)]5[<>)][<
+row 23:  V123456             00050205  0070  0M1E RAIENPZK Q
+```
+
+The UPDATE 8 build never runs the pass-2 driver loop, so `$DPMI.SYS`
+is never loaded.
+
+### Isolation — one variable at a time, `$DPMI.SYS` held fixed
+
+UPDATE 8 added only the nesting counter to `_386.ASM`. It also
+clobbers live CH (`mov ch,ss:[nestcur]` after `push cx`), and the
+memman ABI carries a count in CX, so CH was the obvious suspect.
+**Tested before believing it:**
+
+| `$386.SYS` variant | result |
+| --- | --- |
+| A: `inc`/`dec` kept, CH use removed | fails exactly like UPDATE 8 |
+| B: counter removed entirely | `V123456 … RAIENPZK Q 6FEB 6FEB 0E07 D12428 D120` |
+
+B reproduces the UPDATE 7 screen exactly, including the paired SS/SP
+readouts. **CH is not the mechanism.** The flag-modifying `inc`/`dec`
+alone (or the code shift they cause) is enough to break the
+post-`$386.SYS` kernel path. The counter's own comment claimed nothing
+downstream of `eicommon` is flag-sensitive; this measurement
+contradicts it. Which effect it is, and where, is not measured.
+
+### What this retracts
+
+UPDATE 8 recorded `nestcur=124 nestmax=255` as "inconclusive". It is
+**void**: the build that produced it never reached `$DPMI.SYS`, so it
+cannot have measured nesting on the DPMI path. The single-level `s0`
+hypothesis is back exactly where it was before UPDATE 8 — best fit,
+untested.
+
+### Tree state
+
+Baseline = B, with the orphaned comment and `eicnomax:` label also
+removed (byte-identical rebuild, verified). `nestcur`/`nestmax`
+declarations remain for now. Rebuilt from scratch in the tree with
+obj/exe deleted first: 0 warnings, 0 severe errors. Boot with DPMI: B
+screen (second run). Boot without DPMI: live prompt, `VER` answers.
+
+### Rules this adds
+
+- **Instrumentation must prove it is inert** before its readings count:
+  the instrumented build must still reach the baseline screen.
+- **On the trap path, preserve all flags.** `lahf`/`sahf` does not
+  cover OF, which `inc`/`dec` modify.
+- **Rebuild and `cmp` shipped binaries against shipped source** before
+  trusting a tree.
+
+Status: baseline set and verified. DPMI failure point unchanged from
+UPDATE 7 — corrupted return address after a successful allocation, SP
+odd on entry to `AllocateExtend`.
+
+
+## `$DPMI.SYS`: the corruption was an assembler encoding defect, and the native-mode entry already exists in the monitor
+
+### Method note
+
+This session measured from inside the emulator instead of from inside the
+guest. A private DOSBox patch logs every interrupt, exception and IRETD
+(and, on demand, every v-86 instruction) in a window around each v-86
+int 6Fh, with read-only page-table walks for stack peeks. Guest
+instrumentation perturbs the trap path — UPDATE 9 showed that vividly —
+and this does not: the screens are identical with tracing on and off.
+
+### The monitor is not the culprit
+
+Across 2054 v-86 traps in one DPMI boot, `$386.SYS` returns SS:SP exactly:
+reflected interrupts 6 bytes lower (the frame it builds), int 6Fh
+unchanged, all 16 calls. The failing `AllocateExtend` call enters the
+monitor at SS:SP `D120:241E` and comes back at `D120:241E`, with **no
+nested trap between entry and exit**. The single-`s0`-frame hypothesis is
+refuted for this call.
+
+The stack pointer changed with no trap at all, so the cause was in v-86
+code.
+
+### Root cause: a 16-bit/32-bit encoding defect in original TSL code
+
+`AllocateExtend` lives in INIT16 but references `EndProtect`/`BeginProtect`,
+which are in a USE32 segment. MASM emits a 32-bit displacement and **no
+`67h` prefix**. Executed 16-bit, the byte stream desynchronises:
+
+```
+13E0  lea cx,[di] / and bx,[0000] / lea ax,[di] / push ax
+13E9  add [bx+si],ax / add [bp+di],ch
+13ED  enter 0E9C1h,12
+13F1  push cx
+```
+
+`ENTER 0E9C1h,12` predicts three values that were measured independently:
+SP `0E07` -> `242A`, saved bp `0E03`, and the wrong return address `6FEB` at
+`[242A]`. The famous `6FEB` was never a monitor bug; it was whatever lay at
+a stack address 0x1621 bytes away.
+
+Three instances of this defect exist in `_DPMI.ASM`'s 16-bit segments; all
+three are in upstream `pcmos386v501` master, unmodified. Fixes: use the
+label *difference* (an assembly-time constant, no fixup) for the page
+count; `offset ddt:` for the message pointer; an explicit `db 67h` for the
+`DriverRealCS` store. A `ddt:` group override does **not** fix the `lea`
+case — it produced a byte-identical binary.
+
+With those three lines changed: return slot `1200` as expected, stack
+balanced, install markers to `;`, boot reaches the prompt, and the driver
+reports `Not Installed.` / `Protected Code Initialization failed.` — its
+own error text, for the first time.
+
+### `Init32Code`: the mode switch was never written, but the monitor has one
+
+A per-instruction trace showed `call32` pushing 16-bit immediates in v-86
+and jumping into `InitProtect`'s USE32 bytes, which decode as 16-bit; a
+`call rel32` read as `rel16` lands two bytes before `SegToSel` on a
+`pop es / ret` that unwinds straight back to the caller. Nothing trapped;
+`Bit32Ok` stayed `'N'`.
+
+`_DPMI.INC`'s `goprot`/`goreal` are empty macros — in upstream too. But
+`$386.SYS` implements exactly what they need:
+
+- `int 0D4h AH=10h` from a v-86 task -> `entintd4` -> `nmswitch`, which
+  rebuilds the task's segments as `g=1,d=1` descriptors and irets to ring 3
+  in 32-bit mode;
+- the same call from native mode -> `einative` -> `einfun90`, the switch
+  back;
+- `AH=11h` allocates extended memory and returns a **permanent** selector,
+  which is what `InitProtect`'s ES needs;
+- `dtitable` already distinguishes permanent (`0FEh`) from task-owned
+  descriptors.
+
+Implemented as two instructions each, the switch **works**: measured
+`vm=0`, `cpl=3`, `cs=007b`, `ss=0073`, and `InitProtect` running as real
+32-bit code. It then calls int 6Fh `7786h` from native mode, `einative`
+dispatches only vectors `38h`/`D4h`/`21h`, so the call is reflected to the
+never-hooked real-mode int 6Fh vector, and the task dies.
+
+That **restores** this addendum's earlier `SegToSel` finding, which the
+first design note demoted: reflection is real, it was simply unreachable
+while `goprot` was empty. `InitProtect` is unfinished in one more way: its
+`rep movsd` runs with ESI, EDI and ES never set by anyone.
+
+The `goprot`/`goreal` change is therefore **not in the tree**: alone it
+turns a clean failure into a hang. It goes in with the driver-side
+`scbsel` change.
+
+### Client side
+
+`GoProtect` issues the same `AH=10h` call, but `entintd4` only takes it
+when the application has no int D4h handler of its own. If `$386.SYS`
+declines, the kernel's `mosint38` returns `AX=1` with carry set —
+functions `10h`-`15h` are `dw 0` in `vct38` — and `GoProtect` never tests
+carry, so a client would believe it had switched.
+
+### Where this leaves the project
+
+The protected-mode entry is not missing architecture; it is wiring plus one
+service (segment-to-selector reachable from native mode) plus finishing
+`InitProtect`. See `pcmos386-protected-mode-entry-design.md` for the
+ordered plan and the open risks: `cleardti` frees task-owned descriptors on
+every switch, there are only 30 descriptor slots, and the native context is
+ring 3.
+
+
+## Stripping the diagnostics: `_DPMI.ASM` is clean; one `_386.ASM` marker turns out to be load-bearing
+
+`_DPMI.ASM` stripped without incident, and the driver's own sign-on print
+was restored with a group-relative operand. It now prints its real banner
+and its real error text, which is independent confirmation that the old
+screen garbage was the segment-relative `OFFSET` defect and nothing else.
+
+`_386.ASM` did not strip. With the markers gone the boot stops right
+after `$386.SYS` loads. Bisection landed on a single 11-line block: the
+`R` marker in `rhentry`.
+
+The discriminating measurements:
+
+- replacing the block with 16 NOP bytes, so the image is byte-for-byte
+  the same size and everything after it sits at the same offset, still
+  fails -- so it is not layout and not size;
+- keeping the block but writing to `B000` (unused mono page) instead of
+  `B800` boots fine, all the way to the DPMI messages, with nothing
+  visible on screen -- so it is not the video page either.
+
+What remains is that those instructions must execute. The block has no
+net register or flag effect: `push ax/push es/lahf/push ax`, a segment
+load, two byte writes, then `pop ax/sahf/pop es/pop ax`. NOPs of equal
+byte count do not substitute for it, but a memory write elsewhere does.
+
+That is the third change in this project that should have been inert and
+was not (the UPDATE 9 nesting counter and the `nmswitch` guard being the
+others), all of them on or near the trap path. It is worth treating as
+one open question rather than three curiosities: something in this
+monitor depends on timing or on memory traffic in a way not yet
+understood.
+
+Not chased further this session. The remaining cheap discriminators are a
+segment load with no write, a write to ordinary RAM, and a same-length
+delay that touches no memory.
+
+One correction: the strip list said to remove "the whole gateway". It is
+load-bearing -- `i6fstub` is the hooked IVT[6Fh] entry and its
+`out 0e0h` is the only route from a v-86 int 6Fh into the dispatcher.
+Only its `S` and `G` markers are diagnostic, and removing those is
+verified safe.

@@ -91,8 +91,6 @@ old2f		dd	0		; orginal int 2fh handler
 memman		dd	0		; memory manger function handler
 MicroProcessor	db	-1		; 3 = 386, 4 = 486
 ExtendMem  	dw	0		; 0	if extended memory allocated failed
-retdbg		dw	0		; [sp] latched at AllocateExtend's ret
-callseq		db	0		; AllocateExtend entry counter, pairs the samples
 ExtendHand 	dw	0		; extend memory handle
 RUnreg		dd	0		; Real Mode Unregister handler
 OUnreg		dd	0		; Orginal Unregister handle (RUnreg)
@@ -146,7 +144,6 @@ callold2f:
 		jmp	dword ptr cs:[Old2f]
 dpmi2f		endp
 
-Counters	db	11 dup(0)	; diagnostic marker counters, read via DUMPLOG
 
 GoProtect       proc    far
                 pop     cs:[OrgIP]
@@ -3921,161 +3918,42 @@ Bit32Ok	  db	'N'				; Y means 32 Bit protected
 ;
 
 
-LogHandle	dw	0
-LogInited	db	0
-LogName		db	'A:\DPMILOG.TXT',0
-
-MkEntry		db	'>1-ENTRY',13,10,'$'
-MkAfterCopy	db	'>2-AFTER-COPYRIGHT',13,10,'$'
-MkAfterMOS	db	'>3-AFTER-CHECKMOS',13,10,'$'
-MkAfterDPMI	db	'>4-AFTER-CHECKDPMI',13,10,'$'
-MkAfterCPU	db	'>5-AFTER-CPU',13,10,'$'
-MkAfter386	db	'>6-AFTER-386SYS',13,10,'$'
-MkAfterAlloc	db	'>7-AFTER-ALLOC',13,10,'$'
-MkBeforeInit32	db	'>8-BEFORE-INIT32',13,10,'$'
-MkAfterInit32	db	'>9-AFTER-INIT32',13,10,'$'
-MkAfterInstallIt db	'>A-AFTER-INSTALLIT',13,10,'$'
-MkErrorHandler	db	'>E-ERRORHANDLER',13,10,'$'
-
-;
-; WriteLog - increments counter byte Counters[AL]. Diagnostic only --
-; not part of the driver's real logic. Read back later via DUMPLOG,
-; which locates Counters as GoProtect-11 after probing int 2Fh 1687h.
-; Does not touch CF (INC doesn't affect it).
-;
-WriteLog	proc	near
-		pushf
-		push	ax
-		push	bx
-		push	es
-		mov	bl,al
-		xor	bh,bh
-		inc	byte ptr cs:[Counters+bx]
-;
-; TEMPORARY diagnostic: also emit a VISIBLE per-step marker straight
-; to video memory (b800:0e60 + step*2, row 23), so the init progress
-; can be read off the screen without DUMPLOG. DUMPLOG cannot help
-; here: it locates Counters via int 2Fh 1687h, i.e. via the DPMI
-; host -- and when init FAILS there is no host, so it reports "No
-; DPMI host found" and the counters stay unreachable. A direct memory
-; write needs no host, no int 21h and no reflection.
-; Step -> character: 1..9 print as '1'..'9', 10 prints as ':'.
-; Last character present = last step reached. See addendum.
-		push	ax
-		mov	ax,0b800h
-		mov	es,ax
-		pop	ax
-		shl	bx,1
-		add	al,'0'
-		mov	es:[bx+0e60h],al
-		mov	byte ptr es:[bx+0e61h],07h
-		pop	es
-		pop	bx
-		pop	ax
-		popf
-		ret
-WriteLog	endp
-
-DevLoadMsg	db	13,10,'>>> DEVICE=$DPMI.SYS NOW LOADING <<<',13,10,'$'
 
 InstallDriver	proc	near
 		mov	ax,cs
 		mov	ds,ax
-;
-; DIAGNOSTIC TEST: both int 21h ah=9 sign-on prints in this routine
-; are disabled. They are the suspected source of the screen garbage
-; that appears the instant $DPMI.SYS's ddinit0 is entered: the
-; garbage contains this driver's OWN image (HostInfo at image offset
-; 0181h and the Copyright text at 0E30h appear in it, with code bytes
-; between), which is what an ah=9 print does when ds:dx points near
-; the image start instead of at the intended message -- it runs
-; forward dumping memory until it happens to hit a '$' byte.
-;
-; Note DevLoadMsg was project-added instrumentation and is broken
-; independently of that: it contains a literal '$' inside the text
-; ('$DPMI.SYS'), and ah=9 terminates on '$', so it could only ever
-; have printed '>>> DEVICE='.
-;
-; If the screen comes out clean with these two removed, the prints
-; are confirmed as the garbage source and the remaining question is
-; only how to emit a sign-on safely. If the garbage persists, it
-; originates elsewhere in the init path and these were innocent.
-; See protected-mode assessment addendum.
-;		mov	dx,offset DevLoadMsg
-;		mov	ah,9
-;		int	21h
-		push	es
-		mov	ax,cs		; ah,9 above clobbered ax -- reload cs
-		push	ax		; save cs (currently in ax)
-		mov	ax,0040h
-		mov	es,ax		; es = BIOS data area segment
-		pop	ax		; ax = cs again
-		mov	es:[0f2h],ax	; record our segment at 0040:00F2
-					; (moved off 00F0: MOSINIT2/MOSDDINT
-					; also write 00F0, contaminating it)
-		pop	es
-		mov	al,1
-		call	WriteLog
-;		mov	dx,offset Copyright
-;		mov	ah,9
-;		int	21h
-		mov	al,2
-		call	WriteLog
+		mov	dx,offset ddt:Copyright
+		mov	ah,9
+		int	21h
 ;
 ; Check to See if On PC-MOS 4.00 or Higher
 ;
 		call	CheckMOS
-		pushf
-		mov	al,3
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 ;
 ; Check To See is DPMI is already Installed
 ;
 		call	CheckDPMI   		
-		pushf
-		mov	al,4
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 ;
 ; Check to see if ON 386 or 486
 ;
 		call	CheckMicroProcessor
-		pushf
-		mov	al,5
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 ;
 ; Check For Memory Managment 
 ;
 		call	CheckFor386SYS
-		pushf
-		mov	al,6
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 ;
 ; Allocate extended memory for Protected Mode code
 ;
 		call	AllocateExtend
-		pushf
-		mov	al,7
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 ;
 ; At This Point We will Install driver
 ;
-		mov	al,8
-		call	WriteLog
 		call	InstallIt
-		pushf
-		mov	al,9
-		call	WriteLog
-		popf
 		jc	ErrorHandler
 		push	ax
 		mov	dx,offset ddt:MsgIns
@@ -4091,8 +3969,6 @@ InstallDriver	proc	near
 ;
 ErrorHandler:
 		push	dx
-		mov	al,10
-		call	WriteLog
 		pop	dx
 		call	FreeExtend			; Free Extended memory
 		push	dx
@@ -4156,73 +4032,17 @@ InstallDriver   endp
 ; scbseg and tcbseg to SCB and TCB segments			     ;
 ;--------------------------------------------------------------------;
 
-;
-; TEMPORARY diagnostic: PutHex - write AX as 4 hex digits straight to
-; video memory at b800:[BX]. Same rationale as the WriteLog markers:
-; no int 21h, no BIOS call, no reflection, works during driver init.
-; Preserves every register and the flags.
-;
-PutHex		proc	near
-		pushf
-		push	ax
-		push	bx
-		push	cx
-		push	dx
-		push	es
-		mov	dx,ax			; dx = value to print
-		mov	ax,0b800h
-		mov	es,ax
-		mov	ax,dx
-		mov	cx,4
-PutHexLoop:
-		rol	ax,4
-		push	ax
-		and	al,0fh
-		cmp	al,9
-		jbe	PutHexDig
-		add	al,'A'-10
-		jmp	short PutHexPut
-PutHexDig:
-		add	al,'0'
-PutHexPut:
-		mov	es:[bx],al
-		mov	byte ptr es:[bx+1],07h
-		add	bx,2
-		pop	ax
-		loop	PutHexLoop
-		pop	es
-		pop	dx
-		pop	cx
-		pop	bx
-		pop	ax
-		popf
-		ret
-PutHex		endp
 
 CheckMOS	proc	near
 		mov	bx,-1
 		mov	ah,30h
 		int	21h
-;
-; TEMPORARY diagnostic: report the AX returned by both int 21h ah=30h
-; calls. CheckMOS is the confirmed failure point, and it can only fail
-; three ways: the two calls disagree (cmp ax,bx / jne), major < 4, or
-; version is exactly 4.00. Printing both AX values says which.
-; Row 23, columns 20 and 24.
-		push	bx
-		mov	bx,0e88h
-		call	PutHex			; first call's AX at col 20
-		pop	bx
 		push	ax
 		mov	ah,30h
 		mov	bx,ax
 		mov	cx,ax
 		mov	dx,ax
 		int	21h
-		push	bx
-		mov	bx,0e90h
-		call	PutHex			; second call's AX at col 24
-		pop	bx
 		pop	bx
 ;
 ; FIX (MOS 5.x detection): the original code did "cmp ax,bx / jne
@@ -4473,22 +4293,6 @@ CheckFor386SYS	proc	near
 		mov	ax,[si+scbmmsub]	; entry point offset
 		mov	bx,[si+scbmmsub+2]	; entry point segment
 ;
-; TEMPORARY diagnostic: show SEGMENT then OFFSET at row 23 cols 30/36.
-;
-		push	ax
-		push	bx
-		mov	ax,bx
-		mov	bx,0e9ch
-		call	PutHex			; segment
-		pop	bx
-		pop	ax
-		push	ax
-		push	bx
-		mov	bx,0ea8h
-		call	PutHex			; offset
-		pop	bx
-		pop	ax
-;
 ; refuse on a null far pointer -- test BOTH halves
 ;
 		mov	cx,ax
@@ -4511,107 +4315,13 @@ CheckFor386SYS  endp
 ;---------------------------------------------------------------------;
 
 AllocateExtend	proc	near
-;
-; TEMPORARY diagnostic: show SP on entry, row 23 cols 62-65. Compared
-; against SP at Z (cols 67-70, captured right after the far call into
-; memman returns), the difference tells us whether that path is
-; stack-balanced. Expect exactly 2 (the "push cx" below). Anything
-; else means rhentry's hand-rolled push/ret dispatch, its two
-; pop_junk pops, or the retf, is off by a fixed amount.
-;
-		push	ax
-		push	bx
-		mov	ax,sp
-		add	ax,4			; undo the two pushes above
-		mov	bx,0edch
-		call	PutHex
-		mov	ax,ss
-		mov	bx,0ee6h
-		call	PutHex			; SS on entry, cols 67-70
-		inc	byte ptr cs:[callseq]
-		mov	al,cs:[callseq]
-		add	al,'0'
-		push	es
-		mov	bx,0b800h
-		mov	es,bx
-		mov	es:[0dc0h],al		; entry seq, row 22 col 0
-		mov	byte ptr es:[0dc1h],07h
-		pop	es
-		pop	bx
-		pop	ax
-		lea	cx,EndProtect+4095	; round up 4k
-		lea	ax,BeginProtect
+		mov	cx,EndProtect-BeginProtect+4095	; round up 4k (label difference: no 32-bit fixup in 16-bit code)
+		mov	ax,0				; keep the original sub/shr below
 		sub	cx,ax		
 		shr	cx,12
 		push	cx
 		mov	ah,1
-;
-; TEMPORARY diagnostic: marker 'M' at row 23 col 37, immediately
-; before the far call into the memory manager. Progression to look
-; for: M (this) -> S (i6fstub, reached only from v-86) -> G
-; (doi6fgate, reached only in the monitor). The last marker present
-; localises where the runaway starts.
-;
-		push	ax
-		push	es
-		mov	ax,0b800h
-		mov	es,ax
-		mov	byte ptr es:[0eaah],'M'
-		mov	byte ptr es:[0eabh],07h
-		pop	es
-		pop	ax
 		call	cs:[memman]
-;
-; TEMPORARY diagnostic: marker 'Z' at row 23 col 47, immediately after
-; the memman far call returns. M (col 37) proved we reach the call;
-; R/A/I proved rhentry/valloc run and reach the int 6fh; the caller
-; latch proved the int 6fh reaches the dispatcher with a correct
-; return ip (0070:05F4) and that valloc is entered 16+ times. If Z
-; never fires, the far call does not return and the loop is inside
-; rhentry/valloc; if Z fires, the call returns and the failure is
-; after it, in AllocateExtend's own checks.
-;
-		push	ax
-		push	es
-		mov	ax,0b800h
-		mov	es,ax
-		mov	byte ptr es:[0ebeh],'Z'
-		mov	byte ptr es:[0ebfh],07h
-		pop	es
-		pop	ax
-;
-; TEMPORARY diagnostic: show the return-address slot HERE, right after
-; the far call returns, at row 23 cols 57-60. At Q (just before the
-; ret) it reads 6FEB instead of the expected 1200. If it is already
-; wrong here, the far call into memman corrupted it; if it is correct
-; here, the corruption happens in AllocateExtend's own tail.
-; Stack at this point: [sp]=pushed cx, [sp+2]=return address.
-;
-		push	bp
-		mov	bp,sp
-		push	ax
-		push	bx
-		mov	ax,[bp+4]
-		mov	bx,0ed2h
-		call	PutHex
-		mov	ax,bp
-		add	ax,2			; sp as it was before "push bp"
-		mov	bx,0eeah
-		call	PutHex			; SP at Z, cols 69-72... see note
-		mov	ax,ss
-		mov	bx,0ef4h
-		call	PutHex			; SS at Z
-		mov	al,cs:[callseq]
-		add	al,'0'
-		push	es
-		mov	bx,0b800h
-		mov	es,bx
-		mov	es:[0dc4h],al		; Z seq, row 22 col 2
-		mov	byte ptr es:[0dc5h],07h
-		pop	es
-		pop	bx
-		pop	ax
-		pop	bp
 		or	ax,ax
 		jnz	ErrMem
 		or	cx,cx
@@ -4619,69 +4329,13 @@ AllocateExtend	proc	near
 		pop	ax
 		cmp	cx,ax
 		jb	ErrMem1
-;
-; TEMPORARY diagnostic: K = success path reached, F = error path
-; reached. Row 23 cols 48/49.
-;
-		push	ax
-		push	es
-		mov	ax,0b800h
-		mov	es,ax
-		mov	byte ptr es:[0ec0h],'K'
-		mov	byte ptr es:[0ec1h],07h
-		pop	es
-		pop	ax
 		mov	[ExtendMem],cx
 		mov	[ExtendHand],bx
 		clc
-;
-; TEMPORARY diagnostic: marker 'Q' at row 23 col 50, immediately
-; before the ret. K fires (success path taken, allocation succeeded)
-; but marker 7 in InstallDriver never does, though only these few
-; instructions separate them. If Q fires, the ret itself is landing
-; somewhere unexpected and the return address on the stack is the
-; thing to dump next. Nothing here disturbs CF, so the clc survives.
-;
-		push	ax
-		push	es
-		mov	ax,0b800h
-		mov	es,ax
-		mov	byte ptr es:[0ec4h],'Q'
-		mov	byte ptr es:[0ec5h],07h
-		pop	es
-		pop	ax
-;
-; TEMPORARY diagnostic: show the word the ret is about to consume,
-; on screen at row 23 cols 52-55. Reading it out of memory afterwards
-; does not work -- the driver's CODE16 cannot be located reliably in
-; the guest (every image-base inference this session has misled;
-; every screen marker has told the truth). bp is saved/restored so
-; the stack is undisturbed; [bp+2] is what sp pointed at on entry
-; here, i.e. the return address. Expect 1200h (InstallDriver's
-; "pushf" after "call AllocateExtend": INIT16 03D0h + base 0E30h).
-;
-		push	bp
-		mov	bp,sp
-		push	ax
-		push	bx
-		mov	ax,[bp+2]
-		mov	bx,0ec8h
-		call	PutHex
-		pop	bx
-		pop	ax
-		pop	bp
 		ret
 ErrMem:
 		pop	cx
 ErrMem1:
-		push	ax
-		push	es
-		mov	ax,0b800h
-		mov	es,ax
-		mov	byte ptr es:[0ec2h],'F'
-		mov	byte ptr es:[0ec3h],07h
-		pop	es
-		pop	ax
 		mov	dx,offset ddt:NoMem
 		stc
 		ret
@@ -4713,6 +4367,9 @@ FreeExtend	endp
 
 Init32Code 	proc	near
 		mov	ax,cs
+		db	67h				; 32-bit address in 16-bit code: MASM emits the
+					;  4-byte disp but no prefix; without this the
+					;  last 2 bytes run as add [bx+si],al
 		mov	[DriverRealCS],ax
 		mov	ax,offset Unregister
 		mov	word ptr [RUnreg],ax
@@ -4731,7 +4388,7 @@ Init32Code 	proc	near
 		clc
 		ret
 Init32Err:
-		mov	dx,offset No32
+		mov	dx,offset ddt:No32
 		stc
 		ret
 Init32Code	endp
@@ -4745,8 +4402,6 @@ InstallIt	proc	near
 		call	Init32Code
 		pushf
 		push	ax
-		mov	al,11
-		call	WriteLog
 		pop	ax
 		popf
 		jc	InstallBad
