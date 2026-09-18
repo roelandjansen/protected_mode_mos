@@ -913,3 +913,138 @@ load-bearing.** `i6fstub` is hooked into IVT[6Fh] and its `out 0e0h` is
 the only path from a v-86 int 6Fh into the dispatcher (`doi6fgate` ->
 `e6fa`); every DPMI memman call was traced through it. Only its `S` and
 `G` markers are diagnostic, and removing just those is verified safe.
+
+---
+
+# UPDATE 12 — kernel diagnostics stripped; screen is clean
+
+## Applied: `MOSDDINT.ASM` + `MOSINIT2.ASM`
+
+Removed 13 BIOS-teletype marker blocks (the `[`, `<`, `>`, `{`, `}`, `(`,
+`)` bracket noise that prefixed every driver-load line) and 3 BIOS-data-area
+recorder blocks (`0040:00F5` etc., read back via DUMPLOG), plus their
+comment blocks. `kernel-strip.diff`.
+
+Both are single regular shapes, and the strippers only remove a block when
+**every** line in it is a marker instruction:
+
+```
+push ax / push bx / mov al,'X' / mov ah,0eh / xor bx,bx / int 10h / pop bx / pop ax
+push ax / push es / mov ax,40h / mov es,ax / ... / mov es:[0f5h],ax / pop es / pop ax
+```
+
+## Kernel build path (new)
+
+`MAKEMOS.BAT` cannot be used as-is: it starts with `del $*.*`, which would
+wipe `$386.SYS`, `$DPMI.SYS` and every other built driver in `latest/`.
+The rig now drives `make -f KERNEL.MAK $$MOS.SYS` directly, deleting only
+the named `.OBJ`s and `$$MOS.SYS`. The kernel target links `mosfront` +
+the common list + `mosinit2` + `mosback`, then converts with
+`debug <exe2bin.dat`.
+
+**The tree's `$$MOS.SYS` was stale**, as the drivers were: 129457 bytes
+shipped vs 130225 rebuilt from unmodified sources. The rebuilt unmodified
+kernel was boot-verified identical **before** any edit, so the strip is
+measured against a real reference and not against a stale binary.
+
+## Measured result
+
+Screen is clean end to end — no bracket prefixes, no marker characters
+from the kernel:
+
+```
+Loading $386.SYS  version 5.01  (921119)
+486 Protected mode and paging are now active.
+  640K RAM found in first megabyte;
+16000K total RAM found;
+  640K allocated to first megabyte.
+PC-MOS DPMI Driver Version 1.00 (910430)
+(C) Copyright 1991, The Software Link, Incorporated.
+Dos Protected Mode Insterface Not Installed.
+Protected Code Initialization failed.
+5K SMP #1 allocated;     3K of SMP #1 allocated to device drivers.
+```
+
+No-DPMI boot: date/time prompts, `$$SHELL.SYS version 5.04`, live prompt,
+`VER` answers.
+
+Tree kernel is byte-identical to the verified scratch build.
+
+## Still present
+
+`_386.ASM`'s markers only (`V`/`W`, `R`/`A`/`I`/`E`/`N`/`P`, the `ZQ`
+bisection set). They write absolute video cells, so they land in scrolled
+output at rows 22-23. Blocked by UPDATE 11: removing the `R` marker alone
+stops the boot.
+
+---
+
+# UPDATE 13 — `_386.ASM` diagnostics stripped; UPDATE 11's conclusion RETRACTED
+
+## Retraction
+
+UPDATE 11 reported that the `R` marker in `rhentry` was **load-bearing**:
+removing it stopped the boot, and that survived a NOP-padding test and a
+`B000`-vs-`B800` test. That conclusion was **wrong**. The fault was in my
+stripper, not in the code.
+
+The `R`/`A`/`I`/`E`/`N`/`P` blocks contain an **inner** `push ax`/`pop ax`
+around `lahf`/`sahf`:
+
+```
+push ax / push es / lahf / push ax / mov ax,0b800h / mov es,ax
+mov byte ptr es:[0eb2h],'R' / mov byte ptr es:[0eb3h],07h
+pop ax / sahf / pop es / pop ax
+```
+
+The filter matched from the first `push ax` to the **first** `pop ax` —
+the inner one — and deleted that span, leaving `sahf / pop es / pop ax`
+behind. Three stray pops on the trap path, hence the hang. The
+NOP-padding and `B000` tests were consistent with that too: both left the
+block's pops balanced.
+
+Removing the block properly (all 12 lines, balanced) boots fine. So there
+is **no** unexplained sensitivity here, and the "third inert change that
+broke the code" framing in UPDATE 11 and the addendum does not stand. The
+UPDATE 9 nesting-counter result is unaffected: that was a source-level
+change, measured 2/2, not a stripper artefact.
+
+## Applied
+
+`_386.ASM` stripped: 15 marker blocks (`S`, `G`, `R`, `A`, `I`, `E`, `N`,
+`P`, and the 7 `ZQx` bisection markers), the `V`/`W` vmstart markers, the
+`eidbgsp`/`eidbgbp`/`eidbgsp2` latches, the `e6dbg*` caller latch with its
+`e6fnolatch` label, the `e5dbgip` latch, all the declarations including
+`nestcur`/`nestmax`, and 13 orphan comment blocks. 10574 -> 10260 lines.
+
+The gateway (`i6fstub`/`doi6fgate`/`dooutali9`) is **kept** — it is
+load-bearing, as UPDATE 11 correctly noted; only its `S`/`G` markers went.
+
+Verification, beyond the build gate:
+
+- global `push`/`pop` balance of the stripped file is `-8`, **identical to
+  the original**, which is what the first stripper would have failed
+- `eicommon` reads exactly as it should: `pop ss:[trash1]` / `push bp` /
+  `mov bp,sp` / `push ds` / `push es` / `push cx` / `push bx`
+- 0 warnings, 0 severe errors; tree `$386.SYS` byte-identical to the
+  verified scratch build
+
+## Measured result — the screen is completely clean
+
+```
+Loading $386.SYS  version 5.01  (921119)
+486 Protected mode and paging are now active.
+  640K RAM found in first megabyte;
+16000K total RAM found;
+  640K allocated to first megabyte.
+PC-MOS DPMI Driver Version 1.00 (910430)
+(C) Copyright 1991, The Software Link, Incorporated.
+Dos Protected Mode Insterface Not Installed.
+Protected Code Initialization failed.
+5K SMP #1 allocated;     3K of SMP #1 allocated to device drivers.
+[A:\]
+```
+
+No-DPMI boot: date/time, `$$SHELL.SYS version 5.04`, live prompt, `VER`
+answers. No diagnostics remain in `_386.ASM`, `_DPMI.ASM`,
+`MOSDDINT.ASM` or `MOSINIT2.ASM`.

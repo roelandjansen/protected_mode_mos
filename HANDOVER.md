@@ -15,23 +15,31 @@ corruption is **solved and fixed**: an assembler encoding defect in
 original TSL code, not a monitor bug. The driver now fails cleanly with
 its own error message and the boot continues. See UPDATE 10.
 
-## Current state (2026-09-17, after UPDATE 11)
+## Current state (2026-09-18, after UPDATE 13)
 
-Tree = baseline (below) plus the `_DPMI.ASM` work: three encoding fixes,
-all diagnostics stripped, and the driver's own sign-on print restored.
-Measured:
+Tree = baseline plus all `_DPMI.ASM` work (three encoding fixes, sign-on
+print restored), the kernel strip, and the `_386.ASM` strip. **No
+diagnostics remain in any source.** Measured:
 
-- `DEVICE=$DPMI.SYS`: boot reaches `[A:\]`; driver prints its banner
-  (`PC-MOS DPMI Driver Version 1.00 (910430)` + TSL copyright) then
+- `DEVICE=$DPMI.SYS`: completely clean screen, `$386.SYS` and the DPMI
+  driver announce themselves, driver reports
   `Dos Protected Mode Insterface Not Installed.` /
-  `Protected Code Initialization failed.`
-- no DPMI: live prompt, `VER` answers
+  `Protected Code Initialization failed.`, prompt reached
+- no DPMI: date/time prompts, `$$SHELL.SYS version 5.04`, live prompt,
+  `VER` answers
 
-`_386.ASM` still carries its diagnostics **and must for now**: removing
-the `R` marker in `rhentry` alone stops the boot after `$386.SYS` loads,
-and it is neither layout nor the video page (UPDATE 11 has the bisection).
-Those markers write absolute video cells, so they appear in scrolled
-shell output — cosmetic only.
+**The tree's `$$MOS.SYS` was stale** (129457 shipped vs 130225 rebuilt
+from its own sources); it now holds a kernel built from the tree's
+sources, boot-verified unmodified before the strip.
+
+**UPDATE 11's "load-bearing `R` marker" is retracted** — it was a bug in
+my stripper (matched the inner `pop ax` of the `lahf`/`sahf` pair, leaving
+stray pops). When stripping marker blocks, check that the file's global
+`push`/`pop` balance is unchanged; for this tree it is `-8`.
+
+The gateway (`i6fstub`/`doi6fgate`/`dooutali9`) IS load-bearing and stays:
+`i6fstub` is the hooked IVT[6Fh] entry and its `out 0e0h` is the only
+route from a v-86 int 6Fh into the dispatcher.
 
 Next work is the protected-mode entry. **Read
 `pcmos386-protected-mode-entry-design.md` first** — it supersedes the
@@ -75,7 +83,7 @@ Verified at each step, not assumed:
 
 1. `pcmos386-protected-mode-fix-plan.md` — rewritten; the old version
    planned a hunt for a crash that turned out not to exist
-2. `addendum-session-entry.md` — 11 sections, chronological; append to
+2. `addendum-session-entry.md` — 13 sections, chronological; append to
    `pcmos386-protected-mode-addendum.md`
 3. `CHANGES.md` — every code change, split into REAL FIXES vs
    DIAGNOSTICS TO STRIP
@@ -250,12 +258,14 @@ never fire because nothing needs them.
 
 ## Diagnostics to strip before committing
 
-**Do not strip the gateway** (`i6fstub`/`doi6fgate`/`dooutali9`): it is
-load-bearing, not diagnostic — see UPDATE 11. Its `S`/`G` markers are
-safe to remove. The `R` marker in `rhentry` currently cannot be removed
-at all without stopping the boot.
+**DONE in UPDATE 13 — all four files are clean.** Historical notes:
 
-`_386.ASM` (blocked, see above): A–G bisection markers, `V`/`W` vmstart markers, `R`/`A`/`I`
+**Do not strip the gateway** (`i6fstub`/`doi6fgate`/`dooutali9`): it is
+load-bearing, not diagnostic. Its `S`/`G` markers are
+safe to remove. (UPDATE 11 also claimed the `R` marker could not be
+removed; that was a stripper bug, retracted in UPDATE 13.)
+
+`_386.ASM`: DONE in UPDATE 13 — was: A–G bisection markers, `V`/`W` vmstart markers, `R`/`A`/`I`
 markers, `E`/`N`/`P` markers, `eidbgsp`/`eidbgbp`/`eidbgsp2`,
 `e5dbgip`, `e6dbgcs`/`e6dbgip`/`e6dbgax`/`e6dbgn`,
 the `nestcur`/`nestmax` declarations (code already removed in the
@@ -267,8 +277,8 @@ disabled sign-on prints. Delete `DevLoadMsg` outright — it contains a
 literal `'$'` inside `'$DPMI.SYS'` and is printed with ah=9, so it
 could only ever have printed `>>> DEVICE=`.
 
-`MOSDDINT.ASM` / `MOSINIT2.ASM` markers are from earlier sessions and
-were not touched.
+`MOSDDINT.ASM` / `MOSINIT2.ASM`: DONE in UPDATE 12 (teletype markers and
+BDA recorders removed; kernel rebuilt and boot-verified).
 
 ## Still unvalidated
 

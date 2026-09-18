@@ -710,19 +710,6 @@ int13tab label word
 ;=====================================================================
 
 i6fstub:
-;
-; TEMPORARY diagnostic: marker 'S' at row 23 col 38. i6fstub is only
-; ever entered from v-86, so plain prefix-free 16-bit code is correct
-; here. ax must survive -- it carries the int 6fh function number.
-;
-	push	ax
-	push	es
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0each],'S'
-	mov	byte ptr es:[0eadh],07h
-	pop	es
-	pop	ax
 	out	0e0h,al 		; traps -> doi6fgate -> e6fa
 	push	bp
 	mov	bp,sp			; caller's flags image at [bp+6]
@@ -766,22 +753,6 @@ dooutali9:
 ; expects. See addendum.
 ;
 doi6fgate:
-;
-; TEMPORARY diagnostic: marker 'G' at row 23 col 39. This runs in the
-; monitor, i.e. 32-bit, so it cannot use the b800 real-mode trick and
-; cannot reach 0b8xxxh with the 16-bit addressing MASM emits for
-; res16. Use the gdtvideo selector, whose base is already b8000.
-;
-	push	ax
-	push	es
-	mov	ax,gdtvideo-gdt
-	mov	es,ax
-	db	67h
-	mov	byte ptr es:[0eaeh],'G'
-	db	67h
-	mov	byte ptr es:[0eafh],07h
-	pop	es
-	pop	ax
 	db	67h
 	inc	word ptr ss:[s0ip]	; past the e6 opcode
 	db	67h
@@ -1334,27 +1305,6 @@ i13error:
 	assume	ds:nothing,es:nothing,ss:nothing
 rhentry:
 
-;
-; TEMPORARY diagnostic: marker 'R' at row 23 col 41. Prefix-free, so
-; correct under 16-bit/v-86 execution -- which is what this routine is
-; written for; rhentry..valloc contains no 66h/67h prefixes at all.
-; Flag-preserving, because rhe2 goes out of its way to return without
-; changing any register or flag.
-;
-	push	ax
-	push	es
-	lahf				; NOT pushf: PUSHF/POPF are opcode-table 0
-	push	ax			;  in this monitor and would trap as #UD.
-					;  lahf destroys AH, so the original ax is
-					;  saved FIRST and restored LAST.
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0eb2h],'R'
-	mov	byte ptr es:[0eb3h],07h
-	pop	ax
-	sahf
-	pop	es
-	pop	ax
 
 IF RHTRACE
 	call	rhdebug 		; display request handler debugging
@@ -1578,40 +1528,8 @@ fullboot:
 ;=====================================================================
 	assume	ds:nothing,es:nothing,ss:nothing
 valloc  proc	near
-;
-; TEMPORARY diagnostic: marker 'A' at row 23 col 42 (valloc entered),
-; and 'I' at col 43 immediately before the int 6fh. Prefix-free and
-; flag-preserving, as for rhentry. cx carries the page count in, so it
-; must not be disturbed.
-;
-	push	ax
-	push	es
-	lahf				; lahf destroys AH, so ax is saved FIRST
-	push	ax			;  and restored LAST. Not pushf/popf:
-					;  those are opcode-table 0 in this monitor.
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0eb4h],'A'
-	mov	byte ptr es:[0eb5h],07h
-	pop	ax
-	sahf
-	pop	es
-	pop	ax
 	mov	word ptr mmgrp:[ntrash1],cx
 	mov	word ptr mmgrp:[ntrash1+2],0
-	push	ax
-	push	es
-	lahf				; lahf destroys AH, so ax is saved FIRST
-	push	ax			;  and restored LAST. Not pushf/popf:
-					;  those are opcode-table 0 in this monitor.
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0eb6h],'I'
-	mov	byte ptr es:[0eb7h],07h
-	pop	ax
-	sahf
-	pop	es
-	pop	ax
 	mov	ax,7705h		; the native mode valloc proc
 	int	6fh			; will have to modify the page table
 	mov	ax,word ptr mmgrp:[ntrash1]
@@ -3061,23 +2979,6 @@ wsvmidtr	dw	idtlen-1,offset mmgrp:idt,0  ;	   and idt
 wsrmidtr	dw	3ffh,0,0	; idtr for real mode
 wscr0		dw	0001h,8000h	; to initialize cr0
 wshalt		db	0,0		;031388  1 if hlt is pending
-;
-; TEMPORARY diagnostic: eicommon frame capture. Plain movs only --
-; no flags touched (handlers read flags after eicommon) and ax is not
-; clobbered (entint6f does "cmp ax,7700h" immediately after).
-; Values reflect the most recent trap; bp identifies which kind:
-;   p0stack-24/-28 = native, p0stack-40/-44 = v-86.
-;
-eidbgsp		dw	0		; sp after the return-address pop
-eidbgbp		dw	0		; bp after "mov bp,sp"
-eidbgsp2	dw	0		; sp after all five pushes
-e5dbgip		dw	0		; s0ip latched at e6f05 entry (v86 return ip)
-e6dbgcs		dw	0		; s0cs of the last V-86-ORIGINATED int 6fh
-e6dbgip		dw	0		; s0ip of same
-e6dbgax		dw	0		; ax (function) of same
-e6dbgn		db	0		; count of v-86-originated int 6fh entries
-nestcur		db	0		; current trap nesting depth
-nestmax		db	0		; maximum nesting depth seen
 ;
 ; TEST (int 6fh reachability from v-86): user IOPL forced to 0.
 ;
@@ -7825,18 +7726,12 @@ eicommon proc  near
 	db	66h			; 16-bit data
 	db	67h			; 16-bit address
 	pop	ss:[trash1]		; return address
-	db	67h
-	mov	ss:[eidbgsp],sp 	; TEMPORARY diagnostic
 	push	bp
 	mov	bp,sp			; bp is at [bp]
-	db	67h
-	mov	ss:[eidbgbp],bp 	; TEMPORARY diagnostic
 	push	ds			; ds is at [bp-4]
 	push	es			; es is at [bp-8]
 	push	cx			; cx is at [bp-12]
 	push	bx			; bx is at [bp-16]
-	db	67h
-	mov	ss:[eidbgsp2],sp	; TEMPORARY diagnostic
 
 ;------------- let's see where we stand at this point: --------------
 ;   bp = p0stack-24		means native mode, no error code
@@ -8100,44 +7995,6 @@ assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 
 entint6f:
 	calls32 eicommon		; kludge until eicommon is moved to use32
-;
-; TEMPORARY diagnostic: marker 'E' at row 23 col 44. This is the IDT
-; path. If E fires, int 6fh from the v-86 task IS being trapped and
-; reaches the dispatcher directly -- which would mean the stub/gateway
-; are unnecessary and the failure is further in, in e6f05. res32, so
-; disp32 addressing is natural; gdtvideo's base is already b8000.
-;
-	push	eax
-	push	es
-	mov	ax,gdtvideo-gdt
-	mov	es,ax
-	mov	byte ptr es:[0eb8h],'E'
-	mov	byte ptr es:[0eb9h],07h
-	pop	es
-	pop	eax
-;
-; TEMPORARY diagnostic: latch caller identity, but ONLY for v-86
-; originated calls. The earlier E/N/P markers were useless because
-; they fire for ANY int 6fh AX=7705h, including the kernel's own
-; memory-manager traffic, so they could not tell our v-86 caller from
-; the kernel. bp is the existing native-vs-v86 discriminator that
-; entint6f itself uses two instructions below; reuse it. Kernel calls
-; (native, bp >= p0stack-28) now leave these alone.
-;
-; e6dbgn counts v-86 entries; if it stays 0, no int 6fh from any v-86
-; task ever reaches the IDT dispatcher and the gateway IS required.
-;
-	cmp	bp,offset mmgrp:p0stack-28
-	jnb	e6fnolatch
-	push	eax
-	mov	ax,ss:[s0cs]
-	mov	ss:[e6dbgcs],ax
-	mov	ax,ss:[s0ip]
-	mov	ss:[e6dbgip],ax
-	pop	eax
-	mov	ss:[e6dbgax],ax
-	inc	byte ptr ss:[e6dbgn]
-e6fnolatch:
 	mov	ch,6fh
 	mov	ss:[debugint],ch
 	mov	ss:[iveccode],ch
@@ -8262,42 +8119,10 @@ e6f04:
 
 assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 e6f05:
-;
-; TEMPORARY diagnostic: marker 'N' at row 23 col 45 (native valloc
-; handler entered) and 'P' at col 46 (nalloc returned).
-;
-	push	eax
-	push	es
-	mov	ax,gdtvideo-gdt
-	mov	es,ax
-	mov	byte ptr es:[0ebah],'N'
-	mov	byte ptr es:[0ebbh],07h
-	pop	es
-	pop	eax
-;
-; TEMPORARY diagnostic: latch the v-86 return ip for THIS trap. s0ip
-; itself is rewritten by every subsequent trap (a live read at 24s
-; showed a BIOS timer context, FFF8:D048), so it has to be captured
-; here. valloc's int 6fh is at offset 05F2; the next instruction is
-; 05F4. If this latches 05F2, the monitor is not advancing the v-86 ip
-; past the int and cgrm7's iretd re-executes it forever.
-;
-	push	eax
-	mov	ax,ss:[s0ip]
-	mov	ss:[e5dbgip],ax
-	pop	eax
 	call	adrpage 		; ds -> driver data, es -> page table
 	assume	ds:mmgrp,es:nothing
 	mov	ecx,mmgrp:[ntrash1]
 	call	nalloc
-	push	eax
-	push	es
-	mov	ax,gdtvideo-gdt
-	mov	es,ax
-	mov	byte ptr es:[0ebch],'P'
-	mov	byte ptr es:[0ebdh],07h
-	pop	es
-	pop	eax
 	mov	mmgrp:[ntrash1],eax
 	mov	mmgrp:[ntrash2],ebx
 	mov	mmgrp:[ntrash3],ecx
@@ -9846,30 +9671,7 @@ ENDIF
 
 vmstart:
 
-; TEMPORARY diagnostic: marker 'V' at vmstart's very first
-; instruction, BEFORE the sti, and marker 'W' immediately after the
-; sti. Written straight to video memory (b800:0e60 / 0e64, row 23)
-; rather than via int 10h: vmstart runs in v-86 mode, where a BIOS
-; call is trapped and reflected by the monitor, so a broken
-; reflection would suppress the marker even if vmstart HAD been
-; entered -- a false negative on exactly the question being asked.
-; A plain memory write traps nothing and needs no interrupt.
-; Deliberately uses no push/pop either, so the markers do not depend
-; on SS:SP being valid at v-86 entry; ax and es are both reloaded by
-; the code that follows, so clobbering them here is safe.
-;   no 'V'          -> vmstart was never entered
-;   'V' only        -> entered, died on the sti (timer-IRQ theory)
-;   'V' and 'W'     -> survived the sti, died later
-; See protected-mode assessment addendum.
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0e60h],'V'
-	mov	byte ptr es:[0e61h],07h
 	sti
-	mov	ax,0b800h
-	mov	es,ax
-	mov	byte ptr es:[0e64h],'W'
-	mov	byte ptr es:[0e65h],07h
 	mov	ah,9
 	mov	dx,offset mmgrp:msgvm
 	int	21h
@@ -10163,25 +9965,6 @@ build_page:
 	mov	word ptr [oldnmi],ax
 	mov	word ptr [idt+16],offset mmgrp:newnmi  ; set to iret for mem tests
 
-; TEMPORARY diagnostic: bisection marker 'A' -- build_page entered,
-; before the meg1-read workaround / test_extmem. Written directly to
-; video memory via gdtzero (permanently flat, unlike gdtpage which
-; this routine rewrites partway through). See protected-mode
-; assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f00h],'Z'
-	mov	byte ptr es:[0b8f01h],07h
-	mov	byte ptr es:[0b8f02h],'Q'
-	mov	byte ptr es:[0b8f03h],07h
-	mov	byte ptr es:[0b8f04h],'A'
-	mov	byte ptr es:[0b8f05h],07h
-	mov	byte ptr es:[0b8f06h],'1'
-	mov	byte ptr es:[0b8f07h],07h
-	pop	es
-	pop	ax
 
 ; found that I had to read each dword in the first page
 ; of meg1 to satiate the compaq.  compaq tells me that some early
@@ -10216,22 +9999,6 @@ bpg1:
 	mov	ebx,100000h
 	call	test_extmem
 
-; TEMPORARY diagnostic: bisection marker 'B' -- test_extmem returned.
-; See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f10h],'Z'
-	mov	byte ptr es:[0b8f11h],07h
-	mov	byte ptr es:[0b8f12h],'Q'
-	mov	byte ptr es:[0b8f13h],07h
-	mov	byte ptr es:[0b8f14h],'B'
-	mov	byte ptr es:[0b8f15h],07h
-	mov	byte ptr es:[0b8f16h],'2'
-	mov	byte ptr es:[0b8f17h],07h
-	pop	es
-	pop	ax
 
 ; at this point, ebx holds the number of pages of extended memory
 ; found within the first range (2nd range search is later).
@@ -10355,23 +10122,6 @@ bpg17:
 	add	edi,4			; next pte
 	loop	bpg17
 
-; TEMPORARY diagnostic: bisection marker 'C' -- pte's built, about to
-; build the page directory itself. See protected-mode assessment
-; addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f20h],'Z'
-	mov	byte ptr es:[0b8f21h],07h
-	mov	byte ptr es:[0b8f22h],'Q'
-	mov	byte ptr es:[0b8f23h],07h
-	mov	byte ptr es:[0b8f24h],'C'
-	mov	byte ptr es:[0b8f25h],07h
-	mov	byte ptr es:[0b8f26h],'3'
-	mov	byte ptr es:[0b8f27h],07h
-	pop	es
-	pop	ax
 
 ; time to build the page directory
 
@@ -10384,22 +10134,6 @@ bpg19:
 	add	eax,1000h		; advance the pta by 1
 	loop	bpg19
 
-; TEMPORARY diagnostic: bisection marker 'D' -- page directory build
-; loop completed. See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f30h],'Z'
-	mov	byte ptr es:[0b8f31h],07h
-	mov	byte ptr es:[0b8f32h],'Q'
-	mov	byte ptr es:[0b8f33h],07h
-	mov	byte ptr es:[0b8f34h],'D'
-	mov	byte ptr es:[0b8f35h],07h
-	mov	byte ptr es:[0b8f36h],'4'
-	mov	byte ptr es:[0b8f37h],07h
-	pop	es
-	pop	ax
 
 
 ; rewrite the base for gdtpage to simplify access to the page table
@@ -10451,62 +10185,14 @@ bpg21:
 	mov	eax,[pd_addr]		; get phyadr of the page direcotry
 	mov	dword ptr [t2cr3],eax	; set into tss2
 
-; TEMPORARY diagnostic: bisection marker 'E' -- about to load cr3.
-; See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f40h],'Z'
-	mov	byte ptr es:[0b8f41h],07h
-	mov	byte ptr es:[0b8f42h],'Q'
-	mov	byte ptr es:[0b8f43h],07h
-	mov	byte ptr es:[0b8f44h],'E'
-	mov	byte ptr es:[0b8f45h],07h
-	mov	byte ptr es:[0b8f46h],'5'
-	mov	byte ptr es:[0b8f47h],07h
-	pop	es
-	pop	ax
 
 	mov	cr3,eax 		; and into cr3
 
-; TEMPORARY diagnostic: bisection marker 'F' -- cr3 loaded, about to
-; enable paging via cr0. See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f50h],'Z'
-	mov	byte ptr es:[0b8f51h],07h
-	mov	byte ptr es:[0b8f52h],'Q'
-	mov	byte ptr es:[0b8f53h],07h
-	mov	byte ptr es:[0b8f54h],'F'
-	mov	byte ptr es:[0b8f55h],07h
-	mov	byte ptr es:[0b8f56h],'6'
-	mov	byte ptr es:[0b8f57h],07h
-	pop	es
-	pop	ax
 
 	mov	eax,cr0
 	or	eax,ebx 		; set the "pg" bit (unless error)
 	mov	cr0,eax 		; enable paging
 
-; TEMPORARY diagnostic: bisection marker 'G' -- paging just enabled,
-; still alive. See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,gdtzero-gdt
-	mov	es,ax
-	mov	byte ptr es:[0b8f60h],'Z'
-	mov	byte ptr es:[0b8f61h],07h
-	mov	byte ptr es:[0b8f62h],'Q'
-	mov	byte ptr es:[0b8f63h],07h
-	mov	byte ptr es:[0b8f64h],'G'
-	mov	byte ptr es:[0b8f65h],07h
-	mov	byte ptr es:[0b8f66h],'7'
-	mov	byte ptr es:[0b8f67h],07h
-	pop	es
-	pop	ax
 
 	mov	ax,gdttss1-gdt
 	ltr ax				; load the task register - vm prep

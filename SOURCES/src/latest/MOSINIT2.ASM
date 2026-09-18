@@ -2750,51 +2750,14 @@ initp2	proc	near
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdcon		; init standard in and out (console device)
-;
-; TEMPORARY diagnostic: numbered markers identifying each of initp2's
-; 5 standard devices directly, rather than relying on counting marker
-; positions (already led to one misattribution this session). See
-; protected-mode assessment addendum.
-	push	ax
-	push	bx
-	mov	al,'1'
-	mov	ah,0eh
-	xor	bx,bx
-	int	10h
-	pop	bx
-	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,mosstdclk		; init standard clk
-	push	ax
-	push	bx
-	mov	al,'2'
-	mov	ah,0eh
-	xor	bx,bx
-	int	10h
-	pop	bx
-	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es	 
 	lea	bx,scbcom24		; init devices in MOSDEVS.ASM
-	push	ax
-	push	bx
-	mov	al,'3'
-	mov	ah,0eh
-	xor	bx,bx
-	int	10h
-	pop	bx
-	pop	ax
-;
-; TEMPORARY diagnostic: record [scbdrvr]'s low word immediately
-; before and immediately after device 3's (scbcom24) dodrvr call --
-; safe bytes at 0040:0130 (before) and 0040:0132 (after). Tests
-; directly whether scbdrvr actually changes (i.e. linking succeeded)
-; despite the garbled output. Stays entirely within initp2, not the
-; fragile ddstrat/ddinter region. See protected-mode assessment
-; addendum.
 	push	ax
 	push	cx
 	push	es
@@ -2819,26 +2782,10 @@ initp2	proc	near
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdblk		; init standard disk driver
-	push	ax
-	push	bx
-	mov	al,'4'
-	mov	ah,0eh
-	xor	bx,bx
-	int	10h
-	pop	bx
-	pop	ax
 	call	dodrvr
 	push	[mosaddr]		; use correct driver
 	pop	es
 	lea	bx,scbstdhd		; init standard hard disk driver
-	push	ax
-	push	bx
-	mov	al,'5'
-	mov	ah,0eh
-	xor	bx,bx
-	int	10h
-	pop	bx
-	pop	ax
 	call	dodrvr
 	mov	[first],2
 	pop	es
@@ -5531,17 +5478,6 @@ initp81:
 ; load loop to load driver and init it
 
 ldloop:
-;
-; TEMPORARY diagnostic: count iterations of this outer driver-load
-; loop, via safe counter byte at 0040:00F4 (adjacent to the existing
-; 00F0/00F2/00F3 markers). See protected-mode assessment addendum.
-	push	ax
-	push	es
-	mov	ax,40h
-	mov	es,ax
-	inc	byte ptr es:[0f4h]
-	pop	es
-	pop	ax
 	push	cx			; save count of drivers left to load
 	mov	cl,byte ptr [bx+ddtable+5]
 	mov	[lowdev],cl

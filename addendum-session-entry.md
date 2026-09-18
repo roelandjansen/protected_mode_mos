@@ -1318,3 +1318,77 @@ load-bearing -- `i6fstub` is the hooked IVT[6Fh] entry and its
 `out 0e0h` is the only route from a v-86 int 6Fh into the dispatcher.
 Only its `S` and `G` markers are diagnostic, and removing those is
 verified safe.
+
+
+## Kernel diagnostics stripped; the screen is finally clean
+
+The bracket noise on every driver-load line came from `MOSDDINT.ASM` and
+`MOSINIT2.ASM`, not from either driver: 13 BIOS-teletype marker blocks
+(`[`, `<`, `>`, `{`, `}`, `(`, `)`) and 3 recorder blocks writing to the
+BIOS data area for DUMPLOG. All removed, with the strippers refusing any
+block that contains a line which is not a marker instruction.
+
+Two things worth recording about the kernel build, which nothing had
+exercised before this point:
+
+- `MAKEMOS.BAT` begins with `del $*.*`. Running it would delete
+  `$386.SYS`, `$DPMI.SYS` and every other built driver in `latest/`. The
+  rig drives `make -f KERNEL.MAK $$MOS.SYS` directly instead and deletes
+  only what it means to rebuild.
+- The tree's `$$MOS.SYS` was **stale**, exactly as the drivers were:
+  129457 bytes shipped against 130225 rebuilt from unmodified sources.
+  So the rebuilt-but-unmodified kernel was boot-verified first, and it
+  booted identically. Only then was anything stripped. Without that step
+  the strip would have been measured against a binary that did not come
+  from these sources — the same trap as the 09-17 tarball.
+
+Result: no marker characters from the kernel anywhere, `$386.SYS` and the
+DPMI driver announce themselves normally, and the no-DPMI boot reaches a
+live prompt through the date/time prompts and `$$SHELL.SYS version 5.04`.
+
+`_386.ASM` keeps its markers, still blocked by the `R`-marker sensitivity.
+They sit at absolute rows 22-23, so they now appear against scrolled shell
+output rather than in a wall of brackets.
+
+
+## `_386.ASM` stripped after all — and the "load-bearing marker" was my own bug
+
+The previous section reported that the `R` marker in `rhentry` could not
+be removed without stopping the boot, and treated that as a third instance
+of this monitor reacting to a change that should be inert. **That was
+wrong, and the cause was my stripper.**
+
+Those marker blocks nest a `push ax`/`pop ax` inside the outer pair, to
+carry the flags across `lahf`/`sahf`:
+
+```
+push ax / push es / lahf / push ax / ... / pop ax / sahf / pop es / pop ax
+```
+
+The filter matched from the first `push` to the *first* `pop ax`, which is
+the inner one, and cut there — leaving `sahf / pop es / pop ax` stranded.
+Three unbalanced pops on the trap path will stop a boot, and they did.
+
+Worse, the two tests I ran to "confirm" the finding could not have caught
+it. Padding with NOPs and redirecting the write to `B000` both leave the
+surviving pops exactly where they were, so both reproduce the hang for the
+same reason. They looked like independent confirmation and were nothing of
+the kind. The lesson is narrower than "measure everything": a test only
+discriminates if it varies the thing actually under suspicion, and I never
+varied the edit itself — only its contents.
+
+Rewritten with push/pop balance tracking, the block removes cleanly and
+the system boots. The check that would have caught it immediately is
+trivial: the global `push`/`pop` count of the stripped file is `-8`,
+exactly as in the original. It is now part of the procedure.
+
+So `_386.ASM` is stripped: 15 marker blocks, `V`/`W`, the `eidbg*`,
+`e6dbg*` and `e5dbgip` latches, every declaration including
+`nestcur`/`nestmax`, and the orphan comments. The gateway stays, as before
+— that part of the earlier note was right.
+
+The screen is now clean from power-on to prompt, with no diagnostics left
+in any of the four files. The open-question framing of "three inert
+changes that broke this code" collapses to one: UPDATE 9's nesting
+counter, which was a genuine source change measured 2 of 2 boots and is
+unaffected by any of this.

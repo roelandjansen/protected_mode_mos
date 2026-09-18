@@ -1,12 +1,11 @@
 # PC-MOS/386 — protected-mode entry: architecture and plan
 
-Read this before any further DPMI work. Facts marked **measured** were
-observed in the emulator; **read** means source or listing only.
+Read this before any further DPMI work. **Measured** = observed in the
+emulator; **read** = source or listing only.
 
-Earlier design notes proposed building a native-mode entry from scratch,
-or avoiding one. Both are obsolete: the survey found the mechanism
-**already exists in `$386.SYS`**. What remains is wiring plus one missing
-service.
+Earlier notes proposed building a native-mode entry from scratch, or
+avoiding one. Both are obsolete: the mechanism **already exists in
+`$386.SYS`**. What remains is wiring plus one missing service.
 
 ---
 
@@ -24,13 +23,13 @@ service.
 
 "Native mode" here is a **32-bit, ring 3 task context** whose segments
 alias the task's real-mode segments. `_DPMI.INC`'s empty `goprot`/`goreal`
-macros are the two ends of `AH=10h`, and `call32` is valid in the `d=1`
-code segment `nmswitch` creates.
+are the two ends of `AH=10h`, and `call32` is valid in the `d=1` code
+segment `nmswitch` creates.
 
 ## 2. C1 — `goprot`/`goreal` (implemented, measured, NOT applied)
 
 Both macros are `mov ax,1001h` / `int 0d4h`, which is what `GoProtect`
-already does for clients. `goprot-goreal.diff`.
+already does for clients. See `goprot-goreal.diff`.
 
 **Measured**, DPMI boot:
 
@@ -43,40 +42,39 @@ already does for clients. `goprot-goreal.diff`.
 ```
 
 The switch works; `InitProtect` executes as genuine 32-bit code for the
-first time. Boot then parks, so this is held back: on its own it replaces
-a clean failure with a hang. Apply it together with C2a.
+first time. Boot then parks, so this is held back: alone it replaces a
+clean failure with a hang. Apply together with C2a.
 
 ## 3. C2 — the missing service: segment -> selector in native mode
 
 **Read:** `einative` dispatches only vectors `38h`, `D4h`, `21h`. Vector
-`6Fh` in native mode always falls through to `einstand`/`dovmint`, which
-reflects to the never-hooked real-mode int 6Fh vector. The `7700h`/`7780h`
-tables (including `86h` SEGMENT_SELECTOR, implemented in an earlier
-session) are reachable **only from v-86**. `einfun93` (`13h`) aliases an
-existing *selector*, so it is not a substitute.
+`6Fh` in native mode falls through to `einstand`/`dovmint`, which reflects
+to the never-hooked real-mode int 6Fh vector. The `7700h`/`7780h` tables
+(including `86h` SEGMENT_SELECTOR) are reachable **only from v-86**.
+`einfun93` (`13h`) aliases an existing *selector*, so it is no substitute.
 
-**C2a — driver side (do this first).** `InitProtect` needs `scbsel` only
-as a value. Compute it in v-86 *before* `goprot`, where `7786h` works,
-store it, and delete the `SegToSel` call from `InitProtect`. Needs a small
+**C2a — driver side (first).** `InitProtect` needs `scbsel` only as a
+value. Compute it in v-86 *before* `goprot`, where `7786h` works, store
+it, and delete the `SegToSel` call from `InitProtect`. Needs a small
 16-bit helper in INIT16 and `db 67h` for stores into CODE32 variables. No
 monitor change.
 
 **C2b — monitor side (later).** Dispatch `77xxh` from `einative` when
 `iveccode=6Fh`. The exit path differs: v-86 handlers end at `cgrm7`, which
 reloads `sp` to `s0ip` and returns flags via `s0flags`, while a native
-caller's frame is at `p0stack`. A native dispatch needs its own return and
-carry handling (`einback`). Required eventually — a client calling
-`SegToSel` at run time is in native mode — but not for init.
+caller's frame is at `p0stack`. Needs its own return and carry handling
+(`einback`). Required eventually — a client calling `SegToSel` at run time
+is in native mode — but not for init.
 
 ## 4. C3 — finish `InitProtect`
 
-**Read:** it is incomplete beyond `SegToSel`; its `rep movsd` runs with
-**ESI, EDI and ES never set** by anyone.
+**Read:** incomplete beyond `SegToSel`; its `rep movsd` runs with **ESI,
+EDI and ES never set** by anyone.
 
 - **ES:** `AH=11h` (`einfun91`) allocates extended memory for a native
   task and returns a **permanent** (`0FEh`) selector — the intended
   source. It allocates, so the driver's earlier v-86 `AllocateExtend`
-  becomes redundant; decide which one goes before writing code.
+  becomes redundant; decide which goes before writing code.
 - **ESI:** `offset ddt:BeginProtect` (a `lea` in 32-bit code is fine).
 - **EDI:** zero.
 - **ECX:** already computed by `Init32Code`.
@@ -88,11 +86,11 @@ the application has no int D4h handler of its own (it compares the int D4h
 vector's segment against int 6h's). Whether that holds for a client under
 MOS is **not measured**.
 
-If `$386.SYS` declines, the call is reflected to the kernel's `mosint38`,
-whose `vct38` has `dw 0` for `10h`-`15h`: it returns `AX=1` with carry
-set, "invalid function code". `GoProtect` never tests carry and returns as
-if it had switched. Fixing that — honest carry-set failure per DPMI 0.9 —
-is worth doing regardless.
+If `$386.SYS` declines, the call reflects to the kernel's `mosint38`,
+whose `vct38` has `dw 0` for `10h`-`15h`: `AX=1`, carry set, "invalid
+function code". `GoProtect` never tests carry and returns as if it had
+switched. Fixing that — honest carry-set failure per DPMI 0.9 — is worth
+doing regardless.
 
 ## 6. Order of work
 
