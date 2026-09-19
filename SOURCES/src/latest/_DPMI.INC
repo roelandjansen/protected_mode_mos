@@ -97,7 +97,17 @@ xyz:
 ; following macro is use to transfer to protected mode from vitrual mode
 ;
 
-goprot		macro	
+goprot		macro
+		;
+		; v-86 -> native mode (32-bit, privilege level 3).
+		; $386.SYS's entintd4 routes ah=10h from a v-86 task to
+		; nmswitch, which rebuilds ds/es/ss/fs/gs/cs as g=1,d=1
+		; descriptors over the task's own segments and irets to
+		; pl 3. Clobbers ax and flags; both are dead across the
+		; two call sites in Init32Code.
+		;
+		mov	ax,1001h
+		int	0d4h
 		endm
 
 ;
@@ -105,6 +115,16 @@ goprot		macro
 ;
 
 goreal		macro
+		;
+		; native mode -> v-86.  The same function number: in
+		; native mode entintd4 falls through to einative, which
+		; dispatches ah=10h via eixtable to einfun90 ("switch
+		; from native mode to v-86 mode").
+		;
+		db	66h		; d=1 here: without the override this takes a
+					;  32-bit immediate and eats the int opcode
+		mov	ax,1001h
+		int	0d4h
 		endm
 
 

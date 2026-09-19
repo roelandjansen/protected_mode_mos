@@ -1392,3 +1392,92 @@ in any of the four files. The open-question framing of "three inert
 changes that broke this code" collapses to one: UPDATE 9's nesting
 counter, which was a genuine source change measured 2 of 2 boots and is
 unaffected by any of this.
+
+
+## `$DPMI.SYS` installs. The wall was an assembler limitation, and I spent most of the session treating its symptoms
+
+The driver initializes: `Dos Protected Mode Insterface Installed.`, boot
+through to the prompt, no-DPMI boot unaffected, kernel binary untouched.
+
+### What the entry actually needed
+
+`$386.SYS` already implements the mode switch (`entintd4` -> `nmswitch`
+out, `einative` -> `einfun90` back, `ah=11h` to allocate extended memory
+with a permanent selector). `goprot`/`goreal` are two instructions each.
+Three things then had to be true that were not:
+
+1. the SCB segment-to-selector call had to happen in v-86, because
+   `einative` never routes vector 6Fh to the `77xx` tables;
+2. the size computation had to move into the USE32 segment, because it
+   sat in INIT16 but executed after `goprot` under `d=1`, inverting every
+   operand size — ECX came out 0, the native ESP was garbage;
+3. `InitProtect` had to be finished: its `rep movsd` ran with ESI, EDI and
+   ES never set by anyone.
+
+### The defect that was actually stopping everything
+
+MASM cannot encode a call from a `use32` segment to a `use16` label: it
+emits a `66h` operand-size override together with a `rel32` field, the cpu
+consumes `rel16`, and the trailing two bytes execute. That was the `#UD`
+in the `7786h` handler, and `7786h` had therefore never worked from either
+mode.
+
+Dropping the prefix fixes the decode and breaks the contract instead:
+`addrnca` and `makegdte` both end with a `66h`-prefixed `ret` and pop two
+bytes, so each 4-byte push leaks two. Four bytes across two calls, and
+`cgrm7`'s pops then return every caller register holding its neighbour's
+value — BP among them. BP is what `mosddint` keeps its locals in, so the
+kernel's `les bx,[bp-28]` read `SS:FFE4`, got `0000:0000`, dispatched a
+device header in the null segment, and looped on `#GP` at `0000:0008`.
+
+One chain, from an assembler encoding to a kernel crash three layers away.
+
+### How badly I went about it
+
+Before finding that, I made four changes that fixed nothing: amending the
+`nxtdrvr` zero-segment substitution (the amended code never ran), pre-
+initialising `nxtdrvr` to `-1` (the walk was not reading `nxtdrvr` at
+all), preserving BP across `goprot` (BP was lost earlier, in the handler),
+and the int 2Fh vector (real, but not the hang). Each was plausible from
+the symptom and none was measured first.
+
+Then I made it worse. I instrumented the handler to record its frame, read
+zeros, and reported "bp=0" as a finding — but that instrumentation had
+never compiled in, and I had read back the initialisers of the three data
+words. Everything built on that reading, including the theory that these
+handlers pass registers through `ntrash*`, was wrong. Two later insertion
+attempts landed at the wrong line, because `awk` with `RS="\r\n"` counts
+records differently from the line numbers I had derived from a CR-stripped
+copy, and one of them broke the boot outright. I also ran a build without
+`TREE` set, which rebuilt `$386.SYS` in the real tree; it came out
+byte-identical to the verified build, so nothing was lost, but only by
+luck.
+
+What finally worked was moving the measurement out of the guest entirely:
+a hook in the DOSBox build that logs `bp`, `esp` and the frame slots for
+every instruction executed in a given code range. It cannot shift guest
+layout, which the source instrumentation kept doing, and it answered the
+question in one run: `bp=0fd8`, `[bp-16]=0000d000`, and `esp` two bytes
+low on exit.
+
+The rule this earns: when a measurement and a theory disagree, verify the
+measurement exists before believing either. A value read back from memory
+that equals its initialiser is not evidence.
+
+### Rules and corrections
+
+- Check encodings **in the linked binary**, not the listing: the listing
+  shows pre-link values and looked correct while the bytes were wrong.
+- Operand size must match the callee's `ret`, and an indirect call with a
+  `66h` override does not give a 16-bit push — measured, it still pushed 4.
+  Use a `res16` wrapper per callee.
+- `makegdte` returns 2 bytes, not 4, contrary to what I wrote earlier.
+- `nxtdrvr` remains untouched and unvalidated; both edits are reverted and
+  the install re-verified against the tree's own kernel.
+- `0000000K` and `install not done` are not bugs: the first is original
+  TSL code that never fills the digits, the second a hardcoded `ECHO` in
+  the test `AUTOEXEC.BAT`.
+
+Status: driver installs. Client path (C4) untested and known incomplete —
+`GoProtect` never tests carry after the mode-switch call, so a client that
+fails to switch will believe it succeeded.

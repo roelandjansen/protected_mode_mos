@@ -1048,3 +1048,99 @@ Protected Code Initialization failed.
 No-DPMI boot: date/time, `$$SHELL.SYS version 5.04`, live prompt, `VER`
 answers. No diagnostics remain in `_386.ASM`, `_DPMI.ASM`,
 `MOSDDINT.ASM` or `MOSINIT2.ASM`.
+
+---
+
+# UPDATE 14 — `$DPMI.SYS` installs; the use32/use16 call defect
+
+First time the driver initializes. `Dos Protected Mode Insterface
+Installed.`, boot continues through SMP allocation to `[A:\]`, no-DPMI
+boot unaffected. Kernel files unchanged.
+
+## Applied
+
+`_DPMI.INC`
+
+| change | why |
+| --- | --- |
+| `goprot` = `mov ax,1001h` / `int 0d4h` | `$386.SYS`'s `entintd4` routes `ah=10h` from a v-86 task to `nmswitch`: 32-bit, ring 3, segments aliased as `g=1,d=1` descriptors |
+| `goreal` = same call, with `db 66h` | dispatched by mode to `einfun90`. Runs under `d=1`, where `B8 01 10` takes a 32-bit immediate and swallows the following `CD D4` — measured as `eax=d4cd1001` |
+
+`_DPMI.ASM`
+
+| change | why |
+| --- | --- |
+| SCB segment -> selector moved into v-86, before `goprot` | `einative` dispatches only vectors `38h`/`D4h`/`21h`, so int 6Fh from native mode never reaches the `77xx` tables |
+| size computation moved into `InitProtect` (INIT32) | it was in INIT16 but executed after `goprot` with `d=1`, so every operand size was inverted: ECX came out 0 and the native ESP was garbage |
+| `InitProtect` completed | ES from the monitor's `ah=11h` service (allocate extended memory, returns a permanent `0FEh` selector), ESI = `offset ddt:BeginProtect`, EDI = 0. The original `rep movsd` ran with ESI, EDI and ES never set by anyone |
+| `mov dx,offset ddt:Dpmi2f` in `SetVectors` | segment-relative `offset` installed the int 2Fh vector `0E30h` low |
+
+`_386.ASM`
+
+| change | why |
+| --- | --- |
+| `nca32`, `mgd32` wrappers in `res16`; `nca_ptr`, `mgd_ptr` dword pointers; `e6f86` calls through them | see below |
+
+## The defect class: use32 -> use16 calls
+
+MASM cannot encode a call from a `use32` segment to a label in a `use16`
+one. It emits a `66h` operand-size override **together with a `rel32`
+displacement**. The cpu takes `rel16` and executes the trailing two bytes.
+In `e6f86` that was `66 e8 63 f9 ff ff`, and the stray `ff ff` was the
+`#UD` at `0018:3AB2` that killed every `7786h` call.
+
+Removing the `66h` prefix fixes the decode but breaks the contract:
+**both `addrnca` and `makegdte` end with a `66h`-prefixed `ret` and pop 2
+bytes.** A 4-byte push against a 2-byte pop leaks 2 bytes per call. Two
+calls, 4 bytes, and `cgrm7`'s `pop ebx/ecx/es/ds/ebp` then read straddled
+values — which is exactly the "caller's registers come back shifted by a
+word" symptom, BP included.
+
+Measured, same call, before and after:
+
+```
+in:   eax=7786 ebx=d000 ecx=0001 edx=3005  bp=0e67  esp=0fc8
+bad:  ax=3005  bx=7786  cx=005b  dx=0240   bp=0000  esp=0fc6
+good: eax=7786 ...                          bp=0e67  esp=0fc8, [bp-16]=005b
+```
+
+The fix is a wrapper in `res16` per callee, reached by a normal 32-bit
+indirect call through a dword pointer, doing the 16-bit call itself. An
+indirect call with a `66h` override does **not** work: measured, it still
+pushed 4.
+
+This class has now produced five bugs across `_386.ASM`, `_DPMI.ASM` and
+`_DPMI.INC`. Treat any transfer between `res16` and `res32`, and anything
+executing after `goprot`, as suspect until its encoding is checked **in
+the linked binary** — the listing shows pre-link values and can look right
+when the bytes are wrong.
+
+## Retractions
+
+- **`e6f86`'s BP frame is fine.** An earlier note here claimed `bp=0` in
+  the handler, from instrumentation that never compiled in; the reported
+  values were the initialisers. Measured from the emulator side:
+  `bp=0fd8`, `[bp-16]=0000d000` (caller's BX), `[bp-12]=00000001`.
+  Anything inferred from the `bp=0` reading, including the idea that these
+  handlers exchange registers through `ntrash*`, is withdrawn.
+- **`makegdte` does not return 32-bit.** It ends `db 66h` / `ret`, same as
+  `addrnca`.
+- **`nxtdrvr` is untouched and still unvalidated.** The null-segment
+  dispatch (`les bx,[bp-28]` reading `0000:0000`, `#GP` loop at
+  `0000:0008`) was BP corruption upstream, not a chain-walk bug. Two
+  `MOSDDINT.ASM` edits made while chasing it are reverted, and the install
+  was re-verified against the tree's own kernel binary.
+- The int 2Fh vector fix is real but was not the hang either.
+
+## Not bugs
+
+- `0000000K of Extended Memory Available.` — original TSL behaviour.
+  `MsgMem` is defined and printed; nothing ever writes the digits.
+- `install not done` — a hardcoded `ECHO` in the test `AUTOEXEC.BAT`.
+
+## Next
+
+C4, the client path. `GoProtect` is reachable through int 2Fh `1687h` but
+never tests carry after `int 0D4h ah=10h`, so a client whose switch fails
+believes it succeeded. Testing needs a DPMI client binary running under
+MOS — the first item here that cannot be checked by watching a boot.

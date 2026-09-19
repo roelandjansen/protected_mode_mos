@@ -7600,6 +7600,31 @@ addrnca  proc  near
 	ret				; 16-bit near return
 addrnca  endp
 
+;
+; MASM cannot encode a direct call from a use32 segment to a label
+; in a use16 one: it emits a 66h operand-size override together
+; with a rel32 displacement, and the cpu then takes rel16 and
+; executes the trailing two bytes. Call through these pointers
+; instead. Operand size must match the callee's ret: addrnca ends
+; with a 66h-prefixed ret (pops 2), makegdte with a plain one.
+;
+nca32	proc	near			; wrapper: 32-bit call in, 16-bit call out
+	db	66h			; 16-bit call: addrnca pops 2 bytes
+	call	addrnca
+	ret				; plain ret: 32-bit here, matches the caller
+nca32	endp
+
+mgd32	proc	near			; same wrapper for makegdte: it also ends
+	db	66h			;  with a 66h-prefixed ret (pops 2)
+	call	makegdte
+	ret
+mgd32	endp
+
+nca_ptr	dd	offset nca32		; 32-bit indirect target
+mgd_ptr	dd	offset mgd32		; 32-bit indirect target
+					;  plain dd label emits a segment fixup and
+					;  exe2bin then demands a base segment)
+
 
 	page
 ;--------------------------------------------------------------------
@@ -8482,15 +8507,13 @@ e6f86:
 	db	67h
 	mov	ax,[bp-16]		; caller's bx = segment to translate
 	push	eax
-	db	66h
-	call	addrnca 		; esi -> tcb (clobbers ebx, si)
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
 	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
 	;	  01...110		; disp=byte,base=esi
 	db	tcbid
 	pop	eax			; ax = segment again
 	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001,a=0
-	db	66h
-	call	makegdte		; ax = selector, 0 = table full
+	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector, 0 = table full
 	or	ax,ax
 	jz	e6f86f
 	db	66h

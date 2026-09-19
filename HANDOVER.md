@@ -10,48 +10,40 @@ paging active.** Verified by typing at the prompt and getting real
 answers back, not by screen inspection. The tree started this session
 hanging with no prompt at all.
 
-`$DPMI.SYS` still does not install, but the `6FEB` return-address
-corruption is **solved and fixed**: an assembler encoding defect in
-original TSL code, not a monitor bug. The driver now fails cleanly with
-its own error message and the boot continues. See UPDATE 10.
+`$DPMI.SYS` **installs** (UPDATE 14). The `6FEB` return-address
+corruption and the `7786h` handler crash are both solved: assembler
+encoding defects in original TSL code, not monitor logic. All
+diagnostics are stripped from every source.
 
-## Current state (2026-09-18, after UPDATE 13)
+## Current state (2026-09-19, after UPDATE 14)
 
-Tree = baseline plus all `_DPMI.ASM` work (three encoding fixes, sign-on
-print restored), the kernel strip, and the `_386.ASM` strip. **No
-diagnostics remain in any source.** Measured:
+`$DPMI.SYS` **installs**. Tree = the UPDATE 13 baseline plus changes to
+three files only — `_386.ASM`, `_DPMI.ASM`, `_DPMI.INC`. Kernel files
+unchanged. Measured:
 
-- `DEVICE=$DPMI.SYS`: completely clean screen, `$386.SYS` and the DPMI
-  driver announce themselves, driver reports
-  `Dos Protected Mode Insterface Not Installed.` /
-  `Protected Code Initialization failed.`, prompt reached
-- no DPMI: date/time prompts, `$$SHELL.SYS version 5.04`, live prompt,
-  `VER` answers
+- `DEVICE=$DPMI.SYS`: sign-on banner, `Dos Protected Mode Insterface
+  Installed.`, `0000000K of Extended Memory Available.`, SMP line,
+  `[A:\]` prompt
+- no DPMI: date/time prompts, `$$SHELL.SYS version 5.04`, `VER` answers
 
-**The tree's `$$MOS.SYS` was stale** (129457 shipped vs 130225 rebuilt
-from its own sources); it now holds a kernel built from the tree's
-sources, boot-verified unmodified before the strip.
+Not bugs: `0000000K` is original TSL code that never fills the digits;
+`install not done` is a hardcoded `ECHO` in the test `AUTOEXEC.BAT`.
 
-**UPDATE 11's "load-bearing `R` marker" is retracted** — it was a bug in
-my stripper (matched the inner `pop ax` of the `lahf`/`sahf` pair, leaving
-stray pops). When stripping marker blocks, check that the file's global
-`push`/`pop` balance is unchanged; for this tree it is `-8`.
+**The dominant defect class in this codebase** is code assembled for one
+operand size executing under the other — five bugs so far. MASM cannot
+encode a `use32` -> `use16` call at all (it emits a `66h` override with a
+`rel32` field), and `addrnca`/`makegdte` both return 2 bytes, so the call
+needs a `res16` wrapper reached through a dword pointer. Check any such
+transfer, and anything executing after `goprot`, **in the linked binary**
+— the listing shows pre-link values and can look right when the bytes are
+wrong.
 
-The gateway (`i6fstub`/`doi6fgate`/`dooutali9`) IS load-bearing and stays:
-`i6fstub` is the hooked IVT[6Fh] entry and its `out 0e0h` is the only
-route from a v-86 int 6Fh into the dispatcher.
+`nxtdrvr` is still unvalidated; the null-segment dispatch blamed on it was
+BP corruption from the above.
 
-Next work is the protected-mode entry. **Read
-`pcmos386-protected-mode-entry-design.md` first** — it supersedes the
-options in `pcmos386-dpmi-native-entry-design.md`. Short version: the
-monitor already implements a 32-bit ring-3 native mode
-(`int 0D4h AH=10h` -> `nmswitch`, back via `einfun90`), `goprot`/`goreal`
-are those two calls, and the measured next gap is that int 6Fh from native
-mode is never dispatched to the `77xx` tables.
-
-`goprot`/`goreal` are implemented and measured but **deliberately not in
-the tree** (`goprot-goreal.diff`): alone they turn the clean failure into
-a hang. Apply them with the driver-side `scbsel` change (C2a).
+Next: C4, the client path. `GoProtect` never tests carry after
+`int 0D4h ah=10h`, so a client whose switch fails believes it succeeded.
+Needs a DPMI client binary under MOS.
 
 ## Baseline (set 2026-09-17, supersedes the UPDATE 8 tree)
 
@@ -83,7 +75,7 @@ Verified at each step, not assumed:
 
 1. `pcmos386-protected-mode-fix-plan.md` — rewritten; the old version
    planned a hunt for a crash that turned out not to exist
-2. `addendum-session-entry.md` — 13 sections, chronological; append to
+2. `addendum-session-entry.md` — 14 sections, chronological; append to
    `pcmos386-protected-mode-addendum.md`
 3. `CHANGES.md` — every code change, split into REAL FIXES vs
    DIAGNOSTICS TO STRIP

@@ -543,6 +543,7 @@ AllocateLdt	endp
 
 FreeLdt		proc	near
 		push	ebx
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		mov	cx,bx			; place descriptor in BX
 		mov	ax,MEM_DESCRIPTOR
@@ -1901,6 +1902,7 @@ DoFreeInfo:
 ;
 ; task has write access to copy 30h bytes to ES:DI
 ;
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		push	esi
 		push	edi
@@ -2138,6 +2140,7 @@ FreeBlock	endp
 
 ResizeBlock	proc	near
 		push	ebx
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		call	FreeBlock		; call freeblock
 		pop	ecx
@@ -2703,6 +2706,7 @@ GetPCMOSApi	proc	near
 ;
 ; Compare string in ds:(E)SI to "PC-MOS DPMI 1.0"
 ;
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		push	esi
 		push	edi
@@ -3438,6 +3442,7 @@ SelToSeg	endp
 ReadDebugRegs	proc	near
 		push	eax
 		push	ebx
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		push	es
 
@@ -3557,6 +3562,7 @@ ReadDebugRegs	endp
 WriteDebugRegs	proc	near
 		push	eax
 		push	ebx
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		push	es
 		mov	es,[DataSel]
@@ -3752,6 +3758,7 @@ ScanBanks	endp
 		assume  es:dseg
 
 NextBank	proc	near
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
 		push	ecx
 		push	edx
 		push	edi
@@ -4174,24 +4181,6 @@ cpuver:
 ;
 ;	now we will test for 486
 ;
-		.386
-		mov	edx,esp
-		and	esp,not 3
-		pushfd
-		pop     eax
-		mov	ecx,eax
-		xor	eax,40000h
-		push	eax
-		popfd
-		pushfd	
-		pop	eax
-		xor	eax,40000h	; Intel Manual is incorrect
-		shr	eax,18
-		and	eax,1
-		push	ecx
-		popfd
-		mov	esp,edx
-		.286
 		or	al,al
 		jnz	not386
 		inc	bl
@@ -4375,14 +4364,32 @@ Init32Code 	proc	near
 		mov	word ptr [RUnreg],ax
 		mov	ax,cs
 		mov	word ptr [RUnreg+2],ax
+		;
+		; SCB selector, in v-86 where int 6fh 7786h is dispatched.
+		; Was in InitProtect, which runs native, where the call is
+		; reflected to the real-mode int 6Fh vector instead.
+		;
+		mov	ax,[scbseg]
+		mov	bx,ax
+		mov	ax,SEGMENT_SELECTOR
+		int	6fh
+		jc	Init32Err		; no selector, no protected mode
+		mov	[scbsel],bx
+		mov	ax,[scboff]
+		mov	word ptr [scboffset],ax
+		mov	word ptr [scboffset+2],0
+		;
+		; mosddint keeps its locals in a bp frame and relies on bp
+		; surviving the driver call. nmswitch/einfun90 do not
+		; preserve it: measured bp=0000 on return, after which the
+		; kernel's les bx,[bp-28] read ss:ffe4 instead of nxtdrvr
+		; and it dispatched a header at 0000:0000.
+		;
+		push	bp
 		goprot				; go to protected mode
-		.386
-		lea	ecx,ddt:EndProtect+3
-		lea	eax,ddt:BeginProtect
-		sub	ecx,eax
-		.286
 		call32	InitProtect
 		goreal				; go back to vm386
+		pop	bp
 		cmp	[Bit32Ok],'Y'
 		jne	Init32Err
 		clc
@@ -4427,7 +4434,7 @@ SetVectors	proc	near
 		mov	word ptr [Old2f+2],es
 		
 		mov	ax,252fh
-		mov	dx,offset Dpmi2f
+		mov	dx,offset ddt:Dpmi2f	; group-relative: ds=cs here
 		int	21h
 
 
@@ -4452,17 +4459,30 @@ init32	segment para public 'CODE' use32
 ;-------------------------------------------------------------------;
 
 InitProtect 	proc	near
-		mov	ax,[scbseg]		; segment for SCB
-		call	SegtoSel
-		mov	[scbsel],ax		; place segment back
-		xor	eax,eax
-		mov	ax,[scboff]
-		mov	[scboffset],eax		
+		;
+		; C3: the original body was three instructions with ESI, EDI
+		; and ES never set by anyone -- rep movsd ran on garbage.
+		; ES comes from the monitor's own native-mode service
+		; ah=11h (einfun91): allocate extended memory and return a
+		; PERMANENT (0FEh) selector for it in ES.  ebx = byte count.
+		;
+		mov	ecx,EndProtect-BeginProtect	; size of the use32 resident code
+		push	ecx
+		mov	ebx,ecx			; size to allocate, in bytes
+		mov	ah,11h
+		int	0d4h
+		pop	ecx
+		jc	InitProtFail
+		lea	esi,ddt:BeginProtect	; source: the use32 resident code
+		xor	edi,edi			; destination: start of that memory
 		shr	ecx,2
 		cld
 		rep	movsd
 		mov	[Bit32Ok],'Y'
 		clc
+		ret
+InitProtFail:
+		stc
 		ret
 InitProtect	endp
 
@@ -4471,3 +4491,4 @@ init32	ends
 		end
 
 
+
