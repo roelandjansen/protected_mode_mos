@@ -132,7 +132,7 @@ ALL:    ADDDEV.COM  ADDTASK.COM  DIRMAP.COM  ALIAS.COM  CLASS.COM  DEBUG.COM \
         _MOUSE.SYS  _NETBIOS.SYS  _PIPE.SYS  _RAMDISK.SYS  _SERIAL.SYS \
         INIT.COM   __SHELL.SYS _ARNET.SYS FILTER.COM  PATCHID.COM \
         MINBRDPC.SYS  MISPEED.COM COMPFILE.EXE HELPGEN.EXE \
-	VIDPATCH.COM ED.EXE
+	VIDPATCH.COM ED.EXE DPMITST.COM
 
 ############ General purpose publics #############
 
@@ -151,6 +151,15 @@ VERSCHK.INC : VERSION.INC
 
 MOXUTIL.OBJ : MOXUTIL.ASM MOXUTL.INC
 
+
+############ DPMI host test client #############
+
+DPMITST.COM:    DPMITST.ASM
+        masm dpmitst;
+        link dpmitst;
+        exe2bin dpmitst DPMITST.COM
+        del dpmitst.obj
+        del dpmitst.exe
 
 ADDDEV.COM:     ADDDEV.ASM PAGE.INC OPTIONS.INC MACROS.INC VERSION.INC
 

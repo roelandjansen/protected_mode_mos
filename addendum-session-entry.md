@@ -1481,3 +1481,51 @@ that equals its initialiser is not evidence.
 Status: driver installs. Client path (C4) untested and known incomplete —
 `GoProtect` never tests carry after the mode-switch call, so a client that
 fails to switch will believe it succeeded.
+
+
+## C4: a client does reach protected mode, and finds no code selector waiting for it
+
+`DPMITST.COM` is the first test here that needed a binary rather than a
+boot observation: a minimal DPMI 0.9 client that queries the host, calls
+the mode-switch entry, and prints which side of the switch it ended on.
+It is built by `MAKEUTIL.MAK` like any other utility.
+
+It found three things in `GoProtect`, none of which had ever been
+reachable:
+
+- the entry point advertised through int 2Fh `1687h` used a plain
+  `offset`, so clients were handed an address low by the group base;
+- the post-switch tail wrote to `cs:[OrgCS]`, which is fine in real mode
+  and impossible in protected mode -- `#PF` at offset `00E4`, task torn
+  down, which is why the client printed nothing after "calling the
+  mode-switch entry";
+- it then read the client's new selector from `gs`, where the pre-switch
+  code had carefully loaded `fs`.
+
+Fixing the first two exposed the real problem. The switch itself is
+sound: the client comes back `vm=0`, `cpl=3`, in a 32-bit ring-3 context.
+But the GDT, read live, has exactly one executable descriptor in play --
+`006B`, base `C0DE0`, the *driver's* code -- while the client's own
+segment has only the data alias `005B`. `nmswitch` builds its code
+descriptor from whatever was running at switch time, and the client got
+there by far-calling into the host, so the host's code is what it built.
+`makegdte` behind `7786h` only ever produces data descriptors.
+
+Returning to either selector aborts the cpu. There is no third option:
+the host cannot currently give a client something to execute in.
+
+So this is an architecture gap, not a bug, and it lands in the same place
+the design note already flagged -- descriptor kind and lifetime, with
+`cleardti` freeing task-owned descriptors on every switch.
+
+The interim is a refusal: `GoProtect` returns carry set, per DPMI 0.9,
+and the client stays in real mode and survives. That is the honest
+behaviour while the host cannot hold up its end, and it is better than
+the alternative this project has hit before -- a caller told it succeeded
+when it did not.
+
+Method note: the three `GoProtect` defects were found by measurement
+rather than reading, and the GDT reading in particular settled in one
+step a question that could have absorbed a session of speculation about
+selector arithmetic. Reading descriptors out of live memory is cheap and
+should be the first move whenever a selector is suspect.

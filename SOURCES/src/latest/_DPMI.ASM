@@ -137,7 +137,9 @@ Not1686:
                 mov     si,5
                 push    cs
                 pop     es
-                mov     di,offset GoProtect
+                mov     di,offset ddt:GoProtect	; group-relative: plain
+						;  offset is segment-relative and
+						;  hands the client a bad entry
 		iret
 
 callold2f:
@@ -146,6 +148,23 @@ dpmi2f		endp
 
 
 GoProtect       proc    far
+;
+; INTERIM: refuse the switch, per DPMI 0.9 (carry set, client stays in
+; real mode). Measured 2026-09-19: the switch itself works -- the task
+; comes back vm=0, cpl=3 -- but the client has no executable selector
+; to return to. nmswitch builds its code descriptor from whatever was
+; running at switch time, i.e. THIS driver (006b, base c0de0, access
+; fa = code), while the client's own segment gets a data alias only
+; (005b, access f2), and makegdte/7786h produce data descriptors.
+; Returning to either aborts. Refusing loudly beats handing a client a
+; context it cannot execute in.
+;
+                stc
+                ret
+;
+; --- everything below is reached once the host can supply a code
+; --- selector for the client; see the design note.
+;
                 pop     cs:[OrgIP]
                 pop     cs:[OrgCS]
                 push    ax
@@ -170,6 +189,29 @@ GoProtect       proc    far
                 
                 mov     ax,1001h
                 int     0d4h                	;protect mode
+
+                jnc     gp_switched
+;
+; The switch failed -- $386.SYS declined it (entintd4 only takes
+; ah=10h when the application has no int D4h handler of its own)
+; and the kernel returned ax=1, carry set, invalid function code.
+; DPMI 0.9: return to the client with carry set, still in real
+; mode. Previously this fell through and the client was told it
+; had switched.
+;
+                .386
+                pop     fs
+                .286
+                pop     dx
+                pop     cx
+                pop     bx
+                pop     ax
+                push    cs:[OrgCS]
+                push    cs:[OrgIP]
+                stc
+                ret
+
+gp_switched:
              
                 .386
                 mov     ax,gs
