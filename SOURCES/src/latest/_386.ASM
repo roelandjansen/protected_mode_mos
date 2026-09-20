@@ -8000,6 +8000,13 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6funimp	; 85h MEM_DESCRIPTOR
 	dd	offset mmgrp:e6f86	; 86h SEGMENT_SELECTOR
 	dd	offset mmgrp:e6f87	; 87h SELECTOR_SEGMENT
+	dd	offset mmgrp:e6funimp	; 88h GET_PROT_EXCEPTION
+	dd	offset mmgrp:e6funimp	; 89h SET_PROT_EXCEPTION
+	dd	offset mmgrp:e6funimp	; 8ah GET_REAL_EXCEPTION
+	dd	offset mmgrp:e6funimp	; 8bh SET_REAL_EXCEPTION
+	dd	offset mmgrp:e6funimp	; 8ch CREATE_ALIAS
+	dd	offset mmgrp:e6funimp	; 8dh ALLOC_SPEC_SELECTOR
+	dd	offset mmgrp:e6f8e	; 8eh CODE_SELECTOR
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -8498,6 +8505,70 @@ e6f0f:
 ; survive that.  Not addressed here -- flagged in the addendum.
 ;
 assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
+;==== dpmi func 88 - code selector for a real-mode segment
+;
+; As 86h, but the descriptor is executable+readable rather than
+; data. A DPMI client must resume at a code selector for its own
+; code; nmswitch only ever builds one for whatever was running at
+; switch time, which is the host, and 86h builds data descriptors.
+;
+; makegdte compares the access byte as well as the base, so this
+; does not collide with the data alias of the same segment.
+;
+; in:	caller's bx = real-mode segment (saved at [bp-16])
+; out:	caller's bx = selector, cf clear; cf set if the table is full
+;
+e6f8e:
+	push	eax
+	push	edx
+	push	esi
+	push	edi
+	db	66h
+	db	67h
+	mov	ax,[bp-16]		; caller's bx = segment to translate
+	push	eax
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
+	db	tcbid
+	pop	eax			; ax = segment again
+	mov	dl,11111010b		; p=1,dpl=3,s=1,type=101 code r/x
+	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector, 0 = table full
+	or	ax,ax
+	jz	e6f8ef
+	;
+	; makegdte hardcodes 00c0h (g=1,d=1). The caller says which it
+	; wants in cl (0 = 16-bit, as DPMI passes the client's bitness in
+	; ax at the mode-switch entry); for 16-bit, clear g and d and
+	; keep the byte limit makegdte set.
+	;
+	db	66h
+	db	67h
+	mov	cx,[bp-12]		; caller's cx
+	or	cl,cl
+	jnz	e6f8e32			; nonzero: leave it 32-bit
+	;
+	push	di
+	mov	di,ax
+	and	di,0fff8h
+	db	67h
+	and	byte ptr ss:[di+gdt+6],0fh   ; g=0,d=0, keep limit 19:16
+	pop	di
+e6f8e32:
+	db	66h
+	db	67h
+	mov	[bp-16],ax		; hand the selector back in caller's bx
+	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
+	jmp	short e6f8ex
+e6f8ef:
+	or	byte ptr ss:[s0flags],1      ; cf set = failure
+e6f8ex:
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	eax
+	jmp	cgrm7
+
+
 e6f86:
 	push	eax
 	push	edx

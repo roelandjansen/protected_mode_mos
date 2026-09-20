@@ -35,6 +35,7 @@ GET_REAL_EXCEPTION	equ	778ah
 SET_REAL_EXCEPTION	equ	778bh
 CREATE_ALIAS		equ	778ch
 ALLOC_SPEC_SELECTOR	equ	778dh
+CODE_SELECTOR		equ	778eh	; code alias for a real-mode segment
 ;
 ; below are equates use to access memory manger functions
 ;

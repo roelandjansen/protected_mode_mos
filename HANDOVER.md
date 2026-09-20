@@ -10,55 +10,47 @@ paging active.** Verified by typing at the prompt and getting real
 answers back, not by screen inspection. The tree started this session
 hanging with no prompt at all.
 
-`$DPMI.SYS` **installs** and clients reach protected mode (UPDATE 15).
-The `6FEB` return-address corruption and the `7786h` handler crash are
-both solved: assembler encoding defects in original TSL code, not
-monitor logic. All diagnostics are stripped from every source.
+`$DPMI.SYS` **installs** and a client **runs in protected mode on its own
+code selector** (UPDATE 16). The `6FEB` return-address corruption and
+the `7786h` handler crash are both solved: assembler encoding defects in
+original TSL code, not monitor logic. All diagnostics are stripped from
+every source.
 
-## Current state (2026-09-19, after UPDATE 15)
 
-`$DPMI.SYS` **installs**, and a DPMI client **reaches protected mode**.
-Tree = the UPDATE 13 baseline plus `_386.ASM`, `_DPMI.ASM`, `_DPMI.INC`,
-`MAKEUTIL.MAK` and the new `DPMITST.ASM`. Kernel unchanged. Measured:
+## Current state (2026-09-20, after UPDATE 16)
 
-- `DEVICE=$DPMI.SYS`: sign-on banner, `Dos Protected Mode Insterface
-  Installed.`, `0000000K of Extended Memory Available.`, SMP line,
-  `[A:\]` prompt
+`$DPMI.SYS` installs, and **a DPMI client runs in protected mode on its
+own code selector** (`cs=008B`, `cpl=3`, `vm=0`, measured). Tree = the
+UPDATE 13 baseline plus `_386.ASM`, `_DPMI.ASM`, `_DPMI.INC`,
+`MAKEUTIL.MAK` and `DPMITST.ASM`. Kernel unchanged.
+
+- `DEVICE=$DPMI.SYS`: banner, `Dos Protected Mode Insterface Installed.`,
+  `0000000K of Extended Memory Available.`, SMP line, `[A:\]`
 - no DPMI: date/time prompts, `$$SHELL.SYS version 5.04`, `VER` answers
 - `DPMITST.COM`: host reports `ax=0000`, entry `C0DE:00A6`, flags `0001`,
-  version `1.00`, 5 paragraphs; the mode-switch entry returns carry set
-  and the client survives
+  version `1.00`, 5 paragraphs; switches; resumes in protected mode
 
-**C4 is blocked on architecture, not a bug.** The switch works — the
-client really does come back `vm=0`, `cpl=3` — but there is no executable
-descriptor for its own code. `nmswitch` builds its code descriptor from
-whatever ran at switch time (the host), and `makegdte`/`7786h` build data
-descriptors only. Live GDT: `006B` code base `C0DE0` (the driver),
-`005B` data base `0008AA0` (the client). Returning to either aborts.
-`GoProtect` therefore refuses with carry set, per DPMI 0.9; the code
-below the refusal is intact for when a code selector can be supplied.
-See UPDATE 15 and section 7 of the design note.
+**Next milestone: DOS service reflection.** A protected-mode client's
+`int 21h` prints garbage because `dx` is an offset into a selector and
+the call runs as a real-mode DOS call. The host must catch client DOS and
+BIOS calls, translate pointer arguments, execute them in v-86 and return
+results. That is the bulk of what a DPMI host does, and nothing
+implements it.
+
+New in the monitor: int 6Fh `778Eh` CODE_SELECTOR, an executable sibling
+of `7786h`, with bitness from the caller's `cl` (0 = 16-bit, which clears
+G and D). `88h`-`8Dh` are TSL-named, so it sits at `8Eh`.
 
 Not bugs: `0000000K` is original TSL code that never fills the digits;
 `install not done` is a hardcoded `ECHO` in the test `AUTOEXEC.BAT`.
 
-**The dominant defect class in this codebase** is code assembled for one
-operand size executing under the other, plus plain `offset` where
-`offset ddt:` is needed — seven bugs so far. MASM cannot encode a
-`use32` -> `use16` call at all, and `addrnca`/`makegdte` both return 2
-bytes, so such calls need a `res16` wrapper reached through a dword
-pointer. Check any such transfer, and anything executing after `goprot`,
-**in the linked binary** — the listing shows pre-link values and can look
-right when the bytes are wrong.
+**The dominant defect class** is code assembled for one operand size
+executing under the other, plus plain `offset` where `offset ddt:` is
+needed. Anything running after `goprot` is in a 32-bit cs and needs
+explicit `66h` overrides; MASM cannot encode a `use32` -> `use16` call at
+all. Check such encodings **in the linked binary**, not the listing.
 
 `nxtdrvr` is still unvalidated.
-
-Next: decide how the host supplies a client code selector — a
-code-descriptor variant of `makegdte` behind a new `7780h` function, or
-`nmswitch` building CS from the caller's return frame — and settle
-descriptor lifetime at the same time (`cleardti` frees task-owned
-descriptors on every switch, so client selectors must be permanent).
-
 ## Baseline (set 2026-09-17, supersedes the UPDATE 8 tree)
 
 The working baseline is **UPDATE 8 source minus the trap-nesting
@@ -89,7 +81,7 @@ Verified at each step, not assumed:
 
 1. `pcmos386-protected-mode-fix-plan.md` — rewritten; the old version
    planned a hunt for a crash that turned out not to exist
-2. `addendum-session-entry.md` — 15 sections, chronological; append to
+2. `addendum-session-entry.md` — 16 sections, chronological; append to
    `pcmos386-protected-mode-addendum.md`
 3. `CHANGES.md` — every code change, split into REAL FIXES vs
    DIAGNOSTICS TO STRIP

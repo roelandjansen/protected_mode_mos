@@ -1529,3 +1529,48 @@ rather than reading, and the GDT reading in particular settled in one
 step a question that could have absorbed a session of speculation about
 selector arithmetic. Reading descriptors out of live memory is cheap and
 should be the first move whenever a selector is suspect.
+
+
+## A client reaches protected mode and runs its own code
+
+`DPMITST` switches and comes back executing at `cs=008B`, `cpl=3`,
+`vm=0` -- its own 16-bit code selector, built by a new int 6Fh function.
+The screen shows garbage where its success message should be, and that
+is the honest state of things: the client is in protected mode, and a
+protected-mode `int 21h` cannot work until the host reflects DOS calls
+down to v-86 with its pointer arguments translated. Nothing does that
+yet.
+
+Getting there needed four things, each found by measuring rather than
+reading:
+
+- a code selector for the client. `nmswitch` builds its code descriptor
+  from whatever was executing at switch time, which is the host, and
+  `7786h` builds data descriptors. New `778Eh` CODE_SELECTOR makes an
+  executable one; `makegdte` already compares the access byte, so it
+  does not collide with the data alias;
+- a 16-bit one. `makegdte` hardcodes `g=1,d=1`, so the first working
+  selector was 32-bit and the client's 16-bit code would have been
+  decoded wrongly. The bitness now comes from the client's own
+  declaration, which DPMI passes in `ax`;
+- a tail that survives its own segment. `GoProtect` wrote its return
+  address into `cs:[OrgCS]` -- impossible once in protected mode -- and
+  restored a real-mode segment value into `fs`. Both faulted;
+- correct operand sizes after the switch. The host's cs is 32-bit, so
+  every pop and the far return in a 16-bit-assembled tail needed an
+  explicit `66h`, having been pushed 2 bytes wide before the switch.
+
+The last bug was mine and worth recording for the pattern: `push fs` in
+16-bit mode pushes 2 bytes, and my tail discarded 4. The frame ended two
+bytes off and the far return loaded `cs=0000`. I had already spent two
+attempts theorising about descriptor validity when the answer was one
+stack dump away: `[esp]: 008b 0000 aa4d 0508`, ip and a null cs, visible
+at a glance. Dump the frame before theorising about the selector.
+
+The defect class of this codebase remains what it has been all along:
+code assembled for one operand size executing under another, and
+addresses that are segment-relative where they must be group-relative.
+Every bug in this section is one of those two.
+
+Next is DOS service reflection, which is the substance of a DPMI host
+rather than another encoding fix.

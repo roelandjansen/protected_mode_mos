@@ -149,24 +149,21 @@ dpmi2f		endp
 
 GoProtect       proc    far
 ;
-; INTERIM: refuse the switch, per DPMI 0.9 (carry set, client stays in
-; real mode). Measured 2026-09-19: the switch itself works -- the task
-; comes back vm=0, cpl=3 -- but the client has no executable selector
-; to return to. nmswitch builds its code descriptor from whatever was
-; running at switch time, i.e. THIS driver (006b, base c0de0, access
-; fa = code), while the client's own segment gets a data alias only
-; (005b, access f2), and makegdte/7786h produce data descriptors.
-; Returning to either aborts. Refusing loudly beats handing a client a
-; context it cannot execute in.
+; The client's far return address lives on ITS OWN STACK in a bp
+; frame, never in cs:[OrgIP]/cs:[OrgCS]: after the switch this code
+; runs in protected mode, where cs is executable and not writable.
 ;
-                stc
-                ret
+; frame:  [bp+2] = return ip, [bp+4] = return cs
 ;
-; --- everything below is reached once the host can supply a code
-; --- selector for the client; see the design note.
+; A client must resume at a CODE selector for its own segment.
+; nmswitch builds its code descriptor from whatever was executing
+; at switch time -- this driver -- so we ask $386.SYS for one
+; explicitly (int 6fh CODE_SELECTOR) and patch it into the frame.
+; The original real-mode cs stays in fs so the failure path can
+; put the frame back.
 ;
-                pop     cs:[OrgIP]
-                pop     cs:[OrgCS]
+                push    bp
+                mov     bp,sp
                 push    ax
                 push    bx
                 push    cx
@@ -174,11 +171,18 @@ GoProtect       proc    far
 
                 .386
                 push    fs
-                mov     ax,cs:[OrgCS]
-                mov     fs,ax
+                mov     ax,[bp+4]               ; client's real-mode cs
+                mov     fs,ax                   ;  kept for the failure path
                 .286
 
-                
+                mov     bx,[bp+4]
+                mov     cx,[bp-2]               ; client's bitness (ax at entry:
+                                                ;  0 = 16-bit, 1 = 32-bit)
+                mov     ax,CODE_SELECTOR
+                int     6fh
+                jc      gp_nosel
+                mov     [bp+4],bx               ; resume at the code selector
+
                 mov     dx,es
                 push    dx
                 mov     ah,62h
@@ -186,19 +190,23 @@ GoProtect       proc    far
                 pop     dx
                 mov     es,bx
                 mov     cx,5*16
-                
-                mov     ax,1001h
-                int     0d4h                	;protect mode
 
+                mov     ax,1001h
+                int     0d4h                    ; protect mode
                 jnc     gp_switched
 ;
-; The switch failed -- $386.SYS declined it (entintd4 only takes
-; ah=10h when the application has no int D4h handler of its own)
-; and the kernel returned ax=1, carry set, invalid function code.
-; DPMI 0.9: return to the client with carry set, still in real
-; mode. Previously this fell through and the client was told it
-; had switched.
+; The switch was refused: $386.SYS declines ah=10h when the
+; application has its own int D4h handler, and the kernel then
+; returns ax=1 with carry set. Put the real-mode cs back and tell
+; the client, per DPMI 0.9, rather than letting it believe it
+; switched.
 ;
+                .386
+                mov     ax,fs
+                .286
+                mov     [bp+4],ax
+
+gp_nosel:
                 .386
                 pop     fs
                 .286
@@ -206,31 +214,46 @@ GoProtect       proc    far
                 pop     cx
                 pop     bx
                 pop     ax
-                push    cs:[OrgCS]
-                push    cs:[OrgIP]
+                pop     bp
                 stc
                 ret
 
 gp_switched:
-             
+;
+; Everything from here runs with d=1: nmswitch built this driver's cs
+; as a 32-bit descriptor (006b), so 16-bit encodings are decoded with
+; 32-bit operand size. The registers below were pushed BEFORE the
+; switch, 2 bytes each, so every pop and the far ret need an explicit
+; 66h override or they consume 4 bytes and straddle the frame
+; (measured: esp ran past 0ffffh and eax came back as aa4d0000).
+;
+; The client itself resumes 16-bit: its cs is the d=0 code selector
+; built by int 6fh CODE_SELECTOR above.
+;
                 .386
-                mov     ax,gs
-                mov     cs:[OrgCS],ax
-                pop     fs
-                pushf
+                db      66h
+                add     sp,2                    ; drop the saved real-mode fs
+                                                ;  (push fs in 16-bit mode pushed 2,
+                                                ;   not 4: with 4 the frame ended up
+                                                ;   two bytes off and the far ret
+                                                ;   loaded cs=0000)
                 xor     ax,ax
+                mov     fs,ax                   ; segment loads are unaffected
                 mov     gs,ax
-                mov     fs,ax
-                popf
                 .286
 
+                db      66h
                 pop     dx
+                db      66h
                 pop     cx
+                db      66h
                 pop     bx
+                db      66h
                 pop     ax
-
-                push    cs:[OrgCS]
-                push    cs:[OrgIP]
+                db      66h
+                pop     bp
+                clc
+                db      66h                     ; 16-bit far return: ip,cs
                 ret
 GoProtect       endp
 
