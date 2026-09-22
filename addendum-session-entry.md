@@ -1574,3 +1574,32 @@ Every bug in this section is one of those two.
 
 Next is DOS service reflection, which is the substance of a DPMI host
 rather than another encoding fix.
+
+
+## Descriptor lifetime: the policy is right, the hook is not
+
+The decision was to tag DPMI client descriptors `80h|taskid`: owned by
+the task, but invisible to `cleardti`, which matches the plain task id
+and so skips them without being touched. That keeps a client's selectors
+alive across its own mode switches and stops a client's switch from
+freeing descriptors its task made for other reasons -- both of which the
+old scheme did, and the second of which was measured.
+
+Release was meant to happen at termination, through `UnRegister`. It
+never does. Tracing showed the release function is not called once, and
+the reason is structural: `tcbunreg` belongs to the *task*, and the
+client is a *program* running in the shell's task, which never ends. A
+DPMI client lives and dies as a program. The only event that marks its
+end is its own `int 21h ah=4Ch` -- and TSL had already left a slot for
+it, a protected-mode `int 21h` stub in CODE32 captioned "Handler
+Protected Mode Termination".
+
+So this lands squarely on the next milestone. Catching a protected-mode
+client's DOS calls is needed for its output to work, and it is also
+where its resources get released. Two reasons to build it, one hook.
+
+One self-inflicted bug on the way: a helper whose `cmp` left carry set,
+returning into code that then tested carry from a different operation.
+The switch reported failure while actually succeeding, and the failure
+path faulted in protected mode. Any helper called between a flag-setting
+operation and its test has to preserve flags.

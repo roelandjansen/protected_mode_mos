@@ -94,6 +94,7 @@ ExtendMem  	dw	0		; 0	if extended memory allocated failed
 ExtendHand 	dw	0		; extend memory handle
 RUnreg		dd	0		; Real Mode Unregister handler
 OUnreg		dd	0		; Orginal Unregister handle (RUnreg)
+UnregHooked	db	0		; 'Y' once tcbunreg points at UnRegister
 
 OrgIP           dw      0
 OrgCS           dw      0
@@ -191,6 +192,9 @@ GoProtect       proc    far
                 mov     es,bx
                 mov     cx,5*16
 
+                call    HookUnreg               ; cover termination for a client that
+                                                ;  never calls int 31h (must be here:
+                                                ;  real-mode addressing, pre-switch)
                 mov     ax,1001h
                 int     0d4h                    ; protect mode
                 jnc     gp_switched
@@ -257,6 +261,45 @@ gp_switched:
                 ret
 GoProtect       endp
 
+;
+; HookUnreg - point this task's tcbunreg at UnRegister.
+;
+; GetDataSelector does this too, but only on the int 31h path. A
+; client that switches and then terminates without ever calling
+; int 31h never got here, so its 80h-tagged descriptors were never
+; released (measured: one slot still 80h after the client exited,
+; and 778fh never called). Runs in v-86 before the caller resumes.
+; caller returns, so plain real-mode addressing applies.
+;
+HookUnreg	proc	near
+		pushf				; the cmp below sets cf; the caller
+						;  tests carry from the switch
+		cmp	cs:[UnregHooked],'Y'
+		je	HookDone
+		push	ax
+		push	bx
+		push	es
+		mov	es,[scbseg]
+		mov	bx,[scboff]
+		mov	ax,es:[bx+scbtcbpc]	; current tcb
+		mov	es,ax
+		mov	ax,word ptr es:[tcbunreg]
+		mov	word ptr cs:[OUnreg],ax
+		mov	ax,word ptr es:[tcbunreg+2]
+		mov	word ptr cs:[OUnreg+2],ax
+		mov	ax,word ptr cs:[RUnreg]
+		mov	word ptr es:[tcbunreg],ax
+		mov	ax,word ptr cs:[RUnreg+2]
+		mov	word ptr es:[tcbunreg+2],ax
+		mov	cs:[UnregHooked],'Y'
+		pop	es
+		pop	bx
+		pop	ax
+HookDone:
+		popf
+		ret
+HookUnreg	endp
+
 UnRegister	proc	far
 		assume  es:tcb
 		push	ax
@@ -269,6 +312,16 @@ UnRegister	proc	far
 		mov	word ptr [OUnreg+2],ax	
 		pop	ds
 		assume  ds:nothing
+		pop	ax
+		;
+		; Release the descriptors 778eh handed this task's DPMI
+		; client. They are tagged 80h|taskid so cleardti leaves
+		; them alone across mode switches; termination is where
+		; they go.
+		;
+		push	ax
+		mov	ax,FREE_CLIENT_SEL
+		int	6fh
 		pop	ax
 		jmp	dword ptr cs:[OUnreg]
 UnRegister 	endp

@@ -1294,3 +1294,68 @@ pushes 2 bytes and the tail discarded 4, leaving the frame two bytes off
 so the far return loaded `cs=0000`. Found by dumping the stack at the
 `retf` rather than reasoning about it — `[esp]: 008b 0000 aa4d 0508`
 showed it immediately.
+
+---
+
+# UPDATE 17 — descriptor lifetime for DPMI clients
+
+## Decision
+
+Client descriptors get their own ownership class, `80h|taskid`:
+task-owned, but exempt from `cleardti`'s per-switch sweep, and released
+when the client finishes rather than when it switches.
+
+Rejected alternatives, and why:
+
+- **plain task-owned (`taskid`)** — `cleardti` runs on every `nmswitch`,
+  so a client that switches, returns and switches again finds its
+  selectors dead. Measured, too: a client's switch freed two descriptors
+  its task had made for other purposes (`dtitable` went from
+  `00 00 00 00 00 fe` to `00 00 00 ff ff fe`).
+- **permanent (`0FEh`)** — nothing ever reclaims it, and there are only
+  30 slots.
+
+## Applied
+
+`_386.ASM`
+
+| change | why |
+| --- | --- |
+| `778Eh` tags its descriptor `80h|taskid` | `cleardti` matches the plain task id, so tagged entries are skipped with **no change to `cleardti`** — the lowest-risk form |
+| new `778Fh` FREE_CLIENT_SEL | frees every `80h|taskid` entry for the calling task |
+
+`_DPMI.INC`: `FREE_CLIENT_SEL equ 778fh`.
+
+`_DPMI.ASM`
+
+| change | why |
+| --- | --- |
+| `UnRegister` calls `778Fh` before chaining | release at termination |
+| new `HookUnreg`, called by `GoProtect` before the switch | `GetDataSelector` hooks `tcbunreg` only on the int 31h path, which a client may never take |
+| `HookUnreg` preserves flags | its `cmp` left CF set, the switch's `jnc` read that stale carry, and the failure path ran in protected mode — `#GP` on `pop fs` at `00E1` |
+
+## Measured: the release point is wrong
+
+After a client run, `dtitable` holds one `80` entry — the tagged code
+selector — and `778Fh` is **never called**, with or without `HookUnreg`.
+
+`tcbunreg` fires on **task** termination. `DPMITST` runs inside the
+shell's task, which never terminates: a DPMI client's lifetime is a
+*program* within a task, not the task. So `tcbunreg` is the wrong hook.
+
+The right release point is the client's own `int 21h ah=4Ch`. TSL
+reserved exactly that: `Interupt21` in CODE32 is a stub with a comment
+reading "Handler Protected Mode Termination". Hooking it requires
+catching protected-mode `int 21h`, which is the DOS-reflection
+milestone. So the release call moves there when reflection lands.
+
+`778Eh` is called three times per run and `makegdte` reuses the same
+descriptor, so the cost is **one slot per client program**, not per
+switch. Survivable at 30 slots, not indefinitely.
+
+## State
+
+- tagging and `778Fh`: implemented, correct, no live caller yet
+- `HookUnreg`: harmless, and the right thing for task-level cleanup;
+  kept
+- per-program release: blocked on protected-mode `int 21h` interception

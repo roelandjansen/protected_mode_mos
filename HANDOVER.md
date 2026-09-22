@@ -11,13 +11,14 @@ answers back, not by screen inspection. The tree started this session
 hanging with no prompt at all.
 
 `$DPMI.SYS` **installs** and a client **runs in protected mode on its own
-code selector** (UPDATE 16). The `6FEB` return-address corruption and
+code selector** (UPDATE 16–17). The `6FEB` return-address corruption and
 the `7786h` handler crash are both solved: assembler encoding defects in
 original TSL code, not monitor logic. All diagnostics are stripped from
 every source.
 
 
-## Current state (2026-09-20, after UPDATE 16)
+
+## Current state (2026-09-20, after UPDATE 17)
 
 `$DPMI.SYS` installs, and **a DPMI client runs in protected mode on its
 own code selector** (`cs=008B`, `cpl=3`, `vm=0`, measured). Tree = the
@@ -28,18 +29,26 @@ UPDATE 13 baseline plus `_386.ASM`, `_DPMI.ASM`, `_DPMI.INC`,
   `0000000K of Extended Memory Available.`, SMP line, `[A:\]`
 - no DPMI: date/time prompts, `$$SHELL.SYS version 5.04`, `VER` answers
 - `DPMITST.COM`: host reports `ax=0000`, entry `C0DE:00A6`, flags `0001`,
-  version `1.00`, 5 paragraphs; switches; resumes in protected mode
+  version `1.00`, 5 paragraphs; switches; resumes in protected mode;
+  exits cleanly through `int 21h ah=4Ch` (measured, no exception)
 
-**Next milestone: DOS service reflection.** A protected-mode client's
-`int 21h` prints garbage because `dx` is an offset into a selector and
-the call runs as a real-mode DOS call. The host must catch client DOS and
-BIOS calls, translate pointer arguments, execute them in v-86 and return
-results. That is the bulk of what a DPMI host does, and nothing
-implements it.
+**Next milestone: protected-mode DOS interception.** It is needed for two
+reasons now:
 
-New in the monitor: int 6Fh `778Eh` CODE_SELECTOR, an executable sibling
-of `7786h`, with bitness from the caller's `cl` (0 = 16-bit, which clears
-G and D). `88h`-`8Dh` are TSL-named, so it sits at `8Eh`.
+1. a client's `int 21h` prints garbage, because `dx` is an offset into a
+   selector and the call runs as a real-mode DOS call;
+2. a client's descriptors can only be released at its own `int 21h
+   ah=4Ch`. `tcbunreg` is task-level and the client is a program inside
+   the shell's task, so `UnRegister` never runs for it (measured: `778Fh`
+   never called; one `80h` slot left per client program).
+
+TSL reserved the hook: `Interupt21` in CODE32 is a stub captioned
+"Handler Protected Mode Termination".
+
+Monitor additions: int 6Fh `778Eh` CODE_SELECTOR (executable sibling of
+`7786h`, bitness from `cl`, tags its descriptor `80h|taskid`) and `778Fh`
+FREE_CLIENT_SEL. `cleardti` needed no change: it matches the plain task
+id, so tagged entries are skipped.
 
 Not bugs: `0000000K` is original TSL code that never fills the digits;
 `install not done` is a hardcoded `ECHO` in the test `AUTOEXEC.BAT`.
@@ -49,6 +58,9 @@ executing under the other, plus plain `offset` where `offset ddt:` is
 needed. Anything running after `goprot` is in a 32-bit cs and needs
 explicit `66h` overrides; MASM cannot encode a `use32` -> `use16` call at
 all. Check such encodings **in the linked binary**, not the listing.
+
+**Tooling:** `pmrig-toolkit.tar.gz` restores the debug emulator and the
+rig in a fresh session (`./restore.sh`; see its `RIG.md`).
 
 `nxtdrvr` is still unvalidated.
 ## Baseline (set 2026-09-17, supersedes the UPDATE 8 tree)
@@ -81,7 +93,7 @@ Verified at each step, not assumed:
 
 1. `pcmos386-protected-mode-fix-plan.md` — rewritten; the old version
    planned a hunt for a crash that turned out not to exist
-2. `addendum-session-entry.md` — 16 sections, chronological; append to
+2. `addendum-session-entry.md` — 17 sections, chronological; append to
    `pcmos386-protected-mode-addendum.md`
 3. `CHANGES.md` — every code change, split into REAL FIXES vs
    DIAGNOSTICS TO STRIP

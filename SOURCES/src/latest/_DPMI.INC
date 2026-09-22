@@ -36,6 +36,7 @@ SET_REAL_EXCEPTION	equ	778bh
 CREATE_ALIAS		equ	778ch
 ALLOC_SPEC_SELECTOR	equ	778dh
 CODE_SELECTOR		equ	778eh	; code alias for a real-mode segment
+FREE_CLIENT_SEL		equ	778fh	; release this task's client descriptors
 ;
 ; below are equates use to access memory manger functions
 ;

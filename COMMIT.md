@@ -1,48 +1,42 @@
 # Commit message
 
-Rationale in CHANGES.md UPDATE 15 and the addendum.
+Rationale in CHANGES.md UPDATE 16 and 17.
 
 ---
 
-    DPMI: clients reach protected mode; refuse the switch until a client
-    code selector exists. Add DPMITST.
+    DPMI: clients run in protected mode on their own code selector;
+    client descriptor lifetime
 
-    GoProtect handed clients an entry point computed with a plain OFFSET
-    (segment-relative, low by the group base), never tested carry after
-    int 0D4h ah=10h, and its post-switch tail wrote to cs:[OrgCS] -- fine
-    in real mode, a fault in protected mode. None of it had ever been
-    reachable before the driver installed.
+    Add int 6Fh 778Eh CODE_SELECTOR and rebuild GoProtect around it.
+    DPMITST now switches and resumes executing its own code at cs=008B,
+    cpl=3, vm=0, and exits cleanly through int 21h ah=4Ch.
 
-    With the entry point fixed the switch works: a client comes back
-    vm=0, cpl=3, 32-bit ring 3. It then has nothing to return to.
-    nmswitch builds its code descriptor from whatever was executing at
-    switch time, which is this driver, and makegdte behind 7786h builds
-    data descriptors only. Live GDT: 006B is code, base C0DE0 (driver);
-    the client's own segment has the data alias 005B. Returning to either
-    aborts the cpu.
+    nmswitch builds its code descriptor from whatever ran at switch time
+    -- the host -- and 7786h builds data descriptors only, so a client
+    had nothing to return to. 778Eh is the executable sibling of 7786h,
+    with bitness from cl (0 = 16-bit clears g and d). GoProtect uses a bp
+    frame on the client's stack instead of writing through cs, requests
+    the code selector before switching, discards the stale real-mode fs,
+    and carries explicit 66h overrides through its tail, because nmswitch
+    hands the host a 32-bit cs.
 
-    GoProtect therefore returns carry set, per DPMI 0.9: the client stays
-    in real mode and survives. The code below the refusal is intact for
-    when the host can supply an executable selector -- either a code
-    variant of makegdte behind a new 7780h function, or nmswitch building
-    CS from the caller's return frame. Either way descriptor lifetime has
-    to be settled too, since cleardti frees task-owned descriptors on
-    every switch.
+    Client descriptors are tagged 80h|taskid: task-owned, but exempt from
+    cleardti's per-switch sweep, which matches the plain task id. New
+    778Fh releases them. GoProtect hooks tcbunreg so UnRegister calls it.
+    Measured: that hook never fires for a client, because tcbunreg is
+    task-level and the client is a program inside the shell's task. The
+    correct release point is the client's int 21h ah=4Ch, which needs
+    protected-mode DOS interception -- the next milestone, and also what
+    makes a client's own int 21h output work.
 
-    _DPMI.ASM
-      - mov di,offset ddt:GoProtect in the 1687h response
-      - test carry after the mode-switch call
-      - GoProtect: refuse with carry set (interim, documented in place)
-
-    DPMITST.ASM, MAKEUTIL.MAK
-      - minimal DPMI 0.9 client: queries the host via int 2Fh 1687h,
-        allocates the host data block, calls the mode-switch entry and
-        reports which side of the switch it ended on. Added to ALL.
+    _386.ASM      778Eh CODE_SELECTOR, 778Fh FREE_CLIENT_SEL, 80h tag
+    _DPMI.ASM     GoProtect rebuilt; HookUnreg; UnRegister releases
+    _DPMI.INC     CODE_SELECTOR 778eh, FREE_CLIENT_SEL 778fh
 
 ---
 
 ## Files in this change
 
+    SOURCES/src/latest/_386.ASM
     SOURCES/src/latest/_DPMI.ASM
-    SOURCES/src/latest/DPMITST.ASM
-    SOURCES/src/latest/MAKEUTIL.MAK
+    SOURCES/src/latest/_DPMI.INC

@@ -8007,6 +8007,7 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6funimp	; 8ch CREATE_ALIAS
 	dd	offset mmgrp:e6funimp	; 8dh ALLOC_SPEC_SELECTOR
 	dd	offset mmgrp:e6f8e	; 8eh CODE_SELECTOR
+	dd	offset mmgrp:e6f8f	; 8fh FREE_CLIENT_SEL
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -8505,7 +8506,44 @@ e6f0f:
 ; survive that.  Not addressed here -- flagged in the addendum.
 ;
 assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
-;==== dpmi func 88 - code selector for a real-mode segment
+;==== dpmi func 8f - release this task's client descriptors
+;
+; Frees every gdt entry tagged 80h|taskid for the calling task --
+; the ones 8eh handed a DPMI client. Called from the driver's
+; Unregister path at task termination, because cleardti will not:
+; tagged entries are deliberately exempt from the per-switch sweep
+; so a client keeps its selectors across switches.
+;
+e6f8f:
+	push	eax
+	push	edx
+	push	esi
+	push	edi
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
+	db	tcbid
+	or	dh,80h			; the client-descriptor tag
+	xor	si,si
+e6f8floop:
+	db	67h
+	cmp	ss:[dtitable+si],dh	; one of this task's client entries?
+	jne	e6f8fskip
+	db	67h
+	mov	ss:[dtitable+si],0ffh	; yes, free it
+e6f8fskip:
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e6f8floop
+	and	byte ptr ss:[s0flags],0feh   ; cf clear
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	eax
+	jmp	cgrm7
+
+
+;==== dpmi func 8e - code selector for a real-mode segment
 ;
 ; As 86h, but the descriptor is executable+readable rather than
 ; data. A DPMI client must resume at a code selector for its own
@@ -8530,6 +8568,15 @@ e6f8e:
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
 	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
 	db	tcbid
+	;
+	; Tag client descriptors 80h|taskid. cleardti matches the plain
+	; task id, so tagged entries survive the per-switch sweep: a
+	; client that switches, returns and switches again keeps its
+	; selectors, and descriptors the task made for other reasons are
+	; no longer collateral. 8fh releases them at termination.
+	; (Assumes task ids stay below 80h.)
+	;
+	or	dh,80h
 	pop	eax			; ax = segment again
 	mov	dl,11111010b		; p=1,dpl=3,s=1,type=101 code r/x
 	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector, 0 = table full
