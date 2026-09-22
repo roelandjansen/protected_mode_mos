@@ -4018,7 +4018,7 @@ init16		segment para public 'CODE'
 Copyright db	'PC-MOS DPMI Driver Version 1.00 (910430)',13,10
 	  db	'(C) Copyright 1991, The Software Link, Incorporated.'
 	  db	13,10,10
-	  db	'Dos Protected Mode Insterface $'
+	  db	'Dos Protected Mode Interface $'
 
 MsgNotIns db	'Not '					;[1]	Must  be
 MsgIns	  db	'Installed.',13,10,'$'			;[2]    Together

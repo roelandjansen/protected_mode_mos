@@ -313,3 +313,36 @@ care no stack dependency. They work precisely when the thing under
 investigation is the machinery a normal marker would rely on. Reading
 values back out of guest memory repeatedly misled (image base, `s0ip`,
 CODE16 residency); the screen never did.
+
+## UPDATE 18 (2026-09-22) — PM int 21h ah=09h translated
+
+A DPMI client's protected-mode `int 21h ah=09h` now prints correctly
+(measured: `DPMITST` shows "returned with carry CLEAR: client is in
+protected mode" instead of garbage; twice in one boot; `VER` still
+answers; no-DPMI boot unchanged). `$386.SYS` 21232 -> 21344 bytes.
+
+Mechanism: TSL already built a native-mode DOS translation layer in
+`_386.ASM` (`einative` -> `eintable`, AH `39h`-`5Ch`, plus `1Ch`), using
+the per-task NCA staging buffer `ncabufer` and `senddsdx`. A DPMI client
+already travels this path; anything not in the table falls to
+`einstand` (raw reflection), which is why `09h` printed garbage.
+
+Change (`_386.ASM` only, 106 lines added, none removed):
+
+- new `einfun09`: stages the `$`-string from `ncands:(e)dx` into
+  `ncabufer` (scan to `$`, capped at `ncabufsz`, 64 if unset, `$` forced
+  at the cap), points v86 `ds:dx` at it, `dovmint`, restores `edx`
+- 16-bit client: `lar` on `ncancs`, D bit clear -> `movzx esi,si`
+- `einlt39` routes `al=09h` there via `66h`-prefixed `jmp`
+- encodings verified in the listing (disp8s `ncancs=3Ch`, `ncands=2Ch`,
+  `ncabufer=70h`)
+
+Open: a string without `$` inside the client's segment limit can fault
+in the monitor (ring 0). Other `ah<39h` pointer calls are still raw
+reflections. `4Ch` descriptor release (`778Fh`) still not wired.
+
+Also this session: `_DPMI.ASM` banner typo "Insterface" -> "Interface"
+(size unchanged, 4941). Rig: `IMAGES/template/empty-bootable.img` lacks
+the 524-byte `COMMAND.COM` stub the kernel execs as `A:\COMMAND.COM`
+(`scbshell`); without it boot ends "Command processor cannot be found".
+Take it from `IMAGES/v501/1_main.img`.

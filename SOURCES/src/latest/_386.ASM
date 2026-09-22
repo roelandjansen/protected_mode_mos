@@ -5421,6 +5421,107 @@ contirq1:
 
 	page
 ;--------------------------------------------------------------------
+;		09 - display $-terminated string
+;--------------------------------------------------------------------
+;
+; Stages the client's string at ds:(e)dx into ncabufer, up to and
+; including the '$' (capped at ncabufsz, '$' forced at the cap), then
+; reflects the call with v86 ds:dx pointing at the buffer.
+;
+; Runs in the 32-bit monitor cs: encoded by hand where operand size
+; matters. A 16-bit client (D bit clear in its cs descriptor) may have
+; junk in the high word of edx, so the offset is zero-extended.
+;
+
+; save edx to ncauregs
+
+einfun09:
+	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncauregs+00
+
+; source offset, zero-extended for a 16-bit client
+
+	mov	ax,ds			; es = absolute zero, like senddsdx
+	mov	es,ax
+	db	8bh,01110011b		; mov esi,[ebx+ncavdx]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncancs
+	db	0a9h			; test eax,00400000h (D bit)
+	dd	00400000h
+	jnz	e09is32
+	db	0fh,0b7h,11110110b	; movzx esi,si
+e09is32:
+
+; copy up to and including '$', at most ncabufsz-1 bytes
+
+	db	8bh,01001011b		; mov ecx,[ebx+ncabufsz]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncabufsz
+	or	cx,cx			; or ecx,ecx
+	jnz	e09szok
+	mov	cl,64			; no size recorded: stay small
+e09szok:
+	dec	cx			; dec ecx: room for a forced '$'
+	mov	di,bx			; mov edi,ebx
+	db	83h,11000111b		; add edi,offset nca:ncabufer
+	;	  11...111		; reg=edi
+	db	offset nca:ncabufer
+	db	8bh,01000011b		; mov eax,[ebx+ncands]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncands
+	mov	ds,ax			; client's data selector
+	cld
+e09loop:
+	lodsb
+	stosb
+	cmp	al,'$'
+	je	e09done
+	loop	e09loop			; ecx in a 32-bit cs
+	mov	al,'$'			; cap reached: terminate
+	stosb
+e09done:
+	mov	ax,es			; fix ds back to normal
+	mov	ds,ax
+
+; set v86 ds:dx to ncabufer (as senddsdx does)
+
+	mov	ax,bx
+	shr	ax,4			; segment portion
+	db	66h			; 16-bit data
+	db	89h,01000011b		; mov [ebx+ncavds],ax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavds
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavdx],offset nca:ncabufer
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	dw	offset nca:ncabufer	; immediate data
+
+; execute vm handler
+
+	db	66h
+	call	dovmint 		; edx contains vector number
+
+; recover edx from ncauregs
+
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+00] (edx)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncauregs+00
+	db	89h,01000011b		; mov [ebx+ncavdx],eax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	66h
+	jmp	einback
+
+	page
+;--------------------------------------------------------------------
 ;		39 - send-stage file or directory name
 ;--------------------------------------------------------------------
 
@@ -7014,6 +7115,11 @@ einative:				; bp,ds,es,cx,bx already pushed
 	db	67h
 	jmp	cs:[si+eintable]
 einlt39:
+	cmp	al,09h			; 09 - display string
+	jne	einlt39b
+	db	66h
+	jmp	einfun09
+einlt39b:
 	cmp	al,1ch
 	jne	einstand
 ;######	db	66h
