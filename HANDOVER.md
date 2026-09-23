@@ -689,3 +689,39 @@ real-mode alloc/alloc/exit control, which decides whether this is
 MOS-generic or specific to the protected-mode path. Do that first next
 session, then look at what 4Ch/`freeclsel` and MOS's task termination
 each do with two live blocks and their descriptors.
+
+## UPDATE 27 (2026-09-23) — the 48h defect is PM-specific, and not about live blocks
+
+No source change; tree is UPDATE 26 (`$386.SYS` 21648, 48h + 49h in).
+
+Controls run for the "Internal error #0 Unexpected error during
+function #00" reported in UPDATE 26:
+
+| sequence | mode | result |
+| --- | --- | --- |
+| alloc, exit | PM | clean |
+| alloc, alloc, exit | PM | Internal error #0 |
+| alloc x2, free both, exit | PM | Internal error #0 |
+| alloc, free, alloc, exit | PM | Internal error #0 |
+| alloc, alloc, exit | real | clean (`18B1h`, `18B6h`) |
+| alloc, free, alloc, exit | real | clean |
+
+So: real mode is fine with the same DOS calls, and freeing the blocks
+before exit does NOT help. The trigger is making a SECOND protected-
+mode allocation, i.e. creating a second client data descriptor, not
+what is left allocated at termination. The error appears after the
+program finishes (the prompt returns and the system keeps running).
+
+Note on `dtitable` values, from the peek dumps: free is `0ffh`, a
+client's is `80h|taskid`, and entries also appear as plain `00h` and as
+`0feh` -- so the byte carries more meanings than "free or this task's
+client". `0073h` is index 3, `007Bh` index 4. Worth reading what writes
+`00h` and `0feh` before assuming a free slot is safe to hand out:
+the suspicion is that the second `makegdte` slot collides with
+something MOS uses for the shell task itself.
+
+Next: run the client under `PMTRACE_STEPS` from the `int 6fh` so the
+v-86 instructions after termination are visible, and identify which
+function #00 MOS is complaining about; peek `dtitable` (`1789h`) and
+the two new descriptors right after each 48h. Until that is understood,
+treat 48h as usable for a single allocation only.
