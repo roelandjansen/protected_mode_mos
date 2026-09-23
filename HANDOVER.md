@@ -1030,3 +1030,57 @@ cs, client ds), all released, no growth. Earlier (UPDATE 31) the
 second 48h was measured to skip the host's slot instead of overwriting
 it. Regression, two boots: the two-allocation client twice, the base
 client, `VER`, `DIR`: no "Internal error", all clean.
+
+## UPDATE 35 (2026-09-23) — 49h and 4Ah are DOS-level no-ops in PM
+
+Tree unchanged: UPDATE 34 (`$386.SYS` 21664). `einfun4a` written and
+builds (21712, 0 warnings, 0 severe) but NOT shipped; kept at
+`/tmp/einfun4a-wip.txt`.
+
+### The finding
+
+Watched the segments DOS hands out (hook right after
+`mov ax,[ebx+ncavax]` in `einfun48`, `3285h`) across one client:
+
+| step | segment | if the previous call had taken effect |
+| --- | --- | --- |
+| A = 48h(4) | `18D4` | |
+| 4Ah A->8, then B = 48h(4) | `18D9` | `18DD` (after a grown A) |
+| 49h B, then C = 48h(4) | `18DE` | `18D9` (B's space reused) |
+
+So in protected mode 49h and 4Ah both RETURN SUCCESS WITHOUT EFFECT:
+A never grew and B was never freed. Real mode, same calls: 4Ah with an
+impossible size fails properly (`ax=0008`, `bx=872C` largest, CF set),
+and 48h/49h/48h reuses the freed block.
+
+**UPDATE 26's "49h works" is withdrawn at the DOS level.** What was
+measured then -- the carry coming back clear and the next 48h reusing
+the SAME SELECTOR -- was only this driver's own `dtitable` bookkeeping.
+The DOS block stayed allocated. (Blocks are still reclaimed at
+termination, when MOS frees everything the PSP owns; that is why no
+exit error appeared.) Likewise the "grown area is writable" check for
+4Ah proved nothing: every descriptor has a 256 MB limit.
+
+### Ruled out
+
+- the conversion: segment `18D4` measured going into `ncaves`, and
+  `dovmint` loads v86 `es` from `ncaves` (UPDATE 25b)
+- a register/test-harness artefact: result read from DOS's own
+  allocation sequence, not from anything the client prints
+
+### Not yet known
+
+What MOS does with a reflected 49h/4Ah from a native-mode task. 48h
+(no segment input) works; 49h and 4Ah (segment in `es`) silently do
+nothing. MOS may route memory calls from a native-mode task through a
+separate path (TSL's old native-mode memory services) that treats `es`
+differently and reports success on no match. Next step is a v-86 step
+trace (`PMTRACE_STEPS`) from the reflected 49h into the kernel, then
+reading that path in `MOSFUN*.ASM`.
+
+### State of the memory trio
+
+- 48h: works (block and descriptor)
+- 49h: in the tree; releases the descriptor slot correctly, but the DOS
+  block is NOT freed until termination
+- 4Ah: not shipped; same no-op
