@@ -1302,3 +1302,178 @@ offset `3354h`), reached through `ss:` like the other monitor data;
 `parm6ec` is back at `0DAAh`. Every earlier insertion this session was
 in the code region, where offsets are only ever reached by label:
 **never add a field inside the monitor's data area.**
+
+## UPDATE 41 (2026-09-23) — int 31h 0501h/0502h/0503h (extended memory blocks)
+
+`_386.ASM`: `$386.SYS` 21904 -> 22496, 0 warnings, 0 severe.
+
+Also recorded from Roeland's machine (32 MB): the install banner shows
+about 29 MB. Correct: at boot only the startup task exists. The
+reserve (UPDATE 40) is a FIXED FLOOR -- DPMI may use `free - R` whatever
+is running -- so once planned tasks exist, the floor double-counts
+them. Accepted for now; `/R` should be read as "always leave this much
+free", i.e. one or two tasks' worth. A shrinking reserve
+(`planned - current tasks` x size) needs MOS's live task count; later.
+
+### Design
+
+- handle = `SI:DI`: `SI` = pages, `DI` = starting bank. Linear address
+  = (bank + `110h`) x 4096, the mapping `einfun91` already uses
+- `0501h`: size `BX:CX` -> pages (round up, >65535 pages refused);
+  probe = memman `valloc` for `0FFFFh` pages (the largest block,
+  allocated); if `request + dpmirsv` fits, keep the head and
+  `vrelease` the tail, else release all and fail
+- `0502h`: `vrelease(bank=DI, count=SI)`
+- `0503h`: shrink or same size releases the tail in place (address and
+  bank unchanged); grow allocates a new block through the same path,
+  copies the old pages across with `rep movsd` through the flat
+  `ds`/`es` (absolute zero), then frees the old block -- a failed grow
+  leaves the original intact
+- failure: CF set, `ax/bx/cx` restored; success: CF clear, `ax` kept
+- scratch: `ncauregs` for the saved registers and the request (bit 31
+  flags a 0503h grow); `ncabufer+00..0Fh` only, because `[ebx+disp8]`
+  must stay below `80h` or the displacement goes negative
+- hand encodings through small macros at the top of the block (`NLD`,
+  `NST`, `NLDW`, `NSTW`, `NADD`, `NSUB`, `NCMP`, `EAXI` for true imm32,
+  `MEMDEV`): the bytes are exactly what the file writes by hand
+  elsewhere, reviewable in one place. Verified in the listing
+  (`05 0FFF 0000`, `A9 0000 FFFF`, `66 E8` / `66 C3` pairing)
+
+### Measured (rig, default reserve)
+
+| step | linear | handle (pages, bank) | largest free |
+| --- | --- | --- | --- |
+| start | | | `CB6000` |
+| 0501h 64 KB | `1FA000` | `0010`, `00EA` | `CA6000` |
+| 0503h -> 128 KB | `20A000` (moved) | `0020`, `00FA` | `C86000` |
+| 0503h -> 16 KB | `20A000` (in place) | `0004`, `00FA` | `CA2000` |
+| 0502h | | | `CB6000` |
+| 0501h `BX=FFFFh` | | | CF set |
+
+The -192 KB after the grow is fragmentation, not a leak: the freed
+64 KB at bank `EA` is a hole BEFORE the new block, and 0500h reports
+the largest CONTIGUOUS block. After the final free the figure is back
+to `CB6000` exactly. Regression: allocating int 21h clients, base
+client, `DIR`, `VER`: no "Internal error".
+
+### Open
+
+- blocks are NOT released at the client's 4Ch (`freeclsel` only frees
+  descriptors): a client that exits without 0502h leaks until reboot
+- no ownership check: any client can 0502h any bank range
+- the 0503h grow copy is untested for content: a client cannot touch
+  its block yet, because the descriptor functions (0000h alloc LDT
+  descriptor, 0007h set base, 0008h set limit) are not implemented --
+  they are the natural next step, and make 0501h actually usable
+- 0503h grow always moves; growing in place when the following banks
+  are free would avoid the copy and the hole
+
+## UPDATE 42 (2026-09-23) — int 31h descriptors: 0000h/0001h/0006h/0007h/0008h
+
+`_386.ASM`: `$386.SYS` 22496 -> 22912, 0 warnings, 0 severe.
+
+A client can now reach the memory 0501h gives it.
+
+### Design
+
+- no LDT: client descriptors are `gdtspace` slots tagged `80h|taskid`
+  in `dtitable`, like those `8eh`/`86h`/48h make, so `freeclsel`
+  already frees them at the client's 4Ch
+- the tag is also OWNERSHIP: `e31sel` accepts a selector only inside
+  `gdtspace` and tagged for the calling task; 0001h/0006h/0007h/0008h
+  refuse anything else with CF set, so a client cannot rewrite the
+  host's, the monitor's or another task's descriptors
+- 0000h: `CX=1` only for now; first free slot, data r/w, present,
+  dpl 3, base 0, limit 0, byte-granular, 16-bit; `AX` = selector|3
+- 0006h / 0007h: base in `CX:DX` (gdt +2 word, +4 and +7 bytes)
+- 0008h: limit in `CX:DX`; up to 1 MB byte-granular, above that the
+  low 12 bits must be all ones and G is set; D/B and AVL preserved
+- dispatch: `AX < 0010h` goes to `e31desc`; no `dovmint` in this block,
+  so near subroutines (`66h call` / `66h ret`) are safe
+- MASM hazards met and handled: short `jc`/`jne` to a shared failure
+  label out of range (A2053) -> local `jnc` over a `66h`-prefixed near
+  `jmp`; byte access to the word-typed `gdt` needs `byte ptr` (A4031).
+  Store widths verified in the listing: word stores `66 67 36 C7 85`,
+  byte stores `67 36 C6 85`
+
+### Measured -- this also closes UPDATE 41's untested 0503h copy
+
+0501h 64 KB, 0000h -> selector `0073h`, 0007h base = the block's
+linear address (0006h reads back `001FA000`), 0008h limit `FFFFh`,
+write `1234h` at 0 and `ABCDh` at `FFFEh`. Then 0503h to 128 KB moves
+the block (`0020A000`); 0007h re-bases the selector, 0008h limit
+`1FFFFh`; reads give `1234h` and `ABCDh`: THE GROW COPY IS CORRECT.
+
+Refusals: 0001h on `18h` (monitor cs) -> CF set; 0008h with limit
+`00100000h` (above 1 MB, low 12 bits not all ones) -> CF set. 0001h on
+the client's own selector -> CF clear. 0502h frees the block.
+Regression: allocating int 21h clients, base client, `DIR`, `VER`: no
+"Internal error".
+
+### Open
+
+- 0000h with `CX>1` (contiguous descriptors) not supported
+- memory blocks still not released at 4Ch (descriptors are); no block
+  ownership check in 0502h/0503h -- both need a per-task block list,
+  which this descriptor tagging does not give
+- 0008h cannot lower a limit below a live segment register's use (the
+  CPU checks on the next load, which is DPMI's rule too)
+
+## UPDATE 43 (2026-09-23) — per-task DPMI memory blocks: ownership and release at 4Ch
+
+`_386.ASM`: `$386.SYS` 22912 -> 23504, 0 warnings, 0 severe.
+
+### Design
+
+- `dblktab`: `DBLKN` (32) entries of 8 bytes -- +0 in use, +1 task id,
+  +4 dword handle (`start bank << 16 | pages`, the same packing as
+  `SI:DI`). Lives in the code region after an unconditional jump, next
+  to `dpmirsv`, NOT in the monitor's data area (UPDATE 40)
+- helpers `e31tid` (dl = task id via `addrnca`), `e31new` (free
+  entry), `e31find` (entry for this task and handle, eax preserved) --
+  no `dovmint`, so near subroutines are safe
+- 0501h: after a successful allocation, records the block; if the
+  table is full the fresh block is released and the call fails, so
+  untracked memory is never handed out
+- 0502h / 0503h: refuse (CF set) a handle not recorded for the calling
+  task -- the ownership check; 0502h clears the entry, 0503h updates it
+  to the new handle (the 0503h path finds it by the old handle held in
+  `ncabufer+08`)
+- 4Ch (`einfun4c`): after `freeclsel`, releases every block recorded
+  for the task. Inline loop, not a subroutine, because the memory
+  device call goes through `dovmint`; loop index in `ncauregs+04`,
+  task id in `+00`, and the client's `ax` (4C00h) saved in `+08` and
+  put back before `einstand` reflects the termination
+
+### Defect hit on the way -- the imm16 trap a third time
+
+`add ax,8` in the 4Ch loop assembled as `05 0008`. Under the 32-bit cs
+`05` takes an imm32, so it swallowed `08 00 89 43`, fell into `50`
+(`push eax`) and looped until the monitor stack wrapped to `FFFFF900`;
+the event log showed int 0Eh repeating at `3A2F`, and DOSBox itself
+died with SIGSEGV from the recursion. Now `83 C0 08`. After fixing,
+the whole new region was SWEPT in the listing for accumulator-
+immediate opcodes (05/0D/25/2D/35/3D/A9) carrying a 16-bit immediate
+without a `66h` prefix: that was the only one. Recommend this sweep
+after any change in the 32-bit-executed, use16-assembled region.
+
+### Measured
+
+Leak test: a client prints the largest free block, allocates 64 KB and
+exits WITHOUT freeing; three runs in one boot.
+
+| build | runs start at | handle bank | forged 0502h / 0503h |
+| --- | --- | --- | --- |
+| this | `CB6000` every run | `EA` every run | CF set / CF set |
+| control, UPDATE 42 | `CB6000` ... `C86000` | drifts to `11A` | -- |
+
+The descriptor/grow client (UPDATE 42) twice in one boot: grow copy
+still `1234h`/`ABCDh`, refusals and own-free unchanged. Regression:
+allocating int 21h clients, base client, `DIR`: no "Internal error".
+
+### Open
+
+- the driver's Unregister path (int 6fh 778Fh -> `e6f8f`) frees
+  descriptors but NOT blocks: it runs from v-86 and cannot use
+  `dovmint`. Blocks of a task removed that way still leak
+- 32 blocks system-wide; `0000h` with `CX>1` still unsupported

@@ -7514,13 +7514,28 @@ einint31:
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavax
 	db	66h
+	cmp	ax,0010h		; 0000h-000Fh: descriptor functions
+	jae	e31n00
+	db	66h
+	jmp	e31desc
+e31n00:
+	db	66h
 	cmp	ax,0400h
 	je	e310400
 	db	66h
 	cmp	ax,0500h
-	jne	e31bad
+	jne	e31n05
 	db	66h
 	jmp	e310500
+e31n05:
+	db	66h
+	cmp	ax,0501h
+	jb	e31bad
+	db	66h
+	cmp	ax,0503h
+	ja	e31bad
+	db	66h
+	jmp	e31save
 e310400:
 	db	66h			; 16-bit data
 	db	0c7h,01000011b		; mov [ebx+ncavax],005Ah
@@ -7562,6 +7577,10 @@ e31bad:
 ; layout, and inserting a field there shifted parm6ec and everything
 ; after it -- the keyboard died (UPDATE 40).
 dpmirsv dw	0,0
+
+; DPMI extended memory blocks per task (UPDATE 43), ss-addressable
+DBLKN	equ	32
+dblktab db	DBLKN*8 dup(0)
 
 	page
 ;--------------------------------------------------------------------
@@ -7707,9 +7726,699 @@ e05is32:
 	db	66h
 	jmp	einback
 
+	page
+;--------------------------------------------------------------------
+;	int 31h 0501h/0502h/0503h - extended memory blocks
+;--------------------------------------------------------------------
+;
+; Encoding helpers for this block, all [ebx+disp8] into the nca under
+; the 32-bit cs (the same bytes the rest of the file writes by hand):
+;
+NLD	macro	fld			;; mov eax,[ebx+fld]
+	db	8bh,01000011b
+	db	offset nca:fld
+	endm
+NST	macro	fld			;; mov [ebx+fld],eax
+	db	89h,01000011b
+	db	offset nca:fld
+	endm
+NLDW	macro	fld			;; mov ax,[ebx+fld] (16-bit)
+	db	66h,8bh,01000011b
+	db	offset nca:fld
+	endm
+NSTW	macro	fld			;; mov [ebx+fld],ax (16-bit)
+	db	66h,89h,01000011b
+	db	offset nca:fld
+	endm
+NADD	macro	fld			;; add eax,[ebx+fld]
+	db	03h,01000011b
+	db	offset nca:fld
+	endm
+NSUB	macro	fld			;; sub eax,[ebx+fld]
+	db	2bh,01000011b
+	db	offset nca:fld
+	endm
+NCMP	macro	fld			;; cmp eax,[ebx+fld]
+	db	3bh,01000011b
+	db	offset nca:fld
+	endm
+EAXI	macro	op,lo,hi		;; op eax,imm32 (05 add, 25 and,
+	db	op			;;  0D or, A9 test) -- MASM would
+	dw	lo,hi			;;  emit imm16 and misalign
+	endm
+MEMDEV	macro	fn			;; memory device call via dovmint
+	db	66h
+	mov	dx,offset mmgrp:rhentry
+	db	0c6h,01000011b
+	db	offset nca:ncavax+1
+	db	fn
+	db	66h
+	call	dovmint
+	endm
+;
+; Handle = SI:DI: SI = pages, DI = starting bank. Linear address =
+; (bank + 110h) * 4096, as einfun91 maps extended banks.
+;
+; Scratch (disp8 must stay below 80h, so ncabufer+0..0Fh only):
+;	ncauregs+00/04/08  client ax/bx/cx (restored on failure)
+;	ncauregs+0C        requested pages; bit 31 = 0503h grow
+;	ncabufer+00        pages the probe obtained (largest block)
+;	ncabufer+04        its starting bank, then the kept block's
+;	ncabufer+08        0503h old block: start<<16 | pages
+;	ncabufer+0C        requested pages, clean
+;
+; No ownership is tracked: a client could free banks it does not
+; own, and blocks are NOT released at 4Ch (both open, UPDATE 41).
+;
+e31save:				; common entry: save ax/bx/cx
+	NLD	ncavax
+	NST	ncauregs+00
+	NLD	ncavbx
+	NST	ncauregs+04
+	NLD	ncavcx
+	NST	ncauregs+08
+e31disp2:
+	NLDW	ncavax
+	db	66h
+	cmp	ax,0501h
+	jne	e31d2
+	db	66h
+	jmp	e310501
+e31d2:
+	db	66h
+	cmp	ax,0502h
+	jne	e31d3
+	db	66h
+	jmp	e310502
+e31d3:
+	db	66h
+	jmp	e310503
+
+
+;---- block table helpers (no dovmint: near subroutines are safe)
+;
+; dblktab: DBLKN entries of 8 bytes: +0 in use (1/0), +1 task id,
+; +4 dword handle = start bank << 16 | pages (as SI:DI packs it).
+
+e31tid:					; dl = caller's task id
+	db	66h
+	call	addrnca 		; esi -> tcb, ebx -> nca
+	db	8ah,01010110b		; mov dl,[esi+tcbid]
+	db	tcbid
+	db	66h
+	ret
+
+e31new:					; si = a free entry, CF set if full
+	xor	si,si
+e31nlp:
+	db	67h
+	cmp	byte ptr ss:[si+dblktab],0
+	je	e31nok
+	add	si,8
+	db	66h
+	cmp	si,DBLKN*8
+	jb	e31nlp
+	stc
+	db	66h
+	ret
+e31nok:
+	clc
+	db	66h
+	ret
+
+e31find:				; eax = handle; si = its entry for
+	push	ax			;  this task, CF set if none (eax kept)
+	db	66h
+	call	e31tid
+	pop	ax
+	xor	si,si
+e31flp:
+	db	67h
+	cmp	byte ptr ss:[si+dblktab],1
+	jne	e31fnx
+	db	67h
+	cmp	byte ptr ss:[si+dblktab+1],dl
+	jne	e31fnx
+	db	67h
+	cmp	ax,word ptr ss:[si+dblktab+4]	; cmp eax,dword
+	je	e31fok
+e31fnx:
+	add	si,8
+	db	66h
+	cmp	si,DBLKN*8
+	jb	e31flp
+	stc
+	db	66h
+	ret
+e31fok:
+	clc
+	db	66h
+	ret
+
+e31pages:				; eax = pages for size bx:cx, 0 = bad
+	xor	ax,ax			; xor eax,eax
+	NLDW	ncavbx
+	shl	ax,16			; shl eax,16
+	NLDW	ncavcx
+	EAXI	05h,0fffh,0		; add eax,0fffh
+	shr	ax,12			; shr eax,12
+	EAXI	0a9h,0,0ffffh		; test eax,0ffff0000h
+	jz	e31pgok
+	xor	ax,ax			; > 65535 pages: refuse
+e31pgok:
+	db	66h
+	ret
+
+;---- 0501h allocate memory block
+
+e310501:
+	db	66h
+	call	e31pages
+	or	ax,ax			; or eax,eax
+	jnz	e01ok
+	db	66h
+	jmp	e31fail
+e01ok:
+	NST	ncauregs+12		; mode bit clear: plain allocation
+
+; common allocation: probe the largest block, keep the head
+
+e31alc:
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavcx],0ffffh
+	db	offset nca:ncavcx
+	dw	0ffffh
+	MEMDEV	01h			; valloc everything
+	xor	ax,ax
+	NLDW	ncavcx
+	NST	ncabufer+00		; L = pages obtained
+	xor	ax,ax
+	NLDW	ncavbx
+	NST	ncabufer+04		; start
+	NLD	ncauregs+12
+	EAXI	25h,0ffffh,0		; and eax,0ffffh: requested pages
+	NST	ncabufer+12
+	db	67h
+	add	ax,ss:[dpmirsv]		; add eax,dword ss:[dpmirsv]
+	NCMP	ncabufer+00		; request + reserve <= L ?
+	jbe	e31fit
+	NLD	ncabufer+00		; no: give back whatever was obtained
+	or	ax,ax
+	jz	e31nog
+	NLD	ncabufer+04
+	NSTW	ncavbx
+	NLD	ncabufer+00
+	NSTW	ncavcx
+	MEMDEV	02h			; vrelease
+e31nog:
+	db	66h
+	jmp	e31fail
+e31fit:
+	NLD	ncabufer+00		; release the tail beyond the request
+	NSUB	ncabufer+12
+	jz	e31ntail
+	NSTW	ncavcx
+	NLD	ncabufer+04
+	NADD	ncabufer+12
+	NSTW	ncavbx
+	MEMDEV	02h
+e31ntail:
+	NLD	ncauregs+12		; 0503h grow?
+	EAXI	0a9h,0,8000h		; test eax,80000000h
+	jz	e31out
+
+; 0503h grow: copy the old block's pages across, then free it
+
+	mov	ax,ds			; es = ds = absolute zero, flat
+	mov	es,ax
+	NLD	ncabufer+08
+	shr	ax,16			; shr eax,16: old start
+	EAXI	05h,110h,0
+	shl	ax,12
+	mov	si,ax			; mov esi,eax
+	NLD	ncabufer+04
+	EAXI	05h,110h,0
+	shl	ax,12
+	mov	di,ax			; mov edi,eax
+	NLD	ncabufer+08
+	EAXI	25h,0ffffh,0		; old pages
+	shl	ax,10			; dwords
+	mov	cx,ax			; mov ecx,eax
+	cld
+	rep	movsw			; rep movsd
+	NLD	ncabufer+08
+	NSTW	ncavcx			; old pages
+	shr	ax,16
+	NSTW	ncavbx			; old start
+	MEMDEV	02h
+
+; results: bx:cx linear address, si:di handle, ax as it was, CF clear
+
+e31out:
+	NLD	ncauregs+00		; which function brought us here?
+	EAXI	25h,0ffffh,0
+	db	3dh			; cmp eax,0501h
+	dw	0501h,0
+	jne	e31o3
+
+; 0501h: record the new block for this task. Table full: give the
+; block back and fail rather than hand out untracked memory.
+
+	db	66h
+	call	e31tid
+	db	66h
+	call	e31new
+	jnc	e31o1ok
+	NLD	ncabufer+04
+	NSTW	ncavbx
+	NLD	ncabufer+12
+	NSTW	ncavcx
+	MEMDEV	02h
+	db	66h
+	jmp	e31fail
+e31o1ok:
+	db	67h
+	mov	byte ptr ss:[si+dblktab],1
+	db	67h
+	mov	byte ptr ss:[si+dblktab+1],dl
+	jmp	short e31o3n
+
+; 0503h: the entry recorded for the old handle takes the new one
+
+e31o3:
+	NLD	ncabufer+08		; old handle
+	db	66h
+	call	e31find
+	jc	e31outc 		; cannot happen: checked on entry
+e31o3n:
+	NLD	ncabufer+04
+	shl	ax,16			; shl eax,16
+	db	0bh,01000011b		; or eax,[ebx+ncabufer+12]
+	db	offset nca:ncabufer+12
+	db	67h
+	mov	word ptr ss:[si+dblktab+4],ax	; mov dword, handle
+e31outc:
+	NLD	ncabufer+04
+	EAXI	05h,110h,0
+	shl	ax,12
+	NSTW	ncavcx
+	shr	ax,16
+	NSTW	ncavbx
+	NLD	ncabufer+12
+	NSTW	ncavsi
+	NLD	ncabufer+04
+	NSTW	ncavdi
+	NLD	ncauregs+00
+	NST	ncavax
+	db	66h,83h,01100011b	; and [ebx+ncavflag],0fffeh
+	db	offset nca:ncavflag
+	db	0feh
+	db	66h
+	jmp	einback
+
+e31fail:				; registers back as they came, CF set
+	NLD	ncauregs+00
+	NST	ncavax
+	NLD	ncauregs+04
+	NST	ncavbx
+	NLD	ncauregs+08
+	NST	ncavcx
+	db	80h,01001011b		; or [ebx+ncavflag],01h
+	db	offset nca:ncavflag
+	db	01h
+	db	66h
+	jmp	einback
+
+;---- 0502h free memory block: si = pages, di = start bank
+
+e310502:
+	xor	ax,ax
+	NLDW	ncavsi
+	or	ax,ax
+	jnz	e02ok
+	db	66h
+	jmp	e31fail
+e02ok:
+	xor	ax,ax
+	NLDW	ncavdi
+	shl	ax,16
+	NLDW	ncavsi			; eax = handle
+	db	66h
+	call	e31find			; this task's block?
+	jnc	e02own
+	db	66h
+	jmp	e31fail
+e02own:
+	db	67h
+	mov	byte ptr ss:[si+dblktab],0
+	NLDW	ncavsi
+	NSTW	ncavcx
+	NLDW	ncavdi
+	NSTW	ncavbx
+	MEMDEV	02h
+	NLD	ncauregs+00
+	NST	ncavax
+	NLD	ncauregs+04
+	NST	ncavbx
+	NLD	ncauregs+08
+	NST	ncavcx
+	db	66h,83h,01100011b	; CF clear
+	db	offset nca:ncavflag
+	db	0feh
+	db	66h
+	jmp	einback
+
+;---- 0503h resize memory block: bx:cx new size, si:di handle
+
+e310503:
+	db	66h
+	call	e31pages
+	or	ax,ax
+	jnz	e03ok1
+	db	66h
+	jmp	e31fail
+e03ok1:
+	NST	ncauregs+12		; new pages
+	xor	ax,ax
+	NLDW	ncavdi
+	shl	ax,16
+	NLDW	ncavsi			; eax = start<<16 | pages
+	NST	ncabufer+08
+	db	66h
+	call	e31find			; this task's block? (eax kept)
+	jnc	e03own
+	db	66h
+	jmp	e31fail
+e03own:
+	EAXI	25h,0ffffh,0
+	or	ax,ax
+	jnz	e03ok2
+	db	66h
+	jmp	e31fail
+e03ok2:
+	NST	ncabufer+00		; old pages
+	NLD	ncauregs+12
+	NCMP	ncabufer+00
+	ja	e03grow
+
+; shrink (or same size): keep the start, release the tail in place
+
+	NLD	ncabufer+00
+	NSUB	ncauregs+12
+	jz	e03same
+	NSTW	ncavcx
+	NLD	ncabufer+08
+	shr	ax,16
+	NADD	ncauregs+12
+	NSTW	ncavbx
+	MEMDEV	02h
+e03same:
+	NLD	ncabufer+08
+	shr	ax,16
+	NST	ncabufer+04		; start unchanged
+	NLD	ncauregs+12
+	NST	ncabufer+12
+	db	66h
+	jmp	e31out
+
+e03grow:
+	NLD	ncauregs+12
+	EAXI	0dh,0,8000h		; or eax,80000000h: grow mode
+	NST	ncauregs+12
+	db	66h
+	jmp	e31alc
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0000h/0001h/0006h/0007h/0008h - descriptors
+;--------------------------------------------------------------------
+;
+; There is no LDT: client descriptors are gdtspace slots, tagged
+; 80h|taskid in dtitable like those 8eh/86h/48h make, so freeclsel
+; releases them at the client's 4Ch. The tag also gives ownership:
+; 0001h/0006h/0007h/0008h refuse any selector not tagged for the
+; calling task, so a client cannot rewrite the host's or another
+; task's descriptors.
+;
+; No dovmint here, so near subroutines (66h call / 66h ret) are safe.
+; dh holds the caller's tag throughout.
+;
+e31desc:
+	db	66h
+	call	addrnca 		; esi -> tcb, ebx -> nca
+	db	8ah,01110110b		; mov dh,[esi+tcbid]
+	db	tcbid
+	or	dh,80h			; the client-descriptor tag
+	NLDW	ncavax
+	or	ax,ax
+	jz	e3100
+	db	66h
+	cmp	ax,0001h
+	jne	e31dn1
+	db	66h
+	jmp	e3101
+e31dn1:
+	db	66h
+	cmp	ax,0006h
+	jne	e31dn6
+	db	66h
+	jmp	e3106
+e31dn6:
+	db	66h
+	cmp	ax,0007h
+	jne	e31dn7
+	db	66h
+	jmp	e3107
+e31dn7:
+	db	66h
+	cmp	ax,0008h
+	jne	e31dbad
+	db	66h
+	jmp	e3108
+e31dbad:
+	db	66h
+	jmp	e31bad
+
+;---- 0000h allocate one descriptor: data, present, dpl 3, base 0, limit 0
+
+e3100:
+	NLDW	ncavcx
+	db	66h
+	cmp	ax,1			; only CX=1 for now
+	jne	e31dbad
+	xor	si,si			; xor esi,esi
+e3100lp:
+	db	67h
+	cmp	ss:[si+dtitable],0ffh	; free slot?
+	je	e3100got
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e3100lp
+	jmp	short e31dbad
+e3100got:
+	db	67h
+	mov	ss:[si+dtitable],dh	; claim it for this task
+	mov	di,si			; mov edi,esi
+	shl	di,3			; shl edi,3
+	db	66h
+	add	di,gdtspace-gdt
+	db	66h,67h
+	mov	word ptr ss:[di+gdt],0		; limit 0-15
+	db	66h,67h
+	mov	word ptr ss:[di+gdt+2],0	; base 0-15
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],0	; base 16-23
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],0f2h	; p=1,dpl=3,s=1,data r/w
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],0	; g=0,d=0, limit 16-19 = 0
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],0	; base 24-31
+	mov	ax,di
+	or	al,3			; rpl 3
+	NSTW	ncavax
+	db	66h
+	jmp	e31dok
+
+;---- common: bx = one of this task's selectors?  di = its gdt offset
+;     out: CF clear ok, CF set not a selector this task owns
+
+e31sel:
+	xor	ax,ax
+	NLDW	ncavbx
+	EAXI	25h,0fff8h,0		; and eax,0fff8h: drop rpl/ti
+	db	66h
+	cmp	ax,gdtspace-gdt
+	jb	e31selx
+	db	66h
+	cmp	ax,gdtspace-gdt+8*dtilen
+	jae	e31selx
+	mov	di,ax			; mov edi,eax
+	mov	si,ax			; mov esi,eax
+	db	66h
+	sub	si,gdtspace-gdt
+	shr	si,3			; dtitable index
+	db	67h
+	cmp	ss:[si+dtitable],dh	; owned by this task?
+	jne	e31selx
+	clc
+	db	66h
+	ret
+e31selx:
+	stc
+	db	66h
+	ret
+
+;---- 0001h free descriptor
+
+e3101:
+	db	66h
+	call	e31sel
+	jnc	e31ok1
+	db	66h
+	jmp	e31bad
+e31ok1:
+	db	67h
+	mov	ss:[si+dtitable],0ffh
+	db	66h
+	jmp	e31dok
+
+;---- 0006h get base: cx:dx
+
+e3106:
+	db	66h
+	call	e31sel
+	jnc	e31ok2
+	db	66h
+	jmp	e31bad
+e31ok2:
+	db	66h,67h
+	mov	ax,ss:[di+gdt+2]	; base 0-15
+	NSTW	ncavdx
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+4]	; base 16-23
+	db	67h
+	mov	ah,byte ptr ss:[di+gdt+7]	; base 24-31
+	NSTW	ncavcx
+	db	66h
+	jmp	e31dok
+
+;---- 0007h set base from cx:dx
+
+e3107:
+	db	66h
+	call	e31sel
+	jnc	e31ok3
+	db	66h
+	jmp	e31bad
+e31ok3:
+	NLDW	ncavdx
+	db	66h,67h
+	mov	ss:[di+gdt+2],ax	; base 0-15
+	NLDW	ncavcx
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],al	; base 16-23
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],ah	; base 24-31
+	db	66h
+	jmp	e31dok
+
+;---- 0008h set limit from cx:dx. Above 1 MB the low 12 bits must be
+;     all ones and the limit goes page-granular (G=1).
+
+e3108:
+	db	66h
+	call	e31sel
+	jnc	e31ok4
+	db	66h
+	jmp	e31bad
+e31ok4:
+	xor	ax,ax
+	NLDW	ncavcx
+	shl	ax,16
+	NLDW	ncavdx			; eax = limit
+	mov	dl,0			; G=0
+	EAXI	0a9h,0,0fff0h		; test eax,0fff00000h
+	jz	e3108set
+	mov	cx,ax			; mov ecx,eax
+	db	81h,0e1h		; and ecx,0fffh
+	dw	0fffh,0
+	db	81h,0f9h		; cmp ecx,0fffh
+	dw	0fffh,0
+	je	e31ok5
+	db	66h
+	jmp	e31bad
+e31ok5:
+	shr	ax,12			; shr eax,12
+	mov	dl,80h			; G=1
+e3108set:
+	db	66h,67h
+	mov	ss:[di+gdt],ax		; limit 0-15
+	shr	ax,16			; al = limit 16-19
+	and	al,0fh
+	or	al,dl
+	db	67h
+	mov	ah,byte ptr ss:[di+gdt+6]
+	and	ah,70h			; keep D/B, reserved, AVL
+	or	al,ah
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],al
+e31dok:
+	db	66h,83h,01100011b	; and [ebx+ncavflag],0fffeh: CF clear
+	db	offset nca:ncavflag
+	db	0feh
+	db	66h
+	jmp	einback
+
 einfun4c:
 	db	66h
-	call	freeclsel		; preserves ebx (nca address)
+	call	freeclsel		; descriptors; preserves ebx (nca)
+
+; and this task's DPMI memory blocks (UPDATE 43). Inline, not a
+; subroutine: the memory device call goes through dovmint. Loop state
+; lives in ncauregs; the client's ax (4Ch) is put back before the
+; termination is reflected.
+
+	NLD	ncavax
+	NST	ncauregs+08		; client ax
+	db	66h
+	call	e31tid			; dl = task id
+	xor	ax,ax
+	mov	al,dl
+	NST	ncauregs+00
+	xor	ax,ax
+	NST	ncauregs+04		; entry offset
+e4cblk:
+	NLD	ncauregs+04
+	db	66h
+	cmp	ax,DBLKN*8
+	jae	e4cdone
+	mov	si,ax			; mov esi,eax
+	db	67h
+	cmp	byte ptr ss:[si+dblktab],1
+	jne	e4cnext
+	db	67h
+	mov	al,byte ptr ss:[si+dblktab+1]
+	db	3ah,01000011b		; cmp al,[ebx+ncauregs+00]
+	db	offset nca:ncauregs+00
+	jne	e4cnext
+	db	67h
+	mov	byte ptr ss:[si+dblktab],0	; entry free
+	db	67h
+	mov	ax,word ptr ss:[si+dblktab+4]	; mov eax,dword: handle
+	NSTW	ncavcx			; pages
+	shr	ax,16
+	NSTW	ncavbx			; start bank
+	MEMDEV	02h			; vrelease
+e4cnext:
+	NLD	ncauregs+04
+	db	83h,11000000b,08h	; add eax,8 (MASM's 05 0008 would take
+					;  an imm32 here: UPDATE 43)
+	NST	ncauregs+04
+	jmp	short e4cblk
+e4cdone:
+	NLD	ncauregs+08
+	NST	ncavax			; 4Ch again
 	db	66h
 	jmp	einstand
 
