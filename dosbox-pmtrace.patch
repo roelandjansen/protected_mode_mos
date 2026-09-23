@@ -1,0 +1,282 @@
+diff --git a/src/cpu/core_normal.cpp b/src/cpu/core_normal.cpp
+index 0f93734..eb6cd3a 100644
+--- a/src/cpu/core_normal.cpp
++++ b/src/cpu/core_normal.cpp
+@@ -144,6 +144,7 @@ static inline uint32_t Fetchd() {
+ #include "instructions.h"
+ #include "core_normal/support.h"
+ #include "core_normal/string.h"
++void pmt_step(); void pmt_hook(); // pmtrace (private rig)
+ 
+ 
+ #define EALookupTable (core.ea_table)
+@@ -161,6 +162,8 @@ Bits CPU_Core_Normal_Run() noexcept
+ 		core.base_val_ds=ds;
+ #if C_DEBUG
+ #if C_HEAVY_DEBUG
++		pmt_step();
++		pmt_hook();
+ 		if (DEBUG_HeavyIsBreakpoint()) {
+ 			FillFlags();
+ 			return debugCallback;
+diff --git a/src/cpu/cpu.cpp b/src/cpu/cpu.cpp
+index 8e6451e..9a3a93d 100644
+--- a/src/cpu/cpu.cpp
++++ b/src/cpu/cpu.cpp
+@@ -733,6 +733,240 @@ void CPU_DebugException(uint32_t triggers,Bitu oldeip) {
+ 	CPU_Interrupt(EXCEPTION_DB,CPU_INT_EXCEPTION,oldeip);
+ }
+ 
++
++// ---------------------------------------------------------------------
++// pmtrace: PC-MOS/386 troubleshooting tracer (private rig, not upstream)
++// PMTRACE=<file> enables. Every v-86 software INT 6Fh (re)opens a window
++// of PMTRACE_WIN events (default 3000) logging all interrupts,
++// exceptions and IRETs. Stack peeks use a read-only page walk over
++// physical memory: no guest side effects.
++// ---------------------------------------------------------------------
++#include <cstdio>
++#include <cstdlib>
++
++static FILE *pmt_file = nullptr;
++static bool pmt_init_done = false;
++static long pmt_window = 0;
++static long pmt_win_size = 3000;
++static unsigned long pmt_seq = 0;
++static unsigned long pmt_v6f = 0;
++
++static void pmt_init()
++{
++	pmt_init_done = true;
++	const char *path = getenv("PMTRACE");
++	if (!path || !*path)
++		return;
++	pmt_file = fopen(path, "w");
++	const char *w = getenv("PMTRACE_WIN");
++	if (w && *w)
++		pmt_win_size = strtol(w, nullptr, 0);
++}
++
++static bool pmt_lin2phys(uint32_t lin, uint32_t &phys)
++{
++	uint32_t limit = MEM_TotalPages() * 4096u;
++	if (!(cpu.cr0 & CR0_PAGING)) {
++		phys = lin;
++	} else {
++		uint32_t dir = (uint32_t)PAGING_GetDirBase() & 0xfffff000u;
++		if (dir + 4096u > limit)
++			return false;
++		uint32_t pde = phys_readd(dir + ((lin >> 22) * 4));
++		if (!(pde & 1))
++			return false;
++		uint32_t tbl = pde & 0xfffff000u;
++		if (tbl + 4096u > limit)
++			return false;
++		uint32_t pte = phys_readd(tbl + (((lin >> 12) & 0x3ff) * 4));
++		if (!(pte & 1))
++			return false;
++		phys = (pte & 0xfffff000u) | (lin & 0xfffu);
++	}
++	return phys + 4u <= limit;
++}
++
++static void pmt_peek(uint32_t lin, int n, bool dwords)
++{
++	int sz = dwords ? 4 : 2;
++	for (int i = 0; i < n; i++) {
++		uint32_t p;
++		if (pmt_lin2phys(lin + (uint32_t)(i * sz), p)) {
++			if (dwords)
++				fprintf(pmt_file, " %08x", phys_readd(p));
++			else
++				fprintf(pmt_file, " %04x", phys_readw(p));
++		} else {
++			fprintf(pmt_file, dwords ? " --------" : " ----");
++		}
++	}
++}
++
++static void pmt_regs()
++{
++	fprintf(pmt_file,
++	        " vm=%d cpl=%u cs=%04x ss=%04x:%08x eax=%08x ebx=%08x ecx=%08x edx=%08x ds=%04x es=%04x efl=%08x",
++	        (reg_flags & FLAG_VM) ? 1 : 0, (unsigned)cpu.cpl,
++	        SegValue(cs), SegValue(ss), reg_esp, reg_eax, reg_ebx,
++	        reg_ecx, reg_edx, SegValue(ds), SegValue(es), reg_flags);
++}
++
++
++// pmtrace step mode: PMTRACE_STEPS=n logs the next n v-86 instructions
++// after a v-86 INT 6Fh with AX=7705h; any later v-86 INT 6Fh ends it.
++static long pmt_steps = 0;
++static long pmt_steps_size = -1;
++
++
++// pmtrace peek: PMTRACE_PEEK_OFF/_LEN append LEN bytes read from an
++// arbitrary $386.SYS image offset to every hook line (cs base 0x700),
++// so a table such as dtitable can be watched as the monitor runs.
++// Read-only page-table walk, like the other peeks: no guest effect.
++static long pmt_peek_off = -1;
++static long pmt_peek_len = 0;
++
++static void pmt_peekb(uint32_t lin, int n)
++{
++	for (int i = 0; i < n; i++) {
++		uint32_t p;
++		if (pmt_lin2phys(lin + (uint32_t)i, p))
++			fprintf(pmt_file, " %02x", phys_readb(p));
++		else
++			fprintf(pmt_file, " --");
++	}
++}
++
++// pmtrace hook: log bp and the eicommon frame slots while the monitor
++// executes inside a given code range (PMTRACE_HOOK_LO/HI, offsets within
++// the $386.SYS image; cs base is 0x700). Emulator-side only: the guest
++// image is untouched, so this cannot shift code layout.
++static long pmt_hook_lo = -1;
++static long pmt_hook_hi = -1;
++static long pmt_hook_left = 0;
++
++void pmt_hook()
++{
++	if (!pmt_file || (reg_flags & FLAG_VM) || !cpu.pmode)
++		return;
++	if (pmt_hook_lo < 0) {
++		const char *l = getenv("PMTRACE_HOOK_LO");
++		const char *h = getenv("PMTRACE_HOOK_HI");
++		const char *n = getenv("PMTRACE_HOOK_N");
++		pmt_hook_lo = (l && *l) ? strtol(l, nullptr, 0) : 0;
++		pmt_hook_hi = (h && *h) ? strtol(h, nullptr, 0) : 0;
++		pmt_hook_left = (n && *n) ? strtol(n, nullptr, 0) : 400;
++		const char *po = getenv("PMTRACE_PEEK_OFF");
++		const char *pl = getenv("PMTRACE_PEEK_LEN");
++		pmt_peek_off = (po && *po) ? strtol(po, nullptr, 0) : 0;
++		pmt_peek_len = (pl && *pl) ? strtol(pl, nullptr, 0) : 0;
++		if (pmt_peek_len > 256) pmt_peek_len = 256;
++	}
++	if (pmt_hook_lo == 0 || pmt_hook_left <= 0)
++		return;
++	uint32_t lin = SegPhys(cs) + reg_eip;
++	if (lin < 0x700u + (uint32_t)pmt_hook_lo || lin > 0x700u + (uint32_t)pmt_hook_hi)
++		return;
++	pmt_hook_left--;
++	fprintf(pmt_file, "H %04x:%08x bp=%08x esp=%08x ss=%04x ds=%04x es=%04x fs=%04x gs=%04x eax=%08x ebx=%08x ecx=%08x edx=%08x",
++	        SegValue(cs), reg_eip, reg_ebp, reg_esp, SegValue(ss), SegValue(ds), SegValue(es), SegValue(fs), SegValue(gs),
++	        reg_eax, reg_ebx, reg_ecx, reg_edx);
++	fprintf(pmt_file, " [bp-16]:");
++	pmt_peek(SegPhys(ss) + (reg_ebp & 0xffff) - 16, 1, true);
++	fprintf(pmt_file, " [esp]:");
++	pmt_peek(SegPhys(ss) + (reg_esp & 0xffff), 4, false);
++	if (pmt_peek_off > 0 && pmt_peek_len > 0) {
++		fprintf(pmt_file, " [%lx]:", pmt_peek_off);
++		pmt_peekb(0x700u + (uint32_t)pmt_peek_off, (int)pmt_peek_len);
++	}
++	fprintf(pmt_file, " [bp-12]:");
++	pmt_peek(SegPhys(ss) + (reg_ebp & 0xffff) - 12, 1, true);
++	fprintf(pmt_file, "\n");
++	fflush(pmt_file);
++}
++void pmt_step()
++{
++	if (pmt_steps <= 0 || !pmt_file || !(reg_flags & FLAG_VM))
++		return;
++	pmt_steps--;
++	uint32_t lin = SegPhys(cs) + (reg_eip & 0xffff);
++	fprintf(pmt_file, "S %04x:%04x", SegValue(cs), (unsigned)(reg_eip & 0xffff));
++	for (int i = 0; i < 7; i++) {
++		uint32_t p;
++		if (pmt_lin2phys(lin + i, p))
++			fprintf(pmt_file, " %02x", phys_readb(p));
++		else
++			fprintf(pmt_file, " --");
++	}
++	fprintf(pmt_file, " ax=%04x bx=%04x cx=%04x dx=%04x si=%04x di=%04x bp=%04x sp=%04x ds=%04x es=%04x ss=%04x fl=%04x\n",
++	        reg_ax, reg_bx, reg_cx, reg_dx, reg_si, reg_di, reg_bp, reg_sp,
++	        SegValue(ds), SegValue(es), SegValue(ss), (unsigned)(reg_flags & 0xffff));
++}
++static void pmt_int(Bitu num, Bitu type, Bitu oldeip)
++{
++	if (!pmt_init_done)
++		pmt_init();
++	if (!pmt_file)
++		return;
++	bool vm = (reg_flags & FLAG_VM) != 0;
++	bool arm = cpu.pmode && vm && num == 0x6f && (type & CPU_INT_SOFTWARE);
++	if (cpu.pmode && vm && num == 0x0d && (type & CPU_INT_EXCEPTION)) {
++		uint32_t p;
++		uint32_t lin = SegPhys(cs) + (uint32_t)(oldeip & 0xffff);
++		if (pmt_lin2phys(lin, p) && phys_readw(p) == 0x6fcd)
++			arm = true;
++	}
++	if (arm) {
++		pmt_v6f++;
++		pmt_window = pmt_win_size;
++		if (pmt_steps_size < 0) {
++			const char *s = getenv("PMTRACE_STEPS");
++			pmt_steps_size = (s && *s) ? strtol(s, nullptr, 0) : 0;
++		}
++		if ((reg_eax & 0xffff) == 0x7705 && pmt_steps == 0)
++			pmt_steps = pmt_steps_size;
++		fprintf(pmt_file, "=== V6F#%lu seq=%lu via=%02x", pmt_v6f, pmt_seq, (unsigned)num);
++		pmt_regs();
++		fprintf(pmt_file, " ip=%04x v86stack:", (unsigned)(oldeip & 0xffff));
++		pmt_peek(SegPhys(ss) + (reg_esp & 0xffff), 8, false);
++		fprintf(pmt_file, "\n");
++	}
++	// also arm on the native-mode ah=11h service call (allocate extended
++	// memory), which is where the DPMI install path begins
++	if (cpu.pmode && !vm && num == 0xd4 && (type & CPU_INT_SOFTWARE) &&
++	    ((reg_eax >> 8) & 0xff) == 0x11 && pmt_steps == 0) {
++		if (pmt_steps_size < 0) {
++			const char *s = getenv("PMTRACE_STEPS");
++			pmt_steps_size = (s && *s) ? strtol(s, nullptr, 0) : 0;
++		}
++		pmt_steps = pmt_steps_size;
++		pmt_window = pmt_win_size;
++	}
++
++	if (pmt_window <= 0)
++		return;
++	pmt_window--;
++	fprintf(pmt_file, "%08lu INT  %02x t=%x eip=%08x", pmt_seq++,
++	        (unsigned)num, (unsigned)type, (unsigned)oldeip);
++	pmt_regs();
++	fprintf(pmt_file, "\n");
++	fflush(pmt_file);
++}
++
++static void pmt_iret(bool use32, Bitu oldeip)
++{
++	if (!pmt_file || pmt_window <= 0)
++		return;
++	pmt_window--;
++	fprintf(pmt_file, "%08lu IRET %s eip=%08x", pmt_seq++,
++	        use32 ? "32" : "16", (unsigned)oldeip);
++	pmt_regs();
++	fprintf(pmt_file, " frame:");
++	pmt_peek(SegPhys(ss) + (reg_esp & cpu.stack.mask), 9, use32);
++	fprintf(pmt_file, "\n");
++	fflush(pmt_file);
++}
++// --------------------------- end pmtrace ------------------------------
++
+ void CPU_Exception(Bitu which,Bitu error ) {
+ //	LOG_MSG("Exception %d error %x",which,error);
+ 	cpu.exception.error=error;
+@@ -754,6 +988,7 @@ void CPU_Interrupt(Bitu num,Bitu type,Bitu oldeip) {
+ 	last_interrupt = num;
+ 
+ 	FillFlags();
++	pmt_int(num, type, oldeip);
+ #if C_DEBUG
+ 	switch (num) {
+ 	case 0xcd:
+@@ -971,6 +1206,7 @@ do_interrupt:
+ 
+ 
+ void CPU_IRET(bool use32,Bitu oldeip) {
++	pmt_iret(use32, oldeip);
+ 	if (!cpu.pmode) {					/* RealMode IRET */
+ 		if (use32) {
+ 			reg_eip=CPU_Pop32();

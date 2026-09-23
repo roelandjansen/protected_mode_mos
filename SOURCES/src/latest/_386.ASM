@@ -5469,6 +5469,26 @@ e09is32:
 	mov	cl,64			; no size recorded: stay small
 e09szok:
 	dec	cx			; dec ecx: room for a forced '$'
+
+; cap the count at the client segment's own limit, so a string with no
+; '$' before the limit cannot fault the monitor at ring 0. lsl gives
+; the byte limit (granularity already applied); zf clear means the
+; selector is not readable here, and the buffer size then stands.
+
+	db	0fh,03h,01000011b	; lsl eax,[ebx+ncands]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncands
+	jnz	e09nocap
+	db	29h,11110000b		; sub eax,esi
+	db	40h			; inc eax: bytes left from esi to limit
+	js	e09none			; esi past the limit: copy nothing
+	db	39h,11000001b		; cmp ecx,eax
+	jbe	e09nocap
+	db	89h,11000001b		; mov ecx,eax
+	jmp	short e09nocap
+e09none:
+	xor	cx,cx			; xor ecx,ecx
+e09nocap:
 	mov	di,bx			; mov edi,ebx
 	db	83h,11000111b		; add edi,offset nca:ncabufer
 	;	  11...111		; reg=edi
@@ -5478,12 +5498,15 @@ e09szok:
 	db	offset nca:ncands
 	mov	ds,ax			; client's data selector
 	cld
+	db	0e3h			; jecxz e09cap: nothing may be copied
+	db	e09cap-$-1
 e09loop:
 	lodsb
 	stosb
 	cmp	al,'$'
 	je	e09done
 	loop	e09loop			; ecx in a 32-bit cs
+e09cap:
 	mov	al,'$'			; cap reached: terminate
 	stosb
 e09done:
@@ -7099,7 +7122,7 @@ einative:				; bp,ds,es,cx,bx already pushed
 	cmp	dl,0d4h
 	je	eint38
 	cmp	dl,21h
-	jne	einstand
+	jne	einstd0
 	xor	ax,ax
 	db	8ah,01000011b		; mov al,[ebx+ncavax+1]
 	;	  01...011		; disp=byte,base=ebx
@@ -7107,21 +7130,34 @@ einative:				; bp,ds,es,cx,bx already pushed
 	cmp	al,39h
 	jb	einlt39
 	cmp	al,5ch
-	ja	einstand
+	ja	einstd0
 	sub	al,39h
 	shl	ax,1
 	mov	si,ax
 	db	66h
 	db	67h
 	jmp	cs:[si+eintable]
+
+;
+; einstand is out of short-jump range from the dispatch above
+; since einfun4c/freeclsel were inserted ahead of it.
+;
+einstd0:
+	db	66h
+	jmp	einstand
 einlt39:
+	cmp	al,0ah			; 0a - buffered input
+	jne	e0askip
+	db	66h
+	jmp	einfun0a
+e0askip:
 	cmp	al,09h			; 09 - display string
 	jne	einlt39b
 	db	66h
 	jmp	einfun09
 einlt39b:
 	cmp	al,1ch
-	jne	einstand
+	jne	einstd0
 ;######	db	66h
 	jmp	short einfun1c
 eint38:
@@ -7130,9 +7166,9 @@ eint38:
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavax+1
 	cmp	al,02h
-	jb	einstand
+	jb	einstd0
 	cmp	al,13h
-	ja	einstand
+	ja	einstd0
 	sub	al,02h
 	shl	ax,1
 	mov	si,ax
@@ -7189,11 +7225,229 @@ einfun1c:
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavbx
 ;#####	db	66h
-	jmp	short einback
+	db	66h
+	jmp	einback			; out of short range since einfun0a
 
 
 
 ; execute virtual-mode interrupt handler
+
+	page
+;--------------------------------------------------------------------
+;		4c - terminate: release client descriptors
+;--------------------------------------------------------------------
+;
+; A DPMI client is a program inside the shell's task, so tcbunreg (and
+; with it the driver's Unregister path, which calls int 6fh 778Fh)
+; never runs for it: without this, every client program leaks its
+; tagged 80h|taskid slots. Its own int 21h ah=4Ch is the one point
+; that is guaranteed to be reached, so the release happens here and
+; the call then reflects as an ordinary termination.
+;
+	page
+;--------------------------------------------------------------------
+;		0a - buffered keyboard input
+;--------------------------------------------------------------------
+;
+; ds:(e)dx is a buffer whose first byte is the maximum length; DOS
+; fills in the actual length at byte 1 and the text from byte 2. It is
+; therefore staged in BOTH directions: max+2 bytes out (so DOS sees the
+; size byte), then len+2 bytes back into the client's own buffer.
+;
+; As with einfun09, a 16-bit client may have junk in the high word of
+; edx, so the offset is zero-extended off the D bit of its cs.
+;
+
+; save edx to ncauregs
+
+einfun0a:
+	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncauregs+00
+
+; zero-extend the offset for a 16-bit client, in place
+
+	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncancs
+	db	0a9h			; test eax,00400000h (D bit)
+	dd	00400000h
+	jnz	e0ais32
+	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	0fh,0b7h,11000000b	; movzx eax,ax
+	db	89h,01000011b		; mov [ebx+ncavdx],eax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+e0ais32:
+
+; read the caller's maximum length from byte 0 of its buffer
+
+	mov	ax,ds			; es = absolute zero
+	mov	es,ax
+	db	8bh,01110011b		; mov esi,[ebx+ncavdx]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	8bh,01000011b		; mov eax,[ebx+ncands]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncands
+	mov	ds,ax			; client's data selector
+	cld
+	lodsb				; al = maximum length
+	mov	si,es
+	mov	ds,si			; fix ds back to normal
+	db	0fh,0b6h,11001000b	; movzx ecx,al
+	db	83h,11000001b		; add ecx,2 (size byte + length byte)
+	db	02h
+
+; stage the buffer out and execute the vm handler
+
+	db	66h
+	call	senddsdx
+	db	66h
+	call	dovmint 		; edx contains vector number
+
+; move the reply back into the client's buffer: len+2 bytes
+
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+00] (edx)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncauregs+00
+	db	89h,01000011b		; mov [ebx+ncavdx],eax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	db	89h,11000111b		; mov edi,eax
+	db	8bh,01000011b		; mov eax,[ebx+ncands]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncands
+	mov	es,ax			; es:edi = the client's buffer
+	mov	si,bx
+	db	83h,11000110b		; add esi,offset nca:ncabufer
+	;	  11...110		; reg=esi
+	db	offset nca:ncabufer
+	db	8ah,01000110b		; mov al,[esi+1] (length DOS returned)
+	db	01h
+	db	0fh,0b6h,11001000b	; movzx ecx,al
+	db	83h,11000001b		; add ecx,2
+	db	02h
+	cld
+	rep	movsb
+	db	66h
+	jmp	einback
+
+	page
+;--------------------------------------------------------------------
+;		48 - allocate memory
+;--------------------------------------------------------------------
+;
+; DOS returns a real-mode segment in ax, which a client in protected
+; mode cannot load. The block is therefore handed back as a data
+; selector for the same base, built by makegdte and tagged
+; 80h|taskid like the ones 8eh/86h make, so einfun4c releases it when
+; the client terminates.
+;
+; Table full is reported as DOS reports "insufficient memory":
+; ax=8 with carry set.
+;
+einfun48:
+	db	66h
+	call	dovmint 		; edx contains vector number
+	db	0f6h,01000011b		; test [ebx+ncavflag],01h
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavflag
+	db	01h			; immediate data
+	jnz	e48done 		; carry set: allocation failed
+	db	66h			; 16-bit data
+	db	8bh,01000011b		; mov ax,[ebx+ncavax] (segment)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavax
+	push	ax			; 32-bit cs: pushes eax
+	db	66h
+	call	addrnca 		; esi -> tcb, ebx -> nca
+	db	8ah,01110110b		; mov dh,[esi+tcbid]
+	;	  01...110		; disp=byte,base=esi
+	db	tcbid
+	or	dh,80h			; the client-descriptor tag
+	pop	ax			; segment again
+	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001 data r/w
+	db	66h
+	call	makegdte		; ax = selector, 0 = table full
+	or	ax,ax
+	jz	e48fail
+	db	66h			; 16-bit data
+	db	89h,01000011b		; mov [ebx+ncavax],ax (selector)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavax
+	jmp	short e48done
+e48fail:
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavax],8 (insufficient memory)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavax
+	dw	8			; immediate data
+	db	80h,01001011b		; or [ebx+ncavflag],01h (set carry)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavflag
+	db	01h			; immediate data
+e48done:
+	db	66h
+	jmp	einback
+
+einfun4c:
+	db	66h
+	call	freeclsel		; preserves ebx (nca address)
+	db	66h
+	jmp	einstand
+
+	page
+;--------------------------------------------------------------------
+;	   release the calling task's client descriptors
+;--------------------------------------------------------------------
+;
+; Frees every gdt entry tagged 80h|taskid for the calling task -- the
+; ones 8eh handed a DPMI client. cleardti will not: tagged entries are
+; deliberately exempt from the per-switch sweep so a client keeps its
+; selectors across switches.
+;
+; Shared by int 6fh 778Fh (the driver's Unregister path) and by a
+; client's own int 21h ah=4Ch in einative. Preserves every register it
+; uses, including ebx, which einative holds the nca address in and
+; nca_ptr clobbers.
+;
+freeclsel proc	near
+	push	ax			; 32-bit cs: pushes eax
+	push	dx
+	push	si
+	push	di
+	push	bx
+	db	66h
+	call	addrnca			; esi -> tcb, ebx -> nca
+	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
+	db	tcbid
+	or	dh,80h			; the client-descriptor tag
+	xor	si,si
+fcsloop:
+	db	67h
+	cmp	ss:[dtitable+si],dh	; one of this task's client entries?
+	jne	fcsskip
+	db	67h
+	mov	ss:[dtitable+si],0ffh	; yes, free it
+fcsskip:
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	fcsloop
+	pop	bx
+	pop	di
+	pop	si
+	pop	dx
+	pop	ax
+	db	66h
+	ret
+freeclsel endp
 
 einstand:
 	db	66h
@@ -7275,11 +7529,11 @@ eintable label word
 	dw	offset mmgrp:einstand	; 45
 	dw	offset mmgrp:einstand	; 46
 	dw	offset mmgrp:einfun47	; 47 - get curr dir
-	dw	offset mmgrp:einstand	; 48
+	dw	offset mmgrp:einfun48	; 48 - allocate memory
 	dw	offset mmgrp:einstand	; 49
 	dw	offset mmgrp:einstand	; 4a
 	dw	offset mmgrp:einstand	; 4b
-	dw	offset mmgrp:einstand	; 4c
+	dw	offset mmgrp:einfun4c	; 4c - terminate
 	dw	offset mmgrp:einstand	; 4d
 	dw	offset mmgrp:einfun4e	; 4e - find first
 	dw	offset mmgrp:einfun4f	; 4f - find next
@@ -7726,7 +7980,14 @@ mgd32	proc	near			; same wrapper for makegdte: it also ends
 	ret
 mgd32	endp
 
+fcs32	proc	near			; same wrapper for freeclsel: it also ends
+	db	66h			;  with a 66h-prefixed ret (pops 2)
+	call	freeclsel
+	ret
+fcs32	endp
+
 nca_ptr	dd	offset nca32		; 32-bit indirect target
+fcs_ptr	dd	offset fcs32		; 32-bit indirect target
 mgd_ptr	dd	offset mgd32		; 32-bit indirect target
 					;  plain dd label emits a segment fixup and
 					;  exe2bin then demands a base segment)
@@ -8621,31 +8882,8 @@ assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 ; so a client keeps its selectors across switches.
 ;
 e6f8f:
-	push	eax
-	push	edx
-	push	esi
-	push	edi
-	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
-	db	tcbid
-	or	dh,80h			; the client-descriptor tag
-	xor	si,si
-e6f8floop:
-	db	67h
-	cmp	ss:[dtitable+si],dh	; one of this task's client entries?
-	jne	e6f8fskip
-	db	67h
-	mov	ss:[dtitable+si],0ffh	; yes, free it
-e6f8fskip:
-	inc	si
-	db	66h
-	cmp	si,dtilen
-	jb	e6f8floop
+	call	dword ptr mmgrp:[fcs_ptr]	; use32 -> use16 wrapper
 	and	byte ptr ss:[s0flags],0feh   ; cf clear
-	pop	edi
-	pop	esi
-	pop	edx
-	pop	eax
 	jmp	cgrm7
 
 

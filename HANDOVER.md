@@ -346,3 +346,237 @@ Also this session: `_DPMI.ASM` banner typo "Insterface" -> "Interface"
 the 524-byte `COMMAND.COM` stub the kernel execs as `A:\COMMAND.COM`
 (`scbshell`); without it boot ends "Command processor cannot be found".
 Take it from `IMAGES/v501/1_main.img`.
+
+## UPDATE 19 (2026-09-22) — client descriptors released at int 21h ah=4Ch
+
+A DPMI client's tagged descriptors are now released at its own
+`int 21h ah=4Ch`, instead of never (`tcbunreg`, and with it the
+driver's Unregister path to `778Fh`, does not run for a program inside
+the shell's task). `$386.SYS` 21344 -> 21376 bytes.
+
+Change (`_386.ASM` only):
+
+- the `8fh` loop is factored into `freeclsel`, a near proc in the
+  use16 region: `addrnca` for the tcb, sweeps `dtitable` for
+  `80h|taskid`, preserves every register including `ebx` (einative's
+  nca pointer, which `addrnca` clobbers)
+- `e6f8f` (778Fh) now calls it, so both paths share one implementation
+- new `einfun4c` calls it and falls through to `einstand`; `eintable`
+  entry `4c` points there instead of `einstand`
+- `e6f8f` is use32 and `freeclsel` use16, which MASM cannot call
+  directly, so it goes through `fcs_ptr`/`fcs32`, exactly as
+  `nca_ptr`/`nca32` already do
+- inserting the block put `einstand` out of short-jump range from two
+  dispatch sites (`A2053`); they now jump to a local `einstd0`
+  trampoline rather than move existing code
+- in this use16 region `push eax` is an A4057 warning; a plain
+  `push ax` is what pushes 32 bits in a 32-bit cs. Confirmed in the
+  trace: esp drops 4 per push
+
+Measured with `PMTRACE_HOOK_LO/_HI` over `freeclsel` (image offsets
+`3202h`-`322Dh`): entered once per client `4Ch`, loop runs exactly 30
+times (`dtilen`), the store at `321Bh` executes once (one descriptor
+freed, the client's `8eh` code selector), `ebx` returns unchanged
+(`00018bb0`), stack balanced. Ten client runs in one boot, `VER` and
+`DIR` after, and the no-DPMI boot: all unchanged.
+
+Note for future tests: repeatedly running one client does NOT
+demonstrate the leak or the fix. `makegdte` reuses a descriptor whose
+base, access byte and task id match, and a program reloaded at the
+same address asks for the same base. A control build without this
+change also survived 35 runs. Distinguishing needs clients at
+different load addresses, or reading `dtitable` (image offset `1789h`)
+directly.
+
+## UPDATE 20 (2026-09-22) — dtitable is observable; UPDATE 19 confirmed
+
+The tracer can now peek an arbitrary table while the monitor runs, and
+the `4Ch` release of UPDATE 19 is confirmed against a control build.
+
+Tracer: `PMTRACE_PEEK_OFF` / `PMTRACE_PEEK_LEN` append up to 256 bytes
+from a `$386.SYS` image offset to every hook line (cs base `0700h`).
+Read-only page-table walk, emulator-side only, so nothing is added to
+the guest image and code layout cannot shift. `dosbox-pmtrace.patch`
+updated; rebuild needs `--wrap-mode=nodownload` and
+`-Duse_fluidsynth=false -Duse_mt32emu=false -Duse_opengl=false
+-Duse_alsa=false -Duse_zlib_ng=false -Dunit_tests=disabled`, since
+WrapDB is unreachable from the build sandbox.
+
+Measured, `dtitable` (offset `1789h`, 30 bytes) across one client's
+termination, entry byte 6 being its `8eh` code selector:
+
+| build | on entry | on exit |
+| --- | --- | --- |
+| UPDATE 19 (hook `einfun4c`/`freeclsel`, `31FA`-`3230`) | `80` | `ff` |
+| control, UPDATE 18 (hook `einstand`, `31F6`-`31FA`) | `80` | `80` |
+
+`80h` is `80h|taskid` for task 0. So the control leaks the descriptor
+at termination and the current tree frees it. This is the discriminating
+test the 35-run experiment could not provide.
+
+## UPDATE 21 (2026-09-22) — 09h limit guard (inactive in this config)
+
+`einfun09` now caps the copy at the client segment's own limit: `lsl`
+on `ncands`, `sub eax,esi`, `inc eax`, cap `ecx`, `xor ecx,ecx` when
+the offset is already past the limit, and a `jecxz` around the copy
+loop so a zero count cannot wrap `ecx`. `$386.SYS` 21376 -> 21392
+bytes, 0 warnings, 0 severe. Encodings verified in the listing
+(`jecxz` rel8 `08` lands on `e09cap`).
+
+Measured with a client printing from `dx=0fff0h` with no `$` ahead:
+`lsl` returns `0fffffffh` (256 MB) for the client's data selector and
+`ncabufsz-1` is `0ffffh`, so available (`0ffffce7h`) exceeds the count
+and THE CAP NEVER ENGAGES here. Both the capped and the uncapped build
+print the same garbage and survive: that is DOS behaviour for an
+unterminated string, not a monitor fault.
+
+So the ring-0 fault this guards against needs a small-limit selector,
+which the host cannot currently give a client (DPMI 0008h set-limit is
+not implemented). The guard is correct and cheap, but it is untested
+in the firing direction. Exercising it needs either 0008h, or a
+hand-built descriptor with a short limit handed to a test client.
+
+## UPDATE 22 (2026-09-22) — PM int 21h ah=0Ah translated (both directions)
+
+A DPMI client can now read a line in protected mode. Measured: the
+client prints, reads with `0Ah`, and echoes what was typed back through
+`09h` ("you typed: HELLO PM"). A control build without `einfun0a`
+returns an empty buffer on the same floppy and test client, and the
+typed line never reaches the client. `$386.SYS` 21392 -> 21504 bytes,
+0 warnings, 0 severe.
+
+`0Ah` is the first handler that stages in BOTH directions, which is the
+shape the remaining pointer functions need:
+
+- out: byte 0 of the client's buffer is its maximum length, so `max+2`
+  bytes go through `senddsdx` (DOS must see the size byte)
+- call `dovmint`
+- back: DOS writes the actual length at byte 1, so `len+2` bytes are
+  copied from `ncabufer` to the client's `es:edi`, following the
+  `einfun3f` copy-back pattern
+- the offset is zero-extended in place off the cs D bit, as in
+  `einfun09`; note `senddsdx` itself does NOT do this, so it is done
+  before the call (`einfun39` has the same latent gap, unaddressed)
+- `einlt39` routes `al=0Ah`
+
+Layout note: inserting the handler put `einstand` out of short-jump
+range from three more dispatch sites and `einback` out of range from
+`einfun1c` (`A2053` x4). The three now use the `einstd0` trampoline
+from UPDATE 19; `einfun1c` uses a `66h`-prefixed near `jmp`, which is
+what its commented-out `;##### db 66h` anticipated. Expect this every
+time something is inserted ahead of `einstand`.
+
+Regression: two client runs in one boot with input each time, then
+`VER` and `DIR`. `DPMITST.ASM` was extended only in the scratch tree
+for these tests and has been restored.
+
+Next in this milestone: `1Ah`/`2Fh` (DTA set/get, where the pointer
+DOS keeps must be a v86 address while the client holds a selector),
+then the FCB group.
+
+## UPDATE 23 (2026-09-22) — ABI finding; 48h attempted, reverted
+
+Two results, no net source change: the tree is still UPDATE 22
+(`$386.SYS` 21504).
+
+**1Ah/2Fh are the wrong next step.** `einfun4e`/`einfun4f` do not use
+whatever DTA the client set: the native-mode ABI passes the client's
+DTA explicitly in `es:bx`, and TSL's handler issues its OWN `1Ah`
+pointing DOS at `ncabufer`, runs the find, then copies 44 bytes back to
+`es:bx`. So a DOS-semantics `1Ah` would be silently overridden on every
+find, and `2Fh` would hand back a v86 address a client cannot load.
+Making those honest means giving the DTA a selector, which is a design
+change, not a handler.
+
+**48h (allocate) is the real client-facing gap** and was attempted:
+DOS returns a real-mode segment in `ax` that a client cannot load, so
+the handler rebuilds it as a tagged data selector via `makegdte`
+(tag `80h|taskid`, so `einfun4c` frees it). Work in progress kept at
+`/tmp/einfun48-wip.txt`; reverted from the tree because it crashes.
+
+Measured, hooking `3277h`-`32B0h`: the handler is CORRECT as far as it
+goes. `dovmint` returns segment `18B1h`, the push/pop around `addrnca`
+balances (`esp` `0fdc`->`0fd8`->`0fdc`), `makegdte` returns selector
+`0073h`, it is stored in `ncavax`, and control reaches `e48done`. The
+abort — dosbox `IRET:CS selector beyond limits` — happens AFTER, on the
+return path to the client.
+
+So the fault is not in building the descriptor but in what the
+GDT write or the register state does to the return. Next step: rerun
+with the test client NOT writing through the returned selector (print
+only) to separate "descriptor is bad" from "returning after a GDT
+write is bad"; and peek `dtitable` (`1789h`) plus the client's own cs
+descriptor across the call, since `makegdte` picks the first
+`0ffh` slot and its interaction with a live client's descriptors has
+never been exercised mid-run.
+
+Also note `makegdte` clobbers `ecx`, and `bp` is 0 on return from
+`dovmint`; neither is documented anywhere else.
+
+## UPDATE 23b (2026-09-23) — 48h diagnosed, not yet fixed
+
+Tree unchanged (UPDATE 22, `$386.SYS` 21504). `einfun48` work in
+progress still at `/tmp/einfun48-wip.txt`; it applies cleanly to the
+scratch tree and builds (21552, 0 warnings, 0 severe).
+
+Isolation, measured:
+
+- client allocates and only PRINTS the returned value: no crash
+- client loads it into `es`: dosbox `ABORT: IRET:CS selector beyond
+  limits`
+
+The event log shows the real failure: the client takes `INT 0d` (#GP)
+at `cs=008b cpl=3` when it loads the value, and the monitor's own
+handler then takes `INT 0e` (`ebx=fa008c7e`, a PTE-shaped value) while
+servicing it. The dosbox abort is the aftermath, not the fault.
+
+The value the client received was `0973h`. That cannot be a selector
+from `makegdte`: `gdtspace-gdt` is `58h` and `dtilen` is 30, so its
+selectors run about `58h`-`143h`. Tracing `makegdte` (`35B3h`-`3626h`)
+shows it returning `edi=60h`, i.e. selector `0063h`. `0973h` is a
+plausible real-mode SEGMENT.
+
+Hypothesis, to check first next session: the client is getting DOS's
+raw segment, i.e. the selector written to `ncavax` never reaches the
+client's `ax`. `ncavax` sits inside `ncairegs` (the v86 set,
+`ncavflag`..`ncavbp`), and the native-mode return value may come from
+the `p0stack`/`ncap0stk` side instead. Read `einback`'s write-back and
+find which slot feeds the client's `ax`, then store the selector there.
+Also worth confirming: in the traced `makegdte` call `edx` was
+`000000f2` (dh=0, so tag 0, not `80h|taskid`), but that trace window
+may belong to a later `8eh` call rather than `einfun48` — verify before
+concluding the tag is wrong too.
+
+## UPDATE 24 (2026-09-23) — 48h returns a selector; the crash was the test
+
+`einfun48` is in the tree. `$386.SYS` 21504 -> 21552, 0 warnings, 0
+severe.
+
+UPDATE 23b's crash was NOT a driver defect: the test client called
+`puts` between `int 21h` and `mov es,ax`, and `puts` uses `ah=9`, so it
+clobbered `ax`. The client then loaded leftover junk (`0973h`, which
+is why it looked like a raw segment) as a selector and took #GP. With
+`ax` preserved across `puts` the same driver build works. The
+hypothesis in UPDATE 23b about `ncavax` not reaching the client was
+therefore wrong: `einback` copies `ncairegs+4` (di,si,dx,ax,bx,cx,es,
+ds,bp) to `p0stack`, so `ncavax` IS the client's `ax`.
+
+What 48h does: reflect to DOS, and on success rebuild the returned
+real-mode segment as a data selector via `makegdte` (`dl=11110010b`,
+tag `dh=80h|taskid` from `addrnca`), storing it in `ncavax`. Table full
+is reported the way DOS reports insufficient memory: `ax=8`, carry set.
+
+Measured: client allocates 4 paragraphs, gets selector `0073h`, writes
+`1234h` through it and reads it back. `dtitable` (peek at `1789h`)
+across the client's `4Ch` shows TWO tagged entries, indexes 3 and 6 --
+its code selector and this allocation -- both `80h` on entry to
+`freeclsel` and both `0ffh` on exit, so UPDATE 19 already frees what
+48h hands out. The tag is `80h`, confirming the `edx=000000f2` seen in
+UPDATE 23b belonged to a different `makegdte` call, as suspected.
+
+Regression: three client runs in one boot, then `VER` and `DIR`.
+
+Still open: 49h (free) takes a segment in `es`, so a client passing its
+selector needs the reverse conversion (read the descriptor base, shift
+right 4); 4Ah (resize) likewise. Those two should come next, since 48h
+without 49h leaks blocks until termination.
