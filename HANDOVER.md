@@ -580,3 +580,75 @@ Still open: 49h (free) takes a segment in `es`, so a client passing its
 selector needs the reverse conversion (read the descriptor base, shift
 right 4); 4Ah (resize) likewise. Those two should come next, since 48h
 without 49h leaks blocks until termination.
+
+## UPDATE 25 (2026-09-23) — 49h attempted; PM path refused, reverted
+
+Tree is UPDATE 24 (`$386.SYS` 21552, 48h in, 49h out). `einfun49` work
+in progress at `/tmp/einfun49-wip.txt`; applies cleanly, builds to
+21648, 0 warnings, 0 severe.
+
+What it does: client holds a SELECTOR in `es` where DOS wants a
+segment, so the descriptor base is read from the gdt (`gdt+2` bits
+0-15, `gdt+4` bits 16-23), shifted down 4 into `ncaves`, reflected,
+and on success the `dtitable` slot is released (same idiom the int 38h
+deallocator uses). A selector outside `gdtspace` is passed through
+untouched, so a client holding a genuine real-mode segment still works.
+
+Measured, hooking `32C4h`-`330Ch`: the conversion is CORRECT. Base
+`00008B10` -> segment `000018B1`, written to `ncaves`, `dovmint`
+entered. DOS then returns with CARRY SET and `ax` UNCHANGED (client
+saw `4933h`, i.e. its own `ah=49h` with stale `al`). An error return
+would have put 7 or 9 in `ax`, so this looks like the request not
+reaching the `49h` handler at all rather than a rejection.
+
+Baseline, same client, same block, BEFORE the mode switch: real-mode
+`48h` returns `18B1h` and `49h` succeeds. So MOS's 49h works and the
+segment is right; only the protected-mode path fails.
+
+Next step: `PMTRACE_STEPS` after the `int 6fh` to watch the reflected
+v-86 instructions and see what the kernel does with `ah=49h`,
+i.e. whether `ncaves` survives into the v-86 `es` or something in
+`dovmint`/`einative` overwrites it from `ncanes` on the way out.
+
+Test-harness note, third time this has cost a cycle: `puts` clobbers
+`ax`; and code inserted just above `do_switch:` never runs, because
+`have_host` JUMPS there. Check reachability and register clobbering in
+the test client before suspecting the driver.
+
+## UPDATE 25b (2026-09-23) — 49h: carry is the open question
+
+Still reverted; tree is UPDATE 24 (21552). Work in progress unchanged
+at `/tmp/einfun49-wip.txt`.
+
+Ruled out this session: `dovmint` DOES load the v-86 `es` from
+`ncaves` (read it at `dovmint`+~90), so the converted segment reaches
+DOS. The conversion itself was already verified correct.
+
+New measurement, client ignoring carry and doing alloc/free/alloc:
+
+	1st sel: 0073   49h flags: 3297   2nd sel: 007B
+
+`3297h` has bit 0 set, so carry really is set on return. Because the
+handler tests `ncavflag` and skips the slot release when carry is set,
+`0073h` stayed marked in use and the second allocation took the next
+slot -- that part is the handler behaving as written, not a second
+bug.
+
+What is NOT yet known: whether DOS actually freed the block. The two
+selectors differ, but that follows from the skipped slot release; it
+says nothing about the underlying memory. Decide it by comparing the
+two descriptors' BASES in the gdt (entry for selector `0073h` is at
+image offset `17C0h+70h` = `1830h`, `007Bh` at `1838h`); equal bases
+mean DOS freed and handed the same block back. An attempt this session
+mis-set the hook offset and peeked at an unrelated moment, so the
+question is open.
+
+Leading hypothesis for the carry: `ncavflag` may be stale rather than
+seeded from the client's flags on entry to `einative`, in which case
+`dovmint` ORs a leftover carry into the v-86 flags and DOS returns it
+untouched. That also fits `ax` being unchanged. Check whether anything
+on the `einative` entry path writes `ncavflag` from the client's
+`p0stack` flags; if not, seed it there (or clear carry before
+reflecting) and retest. Note a later run also ended with MOS printing
+"Internal error #0 Unexpected error during function #00", which may be
+the same stale-flags issue surfacing elsewhere.
