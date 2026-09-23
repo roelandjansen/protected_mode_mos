@@ -725,3 +725,234 @@ v-86 instructions after termination are visible, and identify which
 function #00 MOS is complaining about; peek `dtitable` (`1789h`) and
 the two new descriptors right after each 48h. Until that is understood,
 treat 48h as usable for a single allocation only.
+
+## UPDATE 28 (2026-09-23) — root cause: 48h aliases the client's own ds
+
+No source change; tree is UPDATE 26 (21648). UPDATE 27's suspicion
+about `dtitable` values was WRONG and is withdrawn: `0feh` is a
+permanent entry (set by `makegdtx`) and `00h` is simply task 0's tag,
+so `makegdte`'s "free or mine" test is sound.
+
+The actual cause, measured. `dtitable` peeked at `e48done` after each
+of two allocations:
+
+	after 1st:  00 00 00 80 ff fe 80 ff ...
+	after 2nd:  00 00 00 80 80 fe 80 ff ...
+
+The FIRST allocation adds no entry. `makegdte` deliberately REUSES an
+existing descriptor when task id, access byte AND base all match, and
+the block MOS returned (`18B1h`, base `18B10h`) has the same base as
+the client's own data selector handed out by `8eh`. So 48h gave the
+client back its own `ds` descriptor under a different name. Only the
+second allocation allocates a new slot -- which is precisely when
+"Internal error #0" appears.
+
+This also reinterprets UPDATE 26: the 49h test was freeing the
+descriptor that backs the client's own data segment, and it "worked"
+only because nothing used ds afterwards.
+
+Two questions before coding anything:
+
+1. Why does MOS's 48h return a block whose base equals the client
+   program's own segment? Check what the real-mode 48h at that point
+   actually owns -- the .COM should hold all free memory, so a
+   successful 48h returning `18B1h` needs explaining. If MOS is
+   handing out memory inside the program's own arena, the defect is
+   below us and 48h translation is not the place to fix it.
+2. If the allocation is legitimate, 48h must NOT share a descriptor
+   with an existing one: it needs a fresh slot per block so that 49h
+   and `freeclsel` release exactly what they should. `makegdte`'s
+   reuse is by design for sharing, so this needs either a variant that
+   skips the reuse check while still tagging `80h|taskid` (NOT
+   `makegdtx`, whose `0feh` permanent tag would leak past 4Ch), or a
+   different limit/access so the match fails honestly.
+
+Question 1 first: it decides whether 2 is worth doing at all.
+
+## UPDATE 29 (2026-09-23) — real root cause: a live descriptor with a free dti slot
+
+No source change; tree is UPDATE 26 (21648). UPDATE 28's explanation
+was also wrong and is withdrawn: the client sits at `cs=08AAh`, so its
+data base is `08AA0h`, nothing like the allocation's `18B10h`. 48h does
+not alias the client's ds.
+
+Question 1 from UPDATE 28 is answered: the allocation IS legitimate.
+Measured in real mode before the switch: `cs: 08AA`, largest free block
+`874Fh` paragraphs, `48h bx=4` returns `18B1h` with CF clear. MOS does
+not hand a .COM all of memory, so a successful 48h well above the
+program is normal and nothing below us is at fault.
+
+The defect, measured by peeking the gdt at `1830h` (slot 3 onward)
+after each of two allocations:
+
+	after 1st:  slot 3 = base 018b10 f2 (our block)
+	            slot 4 = base 0c0de0 fa (CODE, dpl3)
+	after 2nd:  slot 4 = base 018b60 f2 (our 2nd block)
+
+Slot 4 held a live CODE descriptor for segment `C0DE` -- the DPMI
+host's mode-switch entry, the `C0DE:00A7` DPMITST reports -- while its
+`dtitable` entry read `0ffh`, i.e. free. `makegdte` therefore handed
+that slot out and the second 48h overwrote a descriptor still in use.
+That is exactly why the error needs TWO allocations and only appears at
+termination, when the host uses that selector again.
+
+So this is not a 48h bug: ANY caller of `makegdte`/`makegdtx` can steal
+that slot. 48h just made it reachable from a client.
+
+Next: find who builds the `C0DE` code descriptor (`_DPMI.ASM` switch
+path, or the `8eh`/`86h` handlers in `_386.ASM`) and why its
+`dtitable` byte is left `0ffh`. Either it should be tagged
+`80h|taskid` like the client's cs/ds so `freeclsel` releases it at
+4Ch, or `0feh` permanent if the host keeps it for the session. Tag it,
+then re-run: two allocations plus exit should be clean, and the
+UPDATE 26 49h results need re-checking afterwards since they were
+measured with this hazard present.
+
+## UPDATE 30 (2026-09-23) — the free-but-live slot traced to source
+
+No source change; tree is UPDATE 26 (21648).
+
+Item 5 (MOS 5.x detection) needs no work: it is ALREADY FIXED in
+`_DPMI.ASM` `CheckMOS` -- equality test dropped, version floor checked
+against the second call's `ax` -- along with the `stc` restoration on
+the `NotMos` path. Both appear in the fixes table near the top of this
+file. Every boot exercises it: the DPMI banner only appears because
+CheckMOS passes on 5.02. The earlier "next steps" listing it as open
+was wrong.
+
+Source-level cause of UPDATE 29's free-but-live descriptor:
+
+- `nmswitch` translates the switching code's `s0cs` with `makegdte`
+  using `dl=11111010b` (executable) and `dh` = the PLAIN task id
+- `nmswitch` also calls `cleardti` on every native-mode switch, which
+  frees every entry carrying that plain tag
+- client selectors survive because `8eh`/`86h` tag them `80h|taskid`,
+  which the sweep skips; the HOST's own cs descriptor does not get
+  that tag
+
+So after the client's first v-86 excursion the `C0DE` code descriptor
+is still loaded and still used by the host's return path, while its
+`dtitable` byte reads `0ffh` and any `makegdte` caller may take it.
+TSL flagged the underlying behaviour themselves in the comment above
+`e6f8f` ("A DPMI client's selectors will not survive that. Not
+addressed here").
+
+Two candidate fixes, neither trivial enough to pick blind:
+
+1. Tag the `nmswitch` cs descriptor `80h|taskid` as well. Small and
+   local, and `freeclsel` would release it at 4Ch. RISK: it changes
+   behaviour for EVERY native-mode task, not just DPMI ones -- those
+   descriptors would stop being swept per switch, so a long-running
+   int 38h application could accumulate entries until `dtitable`
+   fills.
+2. Tag it only while a DPMI client is active. Correct but needs state
+   the switch path does not currently carry.
+
+Recommend measuring first: count how many entries a plain native-mode
+(int 38h) task turns over per switch, with the `dtitable` peek, to see
+whether option 1's risk is real or theoretical. If a task reuses the
+same slot each time (same base, same access -> makegdte matches), the
+sweep is not what keeps the table small and option 1 is safe.
+
+## UPDATE 31 (2026-09-23) — option 1 protects slot 4; the error remains
+
+No source change in the tree (still UPDATE 26, 21648). Option 1 from
+UPDATE 30 was built in the SCRATCH tree only and is kept at
+`/tmp/_386.opt1.asm` (21664, 0 warnings, 0 severe): in `nmswitch`,
+`or dh,80h` before the cs `makegdte`, `and dh,7fh` after.
+
+Measured, two PM allocations then exit:
+
+| build | selectors | exit |
+| --- | --- | --- |
+| UPDATE 26 | `0073`, `007B` (slot 4 overwritten) | Internal error #0 |
+| option 1 | `0073`, `0093` (slot 4 skipped, slot 7 taken) | Internal error #0 |
+
+So option 1 does exactly what it was meant to: the host's live cs
+descriptor is no longer handed out. But the error is UNCHANGED, which
+means the slot-4 overwrite was a real hazard and NOT the cause of the
+"Internal error #0" -- or not the only cause. UPDATE 29's conclusion
+("That is exactly why the error needs TWO allocations") is withdrawn.
+
+Status of the theories on this one error, so nobody re-walks them:
+
+| theory | status |
+| --- | --- |
+| dtitable `00h`/`0feh` misread by makegdte (UPD 27) | disproved (UPD 28) |
+| 48h aliases the client's own ds (UPD 28) | disproved (UPD 29) |
+| slot-4 host cs overwrite causes the error (UPD 29) | disproved (here) |
+| slot-4 host cs is free-but-live (UPD 29/30) | TRUE, fixed by option 1 |
+
+Option 1 is not shipped: its risk for plain int 38h tasks (UPDATE 30)
+is still unmeasured, and it does not fix the error it was aimed at.
+
+Next, and stop theorising from the descriptor layer: trace the
+termination itself. The message names "function #00", and MOS prints it
+after the client's 4Ch, so run `PMTRACE` with a wide window over the
+4Ch path of the two-allocation client and find the call that fails.
+Compare against the one-allocation client, which exits clean, event by
+event. That diff is the answer; everything so far has been inference.
+
+## UPDATE 32 (2026-09-23) — ROOT CAUSE: the host under-reports its data size
+
+`_DPMI.ASM` only: the `1687h` reply now reports `si = 28` paragraphs
+instead of 5. `$DPMI.SYS` size unchanged (4941). `$386.SYS` unchanged
+(21648, UPDATE 26). The four A4057 warnings in `_DPMI.ASM` (lines
+~4412-4421, `scbmmsub` dword read as words) are PRE-EXISTING and
+unrelated.
+
+### How it was found
+
+Stopped theorising and diffed the event trace from the client's `4Ch`
+for a one-allocation client (exits clean) against a two-allocation
+client (errors), same driver. At termination MOS walks the MCB chain;
+the two-allocation run gets DOS error 7 (MCBs destroyed) and then
+prints the message. Peeking memory at `4Ch`: the free-remainder MCB
+the second 48h wrote at `18BA0` held a STACK FRAME instead (`18B6`,
+`D120`, `005B`, `0070`, `3246`).
+
+### Cause
+
+`GoProtect` passes the client's host-data block (from `1687h`'s `si`)
+to `int 0D4h ax=1001h` as the task's native control area. `nmswitch`
+lays out there: a 256-byte v86 stack, then the nca (`ncalen = 70h`),
+then the staging buffer sized by the `cx` GoProtect passes (`5*16`).
+That is 256+112+80 = 448 bytes = 28 paragraphs. The host told clients
+5. So the monitor ran 368 bytes past the client's block into the DOS
+arena. One allocation's MCB happened to land below the damage; the
+second's landed inside the v86 stack and was overwritten.
+
+This bug predates everything this session: any DPMI client that
+allocated DOS memory after switching was exposed, and 48h merely made
+it reachable.
+
+### Verified
+
+Two allocations then exit: clean (was Internal error #0). Stress run,
+twice in one boot then `VER`: DPMITST reports `paras (si): 001C`,
+three allocations each written through, a free, a realloc that reuses
+the freed slot, the second block's `2222h` intact, clean exit both
+times.
+
+### Theory table, final
+
+| theory | status |
+| --- | --- |
+| dtitable `00h`/`0feh` misread (UPD 27) | disproved |
+| 48h aliases client ds (UPD 28) | disproved |
+| slot-4 host cs overwrite causes the error (UPD 29) | disproved |
+| host cs slot free-but-live (UPD 29/30) | TRUE, separate defect, option 1 unshipped |
+| host data block too small for the nca (here) | TRUE, the cause, fixed |
+
+### New, from the same reading -- verify before relying on them
+
+- `ncabufsz` is the `cx=5*16` GoProtect passes, i.e. the staging buffer
+  is 80 bytes. UPDATE 21's reading that `ncabufsz-1` was `0ffffh` was
+  taken at an instruction BEFORE `ecx` was loaded from `ncabufsz`, and
+  is withdrawn. So `einfun09` truncates `$`-strings at 79 bytes.
+- `einfun0a` stages `max+2` bytes (up to 257) through `senddsdx`, which
+  does not check `ncabufsz`: an input buffer larger than 78 bytes
+  overruns the staging buffer, past the end of the (now correctly
+  sized) block. Needs a cap, or a larger `cx` in GoProtect with `si`
+  raised to match -- the equation above is written to make that a
+  one-line change.

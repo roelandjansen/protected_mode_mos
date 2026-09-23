@@ -135,7 +135,19 @@ Not1686:
                 mov     bx,AccessBits          	; 32 bit supported
                 mov     cl,[MicroProcessor]
                 mov     dx,[Version_DPMI]
-                mov     si,5
+;
+; si = paragraphs of host-private data the client must allocate and
+; pass in es to GoProtect. It was 5 (80 bytes), but that block is
+; handed to int 0D4h ax=1001h as the task's native control area, and
+; nmswitch lays out there: a 256-byte v86 stack, then the nca proper
+; (ncalen = 70h in _386.ASM), then the staging buffer, whose size is
+; the cx GoProtect passes (5*16). 256+70h+80 = 448 bytes = 28 paras.
+; With 5 the monitor overran the client's block into the DOS arena:
+; the second 48h put an MCB inside the v86 stack and a pushed frame
+; destroyed it -- "Internal error #0" at exit (UPDATE 32).
+; Keep in step with ncalen and the cx below if either changes.
+;
+                mov     si,(256+70h+5*16+15)/16
                 push    cs
                 pop     es
                 mov     di,offset ddt:GoProtect	; group-relative: plain
