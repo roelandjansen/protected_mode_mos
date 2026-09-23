@@ -7984,8 +7984,18 @@ nmswitch:
 	db	67h
 	mov	ax,ss:[s0cs]		; translate cs selector
 	mov	dl,11111010b		; set type=101 for executable
+;
+; Tag the cs descriptor like a client selector (80h|taskid) so the
+; cleardti sweep on the NEXT native-mode switch cannot free it while
+; it is still loaded -- a freed-but-live slot is handed out again by
+; makegdte and overwritten (UPDATE 29/30). On the next switch makegdte
+; matches this entry (same tag, access, base) and reuses it, so it
+; does not accumulate; freeclsel releases it at the client's 4Ch.
+;
+	or	dh,80h
 	db	66h
 	call	makegdte
+	and	dh,7fh			; plain task id again for anything after
 	db	66h
 	db	67h
 	mov	ss:[s0cs],ax

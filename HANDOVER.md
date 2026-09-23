@@ -956,3 +956,77 @@ times.
   sized) block. Needs a cap, or a larger `cx` in GoProtect with `si`
   raised to match -- the equation above is written to make that a
   one-line change.
+
+## UPDATE 33 (2026-09-23) — the control area sized properly; UPDATE 32 corrected
+
+`_DPMI.ASM` only. `$DPMI.SYS` 4941 (unchanged size). Same four
+pre-existing A4057 warnings, 0 severe.
+
+UPDATE 32's arithmetic was wrong, and right only by accident. Measured
+`ncabufsz` at runtime (hook after `mov ecx,[ebx+ncabufsz]` in
+`einfun09`): `FFFFFEE0h`, i.e. -288. `nmswitch` computes
+
+	ncabufsz = cx - (256 + ncalen)
+
+so the `cx` GoProtect passes is the TOTAL control-area size, not the
+buffer size. With `cx=80` the buffer size was negative, which as an
+unsigned count means no bound at all: `einfun09`'s cap never engaged
+and every staging copy was unbounded. A 120-character `$`-string from
+protected mode printed in full and then produced "Internal error #0" at
+exit -- the copy ran past the end of the (UPDATE 32) block into the
+next MCB. UPDATE 32's second "new" point (09h truncates at 79) is
+therefore also withdrawn: nothing truncated, it overran.
+
+Fix, with named sizes near `dpmi2f`:
+
+	NCABUF    equ 272              ; largest staged request: 0Ah 255+2
+	NCATOTAL  equ 256+70h+NCABUF   ; 640 bytes
+	1687h:    mov si,NCATOTAL/16   ; 40 paragraphs (was 5, then 28)
+	GoProtect: mov cx,NCATOTAL     ; was 5*16
+
+Measured: `ncabufsz` now `00000110h` = 272 exactly. The 120-character
+string prints in full and exits clean. A 0Ah input with a 200-byte
+buffer returned 111 characters (the rig's key injector drops some of a
+long typed line -- a rig limit, not the driver), well past the old
+80-byte buffer, followed by two allocations; exit clean, `VER` after.
+
+`einfun0a` still has no explicit cap of its own; it is safe because
+NCABUF >= 257 covers any 0Ah request. `einfun09` truncates at
+NCABUF-1 = 271 characters, where real DOS would print on to the `$`.
+Both are consequences of NCABUF and are documented at its definition.
+The `70h` in NCATOTAL duplicates `ncalen` in `_386.ASM` by hand.
+
+## UPDATE 34 (2026-09-23) — host cs descriptor tagged (option 1 shipped)
+
+`_386.ASM`: in `nmswitch`, `or dh,80h` before the cs `makegdte` and
+`and dh,7fh` after, so the host's own cs descriptor is tagged
+`80h|taskid` like a client selector. `$386.SYS` 21648 -> 21664, 0
+warnings, 0 severe. With `$DPMI.SYS` from UPDATE 33.
+
+Why: UPDATE 29/30. The host cs was tagged with the plain task id, so
+`cleardti` freed its slot on the next native-mode switch while the
+descriptor stayed loaded; any `makegdte` caller could then take and
+overwrite it (measured: the second 48h did, UPDATE 29).
+
+Risk assessed before shipping, since the change affects every
+native-mode switch, not only DPMI:
+
+- `80h` entries are exempt from the per-switch sweep and are released
+  only by `freeclsel` (client 4Ch, and 778Fh on the driver's
+  Unregister path). A non-DPMI native-mode task would therefore keep
+  its cs slot past its lifetime.
+- In THIS tree that case does not arise. The only caller of the switch
+  (`int 0D4h ax=1001h`) is `_DPMI.ASM`. The other `int 38h` users
+  (`_PIPE`, `IMPORT`, `ALIAS`, `ADDTASK`, `FORMAT`, ...) use int 38h as
+  the MOS service API -- the `80h+` calls TSL renumbered in 1987 -- not
+  as a native-mode switch.
+- For an EXTERNAL native-mode program it would be bounded: `makegdte`
+  reuses an entry with the same tag, access and base, so the cost is at
+  most one slot per distinct code segment per task id.
+
+Measured: six client runs in one boot with `dtitable` peeked at each
+`freeclsel` entry -- three tagged entries each time (host cs, client
+cs, client ds), all released, no growth. Earlier (UPDATE 31) the
+second 48h was measured to skip the host's slot instead of overwriting
+it. Regression, two boots: the two-allocation client twice, the base
+client, `VER`, `DIR`: no "Internal error", all clean.

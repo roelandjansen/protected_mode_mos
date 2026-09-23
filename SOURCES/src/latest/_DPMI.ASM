@@ -116,6 +116,21 @@ Zero		dw	0		; Segment 0
 ; installed. 
 ;
 
+;
+; Native control area handed to int 0D4h ax=1001h (see GoProtect).
+; nmswitch treats the cx it is given as the TOTAL size and lays out
+; a 256-byte v86 stack, the nca proper (ncalen = 70h in _386.ASM),
+; then the staging buffer, whose size it derives as
+;	ncabufsz = cx - (256 + ncalen)
+; Passing cx=80 therefore gave a NEGATIVE buffer size (measured
+; FFFFFEE0h), so the monitor's staging copies were unbounded.
+; NCABUF covers the largest single staged request, a 0Ah buffer of
+; 255+2 bytes. 1687h reports NCATOTAL/16 so the client allocates it.
+; Keep 70h in step with ncalen if the nca layout ever changes.
+;
+NCABUF		equ	272
+NCATOTAL	equ	256+70h+NCABUF
+
 dpmi2f		proc	far
 		cmp	ax,1680h
 		jne	Not1680
@@ -136,18 +151,13 @@ Not1686:
                 mov     cl,[MicroProcessor]
                 mov     dx,[Version_DPMI]
 ;
-; si = paragraphs of host-private data the client must allocate and
-; pass in es to GoProtect. It was 5 (80 bytes), but that block is
-; handed to int 0D4h ax=1001h as the task's native control area, and
-; nmswitch lays out there: a 256-byte v86 stack, then the nca proper
-; (ncalen = 70h in _386.ASM), then the staging buffer, whose size is
-; the cx GoProtect passes (5*16). 256+70h+80 = 448 bytes = 28 paras.
-; With 5 the monitor overran the client's block into the DOS arena:
-; the second 48h put an MCB inside the v86 stack and a pushed frame
-; destroyed it -- "Internal error #0" at exit (UPDATE 32).
-; Keep in step with ncalen and the cx below if either changes.
+; si = paragraphs the client must allocate and pass in es to
+; GoProtect: the whole native control area (NCATOTAL, above). It was
+; 5, and the monitor overran the client's block into the DOS arena --
+; a later 48h put an MCB inside the v86 stack and a pushed frame
+; destroyed it, "Internal error #0" at exit (UPDATE 32/33).
 ;
-                mov     si,(256+70h+5*16+15)/16
+                mov     si,NCATOTAL/16		; 40 paragraphs
                 push    cs
                 pop     es
                 mov     di,offset ddt:GoProtect	; group-relative: plain
@@ -202,7 +212,7 @@ GoProtect       proc    far
                 int     21h
                 pop     dx
                 mov     es,bx
-                mov     cx,5*16
+                mov     cx,NCATOTAL		; total nca area, see NCABUF
 
                 call    HookUnreg               ; cover termination for a client that
                                                 ;  never calls int 31h (must be here:
