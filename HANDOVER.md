@@ -652,3 +652,40 @@ on the `einative` entry path writes `ncavflag` from the client's
 reflecting) and retest. Note a later run also ended with MOS printing
 "Internal error #0 Unexpected error during function #00", which may be
 the same stale-flags issue surfacing elsewhere.
+
+## UPDATE 26 (2026-09-23) — 49h works; a 48h defect found
+
+`einfun49` is in the tree. `$386.SYS` 21552 -> 21648, 0 warnings, 0
+severe.
+
+The UPDATE 25 "failure" was not a failure. `einative` DOES seed
+`ncavflag` from the client's flags (`p0stack-12`), and MOS returns CF
+UNCHANGED on a successful 49h. So a client that happened to carry CF=1
+into the call got it back and read it as an error -- and the handler,
+testing the same bit, skipped its slot release. Both symptoms, one
+cause.
+
+Fix: clear CF in `ncavflag` before reflecting (`and [ebx+ncavflag],
+0fffeh`), so the returned CF means what it says. Measured worst case,
+client executes `stc` immediately before `int 21h ah=49h`: carry comes
+back CLEAR, the slot is released, and the next 48h reuses selector
+`0073h`. Without the fix and with the client doing `clc` by hand the
+same sequence also worked, which is what isolated it.
+
+Real-mode control, same client, same block: 48h `18B1h`, 49h ok,
+second 48h `18B1h` again, clean exit.
+
+### Open defect (in 48h, already shipped in UPDATE 24)
+
+A client that allocates TWICE in protected mode and then terminates
+makes MOS print:
+
+	Internal error #0 Unexpected error during function #00
+
+Measured: two 48h calls with NO 49h reproduce it (selectors `0073h`
+and `007Bh`), so it is 48h, not 49h. One allocation then exit is
+clean; alloc/free/alloc in REAL mode is clean. Not yet run: the
+real-mode alloc/alloc/exit control, which decides whether this is
+MOS-generic or specific to the protected-mode path. Do that first next
+session, then look at what 4Ch/`freeclsel` and MOS's task termination
+each do with two live blocks and their descriptors.
