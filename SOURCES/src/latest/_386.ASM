@@ -7579,7 +7579,7 @@ e31bad:
 dpmirsv dw	0,0
 
 ; DPMI extended memory blocks per task (UPDATE 43), ss-addressable
-DBLKN	equ	32
+DBLKN	equ	128			; 128 blocks system-wide (1 KB)
 dblktab db	DBLKN*8 dup(0)
 
 	page
@@ -8172,6 +8172,12 @@ e31desc:
 	or	ax,ax
 	jz	e3100
 	db	66h
+	cmp	ax,0003h
+	jne	e31dn3
+	db	66h
+	jmp	e3103
+e31dn3:
+	db	66h
 	cmp	ax,0001h
 	jne	e31dn1
 	db	66h
@@ -8198,24 +8204,58 @@ e31dbad:
 	db	66h
 	jmp	e31bad
 
-;---- 0000h allocate one descriptor: data, present, dpl 3, base 0, limit 0
+;---- 0000h allocate CX descriptors: CONTIGUOUS gdtspace slots, each
+;     data, present, dpl 3, base 0, limit 0. AX = the first selector,
+;     the others follow at the 0003h increment (8).
 
 e3100:
-	NLDW	ncavcx
+	xor	cx,cx			; xor ecx,ecx
+	NLDW	ncavcx			; ax = count
+	mov	cx,ax			; mov ecx,eax
+	or	cx,cx
+	jnz	e3100c1
 	db	66h
-	cmp	ax,1			; only CX=1 for now
-	jne	e31dbad
-	xor	si,si			; xor esi,esi
-e3100lp:
+	jmp	e31bad
+e3100c1:
+	db	66h
+	cmp	cx,dtilen
+	jbe	e3100c2
+	db	66h
+	jmp	e31bad
+e3100c2:
+	xor	si,si			; candidate first slot
+e3100o:
+	mov	ax,si			; mov eax,esi
+	add	ax,cx			; add eax,ecx
+	db	66h
+	cmp	ax,dtilen		; run would pass the end?
+	jbe	e3100o2
+	db	66h
+	jmp	e31bad
+e3100o2:
+	mov	di,si			; mov edi,esi
+e3100i:
 	db	67h
-	cmp	ss:[si+dtitable],0ffh	; free slot?
-	je	e3100got
+	cmp	ss:[di+dtitable],0ffh
+	jne	e3100adv
+	inc	di
+	mov	ax,di			; mov eax,edi
+	sub	ax,si			; sub eax,esi: run length so far
+	cmp	ax,cx			; cmp eax,ecx
+	jb	e3100i
+	jmp	short e3100run		; slots si .. si+cx-1 are free
+e3100adv:
 	inc	si
+	jmp	short e3100o
+
+e3100run:
+	mov	ax,si			; first selector, for the caller
+	shl	ax,3
 	db	66h
-	cmp	si,dtilen
-	jb	e3100lp
-	jmp	short e31dbad
-e3100got:
+	add	ax,gdtspace-gdt
+	or	al,3
+	NSTW	ncavax
+e3100set:
 	db	67h
 	mov	ss:[si+dtitable],dh	; claim it for this task
 	mov	di,si			; mov edi,esi
@@ -8234,9 +8274,17 @@ e3100got:
 	mov	byte ptr ss:[di+gdt+6],0	; g=0,d=0, limit 16-19 = 0
 	db	67h
 	mov	byte ptr ss:[di+gdt+7],0	; base 24-31
-	mov	ax,di
-	or	al,3			; rpl 3
-	NSTW	ncavax
+	inc	si
+	loop	e3100set		; ecx under the 32-bit cs
+	db	66h
+	jmp	e31dok
+
+;---- 0003h get selector increment value: AX = 8
+
+e3103:
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavax],0008h
+	db	offset nca:ncavax
+	dw	0008h
 	db	66h
 	jmp	e31dok
 
@@ -9929,6 +9977,57 @@ e6f90:
 
 e6f8f:
 	call	dword ptr mmgrp:[fcs_ptr]	; use32 -> use16 wrapper
+;
+; Also release this task's DPMI memory blocks (UPDATE 44). This path
+; runs from v-86 (the driver's Unregister), where dovmint is not
+; available, but the release itself is monitor code: e6f06, behind
+; memman's vrelease, is just adrpage + nrelease, and both live here in
+; the use32 int 6fh region, so they are called directly. The task id
+; is read before adrpage moves ds.
+;
+; int 6fh handlers preserve the caller's registers (cf e6f8e); this
+; loop uses all of them and adrpage moves ds/es, so save everything
+; -- without it the caller got garbage back (UPDATE 44).
+	push	eax
+	push	ebx
+	push	ecx
+	push	edx
+	push	esi
+	push	edi
+	push	ds
+	push	es
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	db	8ah,01010110b		; mov dl,[esi+tcbid]
+	db	tcbid
+	xor	edi,edi
+e6f8flp:
+	cmp	byte ptr ss:[edi+dblktab],1
+	jne	e6f8fnx
+	cmp	byte ptr ss:[edi+dblktab+1],dl
+	jne	e6f8fnx
+	mov	byte ptr ss:[edi+dblktab],0
+	mov	eax,dword ptr ss:[edi+dblktab+4]
+	movzx	ecx,ax			; pages
+	shr	eax,16
+	movzx	ebx,ax			; start bank
+	push	edi
+	push	edx
+	call	adrpage 		; ds -> gdtdata, es -> gdtpage
+	call	nrelease
+	pop	edx
+	pop	edi
+e6f8fnx:
+	add	edi,8
+	cmp	edi,DBLKN*8
+	jb	e6f8flp
+	pop	es
+	pop	ds
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	ecx
+	pop	ebx
+	pop	eax
 	and	byte ptr ss:[s0flags],0feh   ; cf clear
 	jmp	cgrm7
 

@@ -1477,3 +1477,57 @@ allocating int 21h clients, base client, `DIR`: no "Internal error".
   descriptors but NOT blocks: it runs from v-86 and cannot use
   `dovmint`. Blocks of a task removed that way still leak
 - 32 blocks system-wide; `0000h` with `CX>1` still unsupported
+
+## UPDATE 44 (2026-09-23) — UPDATE 43's open items closed
+
+`_386.ASM`: `$386.SYS` 23504 -> 24448, 0 warnings, 0 severe.
+
+### 1. Blocks released on the Unregister path (int 6fh 778Fh, `e6f8f`)
+
+`e6f8f` runs from v-86 and cannot use `dovmint`, but the release is
+monitor code: `e6f06` (behind memman's `vrelease`) is just `adrpage` +
+`nrelease(ebx=start, ecx=count)`, both in the same use32 int 6fh
+region. `e6f8f` now reads the task id (before `adrpage` moves ds),
+walks `dblktab` and calls them directly. Plain use32 code, so MASM
+encodes it correctly -- none of the imm16 traps apply there.
+
+It must preserve every register: int 6fh handlers do (see `e6f8e`'s
+push/pop), and this loop uses all of them plus ds/es. First version
+did not, and the caller got garbage back. Now pushes eax..edi, ds, es.
+
+Measured: client with 42 blocks calls `int 6fh ax=778Fh` directly
+(reflected into the monitor exactly as the driver's Unregister is):
+largest free `C7E0` -> `C6E0` -> `CB60`, all released. UPDATE 43 with
+the same client: the block stays allocated.
+
+**Test-method warning:** calling 778Fh from inside a RUNNING client
+ends with MOS's "Divide by zero error" (`mosint00`) at exit. UPDATE 43
+does the same with nothing allocated, so it is not this change:
+Unregister frees the task's descriptors, the host's own cs included
+(tagged since UPDATE 34), while they are still in use. It is only
+valid at task teardown. The proper test -- REMTASK of a task running a
+DPMI client -- has not been done; the rig does not yet drive it.
+
+### 2. Table: `DBLKN` 32 -> 128 (1 KB)
+
+A client allocated 40 x 4 KB blocks; the next run started from the
+same free figure, so all were released at 4Ch.
+
+### 3. 0000h with CX>1, and 0003h
+
+0000h searches for CX contiguous free `dtitable` slots (`CX` 1..
+`dtilen`), claims and initialises each; AX = first selector. 0003h
+returns 8. Measured: three selectors (`006B`, increment `0008`) set
+16 KB apart into one block, written through each, read back
+`1111h`/`2222h`/`3333h` through the first. Note `dtilen` is 30 for the
+whole system, so large requests will fail.
+
+### Regression
+
+Descriptor/grow client still reads `1234h`/`ABCDh` after the move; the
+leak-test client starts from `CB6000` every run; allocating int 21h
+clients: no "Internal error". The imm16 sweep (UPDATE 43) over the
+32-bit-executed region found nothing.
+
+The test clients live only as patches to `DPMITST.ASM` in the scratch
+tree; the shipped `DPMITST.ASM` is the original.
