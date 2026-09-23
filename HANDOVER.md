@@ -1084,3 +1084,221 @@ reading that path in `MOSFUN*.ASM`.
 - 49h: in the tree; releases the descriptor slot correctly, but the DOS
   block is NOT freed until termination
 - 4Ah: not shipped; same no-op
+
+## UPDATE 36 (2026-09-23) — int 31h is not wired: the host's API is unreachable
+
+No source change; tree is UPDATE 34. Found while starting on the int 31h
+functions (plan: 0400h, then 0500h-0503h, then 0100h-0102h, then 0008h).
+
+Measured: a client calling `int 31h ax=0400h` from protected mode is
+reflected like any other interrupt -- `eicalled` -> `einative` ->
+`einstand` -> `dovmint` -> the REAL-MODE vector 31h, which points at
+nothing useful. The event log then shows a garbage v-86 frame
+(`ss=ffff`, `ds=3246`, a flags value in a segment register), `int 3`,
+an invalid-opcode fault, and an `int 21h` from `cs=0000`; the screen
+fills with junk. The system stays up.
+
+Cause, from the source: `_DPMI.ASM` has a complete int 31h dispatcher
+(`Interupt31`, walking `Intr31Tab`: the full DPMI 0.9 set -- 0000h-000Dh
+descriptors, 0100h-0102h DOS memory, 0200h-0205h vectors, 0300h-0306h
+real-mode calls and callbacks, 0400h version, 0500h-0503h memory,
+0600h-0604h, 0800h, 0900h-0902h, 0A00h, 0B00h-0B02h), but `Interupt31`
+is REFERENCED NOWHERE. Nothing installs it. Its siblings `Interupt21`
+and `Interupt2f` are the same: stubs chaining to `OrgProt21` /
+`OrgProt2f`, which are never set. TSL wrote the host's protected-mode
+interrupt hooks and never finished the routing that would reach them.
+So the host currently offers exactly one working service: the mode
+switch. Every DPMI function is unreachable from a client.
+
+Also noted: the `0000000K of Extended Memory Available.` banner is a
+constant string (`MsgMem`) that nothing ever fills in; `AllocateExtend`
+only reserves the pages for the host's own protected-mode code
+(`ExtendMem`).
+
+This is the real core of "a usable DPMI host", and it needs design
+decisions before code:
+
+1. where `Interupt31` runs: the host's protected-mode code sits in the
+   extended-memory block from `AllocateExtend` (`BeginProtect` ..
+   `EndProtect`); it needs a code selector for that block that the
+   monitor can far-call
+2. how the monitor gets that address: an int 6fh registration call at
+   install time, stored beside `ivtable`, is the natural shape
+3. dispatch: in `einative`, `dl=31h` goes to the registered handler
+   instead of `einstand`
+4. calling convention: `Interupt31` ends `retf 2` (discards a flags
+   word), and DPMI functions return results in registers and CF; the
+   monitor's native frame (`ncairegs` / `p0stack`) must carry them back
+   the way `einback` does for `int 21h`
+5. privilege: the client is cpl 3; decide whether the host runs at the
+   client's privilege (simplest, a dpl-3 code selector) or needs more
+
+## UPDATE 37 (2026-09-23) — int 31h: the host's PM side has never run
+
+No source change; tree is UPDATE 34.
+
+Before wiring int 31h (UPDATE 36 design, agreed: run the host at the
+client's privilege), read what the dispatcher actually needs. It is
+not a routing job; the host's protected-mode side has never executed:
+
+1. **It writes through cs.** `Interupt31` does `mov ax,cs / mov ds,ax`,
+   then `GetDataSelector` does `mov [DataSel],ax` via that ds. A code
+   selector is readable, never writable: the first int 31h would #GP
+   before reaching any function.
+2. **Group-relative offsets.** `code32` is in the `ddt` group
+   (`assume cs:ddt`), so its offsets are ddt-relative. `InitProtect`
+   copies `BeginProtect`..`EndProtect` to offset 0 of an extended-
+   memory block, so every absolute reference in the copy is wrong by
+   `BeginProtect`'s ddt offset, and `Function` (`code16`, line ~398) is
+   not copied at all. Running the code IN PLACE in the resident image,
+   with a use32 code selector based at the ddt segment and a separate
+   writable data alias, avoids both 1 and 2.
+3. **Per-task host data.** `GetDataSelector` needs `TCBDPMI` in the
+   task's tcb and fails ("No Memory") if it is zero. Whether and where
+   that area is allocated is unverified.
+
+Plan, smallest first: (a) in-place use32 code selector plus a data
+alias for the host, registered with the monitor through int 6fh at
+install; (b) `einative` routes `dl=31h` to it; (c) `Interupt31`
+switched from `ds=cs` to the data alias; (d) prove with 0400h only,
+which touches none of the per-task state; (e) then `TCBDPMI` and the
+rest.
+
+### The "0000000K" banner and a memory policy (idea, for later)
+
+`MsgMem` is a constant string nothing fills in. The monitor's memory
+device API can supply a real figure: `valloc` (memman `ah=1`) returns
+the LARGEST available block in `cx` when a request cannot be met, and
+`parmused` tracks extended memory in use. A request for everything,
+then an immediate `vrelease` (`ah=2`), measures free memory without
+keeping it.
+
+Sizing, from Roeland's numbers: 32 MB machine, `smpsize=64` KB,
+twelve 612 KB tasks = ~7.3 MB, leaving roughly 24 MB. Proposed policy:
+DPMI must not starve task creation, so report and hand out
+`free - reserve`, where the reserve is a `$DPMI.SYS` parameter (tasks
+x size, or KB directly), defaulting to something conservative. The
+banner then shows `free - reserve` at install, and 0500h reports the
+same live. This lands with 0500h, after int 31h routes.
+
+## UPDATE 38 (2026-09-23) — int 31h routes; 0400h answered by the monitor
+
+`_386.ASM`: `$386.SYS` 21664 -> 21712, 0 warnings, 0 severe.
+
+A client's protected-mode `int 31h` no longer falls through to the
+real-mode vector. In `einative`, `dl=31h` now dispatches to a new
+`einint31` (inserted before the `dl=21h` test; `75 04` over a `66h`
+`E9 rel16`), which answers from the monitor itself, the same way
+`einative` already answers int 21h. Results go into the v86 register
+slots (`ncavax`..`ncavdx`, `ncavflag`), which `einback` copies to the
+client.
+
+Implemented: `0400h` get version -> `ax=005Ah` (0.90), `bx=0001h`,
+`cl=03h`, `dh/dl=08h/70h`, CF clear. Any other function: CF set,
+registers unchanged (not yet exercised by a test).
+
+Why the monitor and not the host's `Interupt31`: `einative` runs at
+ring 0 with the client's frame on the monitor stack, so handing the
+call to a ring-3 host handler means rewriting the client's return
+frame so the client "returns" into the host, and building a frame on
+the client's 16-bit stack for the host's use32 `retf 2`. That, plus the
+repairs UPDATE 37 lists, is a separate step. Answering in the monitor
+proves the dispatch point first with no ring transfer at all.
+
+Measured: `0400h` client prints `ax 005A bx 0001 cx 0303 dx 0870`,
+flags `3246` (CF clear; `ch=03` is the client's leftover, DPMI defines
+only `cl`). Previously the same client produced a garbage v86 frame,
+int 3 and an invalid opcode. Regression: the two-allocation client
+twice, the base client and `DIR`, no "Internal error".
+
+Open decision for the next functions: keep implementing int 31h in the
+monitor (einint31 grows a table like `eintable`), or do the ring-3
+handoff and repair TSL's `Interupt31` so its full table is used. The
+monitor route is proven and incremental; the host route reuses a lot
+of written code that has never run.
+
+## UPDATE 39 (2026-09-23) — route 1 chosen; int 31h 0500h implemented
+
+Decision (Roeland): int 31h functions are implemented in the monitor
+(`einint31` grows its own dispatch), not by repairing TSL's ring-3
+`Interupt31`.
+
+`_386.ASM`: `$386.SYS` 21712 -> 21872, 0 warnings, 0 severe.
+
+`0500h` get free memory information, in `e310500`:
+
+- the figure comes from the memory device itself, reached the way
+  `einfun91` reaches it (`dovmint` with `dx = offset rhentry`):
+  `valloc` (ah=1) asked for `0FFFFh` pages returns the largest block it
+  could give in `cx`; it is released at once with `vrelease` (ah=2).
+  Nothing stays allocated. The page count is kept in `ncabufer` across
+  the second call because `dovmint` resets the monitor stack
+- buffer at the client's `es:(e)di` (offset zero-extended for a 16-bit
+  client, D bit of its cs as elsewhere): +00 largest block in bytes,
+  +04/+08 that many pages, +14 free pages, every other dword
+  `0FFFFFFFFh` as DPMI 0.9 allows
+- client `di/ax/bx/cx` saved in `ncauregs` and restored, CF clear
+
+Defect hit and fixed on the way, the handover's dominant class again:
+MASM encoded `or ax,-1` as `0D FFFF` (imm16). Under the 32-bit cs `0D`
+takes an imm32, so it swallowed the next two `stosw` (`AB AB`) and
+every later store shifted: the page count landed at +0C and +14 read
+-1. Now hand-encoded `83 C8 FF` (sign-extended imm8, same length in
+both modes). Anything writing an `or/and/cmp r,imm` in this region
+should prefer the `83` form or hand-encode.
+
+Measured (rig = 16 MB DOSBox): largest free block `00EB6000h` =
+15,425,536 bytes, free pages `0EB6h` = 3766 (x 4096 = the same
+figure), identical on two consecutive calls -- so the probe releases
+what it grabs. `bx`/`cx` preserved, CF clear. Regression: allocating
+clients twice, the base client, `DIR`, `VER`: no "Internal error".
+
+Next: apply the reserve policy (UPDATE 37) to this figure, and have
+`$DPMI.SYS` print it in the install banner in place of `0000000K`.
+Then 0501h/0502h/0503h and 0100h-0102h.
+
+## UPDATE 40 (2026-09-23) — DPMI task reserve; the banner shows a real figure
+
+`$386.SYS` 21872 -> 21904, `$DPMI.SYS` 4941 -> 5117. 0 severe; the
+same four pre-existing A4057 warnings in `_DPMI.ASM`.
+
+### What
+
+- `DEVICE=$DPMI.SYS /R:nnnn` -- KB of extended memory DPMI leaves for
+  task creation. Default `RSVDEFKB` = 2048. Twelve 612 KB tasks want
+  about `/R:7400`.
+- `$DPMI.SYS` `SetupReserve` (called just before the banner prints,
+  after the host's own extended memory is allocated): parses `/R:`
+  from the device init request (`[request]`, `+18` = the text after
+  `DEVICE=`, either case), tells the monitor the reserve in pages via
+  new int 6fh `7790h` SET_DPMI_RESERVE (`e6f90`), measures free memory
+  (memman `valloc` for `0FFFFh` pages then `vrelease` -- the contract
+  says `cx` is the number actually ALLOCATED on a short request, so the
+  release is required, which also confirms 0500h's), and writes
+  `free - reserve` in KB into `MsgMem`, leading zeros blanked.
+- `0500h` subtracts `dpmirsv` from the page count, clamped at 0.
+
+### Measured (rig, 16 MB)
+
+| reserve | banner at install | 0500h at client run |
+| --- | --- | --- |
+| default 2048 KB | `13052K` | `00CB6000h` = 13016 KB |
+| `/R:7400` | `7700K` | `0077C000h` = 7664 KB |
+
+Both columns differ by exactly 5352 KB = 7400 - 2048. Each 0500h
+figure is 36 KB (9 pages) below its banner: memory used between
+install and the client run. Regression: allocating clients, the base
+client, `DIR`, `VER`: no "Internal error", keyboard fine.
+
+### Layout trap, found the hard way
+
+`dpmirsv` was first added next to `parmused`, inside the
+`parmgran / parmtot / parmused / parm6ec ...` block. That block is read
+BY LAYOUT (the memory device's status call hands it out), so the
+insertion shifted `parm6ec` and everything after it, and the guest
+stopped taking keyboard input while the prompt still displayed. Moved
+to the code region, after `einint31`'s final unconditional jump (image
+offset `3354h`), reached through `ss:` like the other monitor data;
+`parm6ec` is back at `0DAAh`. Every earlier insertion this session was
+in the code region, where offsets are only ever reached by label:
+**never add a field inside the monitor's data area.**

@@ -7121,6 +7121,11 @@ einative:				; bp,ds,es,cx,bx already pushed
 	je	eint38
 	cmp	dl,0d4h
 	je	eint38
+	cmp	dl,31h			; DPMI services
+	jne	e31skip
+	db	66h
+	jmp	einint31
+e31skip:
 	cmp	dl,21h
 	jne	einstd0
 	xor	ax,ax
@@ -7478,6 +7483,227 @@ e49pass:
 	db	66h
 	call	dovmint 		; not ours: straight reflection
 e49done:
+	db	66h
+	jmp	einback
+
+	page
+;--------------------------------------------------------------------
+;		int 31h - DPMI services from a native-mode client
+;--------------------------------------------------------------------
+;
+; Until now a client's int 31h fell through to einstand and was
+; reflected to the REAL-MODE vector 31h, which points at nothing:
+; garbage v86 frame, int 3, invalid opcode (UPDATE 36). The host's own
+; protected-mode dispatcher (_DPMI.ASM Interupt31) has never run and
+; needs repairs first (UPDATE 37), so this is the routing point, with
+; the monitor answering what it can directly -- the same way einative
+; already answers int 21h. Results go into the v86 register set,
+; which einback copies to the client.
+;
+; 0400h  get DPMI version
+;	ax = 005Ah (0.90), bx = 0001h (32-bit programs supported,
+;	interrupts reflected in v86 mode), cl = 03h (386-class, the
+;	floor this host requires), dh/dl = 08h/70h (master/slave PIC
+;	bases as the BIOS programs them)
+;
+; anything else: carry set, registers unchanged
+;
+einint31:
+	db	66h			; 16-bit data
+	db	8bh,01000011b		; mov ax,[ebx+ncavax]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavax
+	db	66h
+	cmp	ax,0400h
+	je	e310400
+	db	66h
+	cmp	ax,0500h
+	jne	e31bad
+	db	66h
+	jmp	e310500
+e310400:
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavax],005Ah
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavax
+	dw	005Ah			; immediate data
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavbx],0001h
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavbx
+	dw	0001h			; immediate data
+	db	0c6h,01000011b		; mov byte [ebx+ncavcx],03h (cl)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavcx
+	db	03h			; immediate data
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavdx],0870h
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdx
+	dw	0870h			; immediate data
+	db	66h			; 16-bit data
+	db	83h,01100011b		; and [ebx+ncavflag],0fffeh (CF clear)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavflag
+	db	0feh			; immediate data, sign-extended
+	db	66h
+	jmp	einback
+e31bad:
+	db	80h,01001011b		; or [ebx+ncavflag],01h (CF set)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavflag
+	db	01h			; immediate data
+	db	66h
+	jmp	einback
+
+; DPMI task reserve, pages -- set by int 6fh 7790h (e6f90), read by
+; 0500h through ss. Kept HERE, after an unconditional jump, and NOT
+; in the parmgran/parmtot/parmused block: that block is read by
+; layout, and inserting a field there shifted parm6ec and everything
+; after it -- the keyboard died (UPDATE 40).
+dpmirsv dw	0,0
+
+	page
+;--------------------------------------------------------------------
+;		int 31h 0500h - get free memory information
+;--------------------------------------------------------------------
+;
+; es:(e)di -> 48-byte buffer. Filled as DPMI 0.9 defines it:
+;	+00  largest available free block, bytes
+;	+04  maximum unlocked page allocation, pages
+;	+08  maximum locked page allocation, pages
+;	+14  number of free pages
+;	all other dwords 0FFFFFFFFh (not available)
+;
+; The figure comes from the memory device itself, reached the way
+; einfun91 reaches it (dovmint with dx = rhentry): valloc asked for
+; everything returns the largest block it could have given in cx, and
+; is released again at once with vrelease. Nothing stays allocated.
+; ncabufer holds the page count across the second call, since dovmint
+; resets the monitor stack.
+;
+; Registers are preserved (the memory device changes the v86 set, so
+; the client's di/ax/bx/cx are saved in ncauregs and put back).
+;
+e310500:
+	db	8bh,01000011b		; mov eax,[ebx+ncavdi]
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavdi
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	db	offset nca:ncauregs+00
+	db	8bh,01000011b		; mov eax,[ebx+ncavax]
+	db	offset nca:ncavax
+	db	89h,01000011b		; mov [ebx+ncauregs+04],eax
+	db	offset nca:ncauregs+04
+	db	8bh,01000011b		; mov eax,[ebx+ncavbx]
+	db	offset nca:ncavbx
+	db	89h,01000011b		; mov [ebx+ncauregs+08],eax
+	db	offset nca:ncauregs+08
+	db	8bh,01000011b		; mov eax,[ebx+ncavcx]
+	db	offset nca:ncavcx
+	db	89h,01000011b		; mov [ebx+ncauregs+12],eax
+	db	offset nca:ncauregs+12
+
+; ask the memory device for everything: cx = largest it could give
+
+	db	66h			; 16-bit data
+	db	0c7h,01000011b		; mov [ebx+ncavcx],0ffffh
+	db	offset nca:ncavcx
+	dw	0ffffh			; immediate data
+	db	66h
+	mov	dx,offset mmgrp:rhentry ; nonzero dh: memory device call
+	db	0c6h,01000011b		; mov [ebx+ncavax+1],01h (valloc)
+	db	offset nca:ncavax+1
+	db	01h
+	db	66h
+	call	dovmint
+	xor	ax,ax			; xor eax,eax
+	db	66h			; 16-bit data
+	db	8bh,01000011b		; mov ax,[ebx+ncavcx] (pages obtained)
+	db	offset nca:ncavcx
+
+; leave the task reserve out of what DPMI reports (never below 0)
+
+	db	67h
+	sub	ax,ss:[dpmirsv]		; sub eax,dword ss:[dpmirsv]
+	jns	e05rsvok
+	xor	ax,ax			; xor eax,eax
+e05rsvok:
+	db	89h,01000011b		; mov [ebx+ncabufer],eax
+	db	offset nca:ncabufer
+
+; and give it straight back (bx = start, cx = count, as returned)
+
+	db	66h
+	mov	dx,offset mmgrp:rhentry
+	db	0c6h,01000011b		; mov [ebx+ncavax+1],02h (vrelease)
+	db	offset nca:ncavax+1
+	db	02h
+	db	66h
+	call	dovmint
+
+; client buffer offset, zero-extended for a 16-bit client
+
+	db	8bh,01111011b		; mov edi,[ebx+ncauregs+00]
+	db	offset nca:ncauregs+00
+	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0a9h			; test eax,00400000h (D bit)
+	dd	00400000h
+	jnz	e05is32
+	db	0fh,0b7h,11111111b	; movzx edi,di
+e05is32:
+	db	8bh,01001011b		; mov ecx,[ebx+ncabufer] (pages)
+	db	offset nca:ncabufer
+	db	8bh,01000011b		; mov eax,[ebx+ncanes]
+	db	offset nca:ncanes
+	mov	es,ax			; the client's buffer selector
+	cld
+	mov	ax,cx			; mov eax,ecx
+	shl	ax,12			; shl eax,12: bytes
+	stosw				; stosd +00 largest block, bytes
+	mov	ax,cx			; mov eax,ecx
+	stosw				; stosd +04 max unlocked, pages
+	stosw				; stosd +08 max locked, pages
+	db	83h,11001000b,0ffh	; or eax,-1 (sign-extended imm8; MASM's
+					;  0D FFFF would take a 32-bit imm here
+					;  and swallow the next two stosd)
+	stosw				; stosd +0C
+	stosw				; stosd +10
+	mov	ax,cx			; mov eax,ecx
+	stosw				; stosd +14 free pages
+	db	83h,11001000b,0ffh	; or eax,-1 (sign-extended imm8; MASM's
+					;  0D FFFF would take a 32-bit imm here
+					;  and swallow the next two stosd)
+	stosw				; stosd +18
+	stosw				; stosd +1C
+	stosw				; stosd +20
+	stosw				; stosd +24
+	stosw				; stosd +28
+	stosw				; stosd +2C
+
+; put the client's registers back, CF clear
+
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+00]
+	db	offset nca:ncauregs+00
+	db	89h,01000011b		; mov [ebx+ncavdi],eax
+	db	offset nca:ncavdi
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+04]
+	db	offset nca:ncauregs+04
+	db	89h,01000011b		; mov [ebx+ncavax],eax
+	db	offset nca:ncavax
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+08]
+	db	offset nca:ncauregs+08
+	db	89h,01000011b		; mov [ebx+ncavbx],eax
+	db	offset nca:ncavbx
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+12]
+	db	offset nca:ncauregs+12
+	db	89h,01000011b		; mov [ebx+ncavcx],eax
+	db	offset nca:ncavcx
+	db	66h			; 16-bit data
+	db	83h,01100011b		; and [ebx+ncavflag],0fffeh (CF clear)
+	db	offset nca:ncavflag
+	db	0feh
 	db	66h
 	jmp	einback
 
@@ -8470,6 +8696,7 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6funimp	; 8dh ALLOC_SPEC_SELECTOR
 	dd	offset mmgrp:e6f8e	; 8eh CODE_SELECTOR
 	dd	offset mmgrp:e6f8f	; 8fh FREE_CLIENT_SEL
+	dd	offset mmgrp:e6f90	; 90h SET_DPMI_RESERVE
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -8976,6 +9203,21 @@ assume	cs:mmgrp,ds:nothing,es:nothing,ss:nothing,fs:nothing,gs:nothing
 ; tagged entries are deliberately exempt from the per-switch sweep
 ; so a client keeps its selectors across switches.
 ;
+;
+;==== dpmi func 90 - set the DPMI task reserve
+;
+; bx = pages of extended memory DPMI must leave for task creation.
+; Set once by $DPMI.SYS at install from its /R:nnnn parameter;
+; int 31h 0500h reports free memory minus this, never below 0.
+;
+e6f90:
+	db	66h
+	db	67h
+	mov	ax,[bp-16]		; caller's bx = reserve, pages
+	mov	word ptr ss:[dpmirsv],ax
+	and	byte ptr ss:[s0flags],0feh   ; cf clear
+	jmp	cgrm7
+
 e6f8f:
 	call	dword ptr mmgrp:[fcs_ptr]	; use32 -> use16 wrapper
 	and	byte ptr ss:[s0flags],0feh   ; cf clear

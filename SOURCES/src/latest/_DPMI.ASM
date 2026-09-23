@@ -4046,6 +4046,7 @@ MsgNotIns db	'Not '					;[1]	Must  be
 MsgIns	  db	'Installed.',13,10,'$'			;[2]    Together
 
 MsgMem	  db	'0000000K of Extended Memory Available.',13,10,'$'
+RsvKB	  dw	0				; DPMI task reserve, KB (/R:nnnn)
 
 No386	  db	'Intel i386 or i486 Microprocessor required.',13,10,'$'
 No386sys  db	'386 Memory Manager required.',13,10,'$'
@@ -4106,6 +4107,7 @@ InstallDriver	proc	near
 		mov	dx,offset ddt:MsgIns
 		mov	ah,9
 		int	21h
+		call	SetupReserve		; reserve to the monitor, fill MsgMem
 		mov	dx,offset ddt:MsgMem
 		mov	ah,9
 		int	21h
@@ -4171,6 +4173,124 @@ ErrorHandler:
 		xor	ax,ax			; driver not installed
 		ret
 InstallDriver   endp
+;
+;-----------------------------------------------------------------------;
+; SetupReserve - DPMI task reserve and the install banner figure        ;
+;-----------------------------------------------------------------------;
+;
+; DPMI must not starve task creation: extended memory is shared with
+; every task's memory, so DPMI reports and hands out free memory minus
+; a reserve. The reserve comes from the CONFIG.SYS line,
+;	DEVICE=$DPMI.SYS /R:nnnn	nnnn = KB kept for tasks
+; default RSVDEFKB. Example: twelve 612 KB tasks want about 7400 KB.
+;
+; The monitor is told the reserve (int 6fh 7790h, in pages) so that
+; int 31h 0500h subtracts it; the banner shows the same figure,
+; measured here the way 0500h measures it: valloc asked for everything
+; returns (and allocates) the largest block, released again at once.
+;
+RSVDEFKB	equ	2048
+
+SetupReserve	proc	near
+		push	ds
+		push	si
+		mov	bx,RSVDEFKB
+		lds	si,cs:[request]		; device init request header
+		lds	si,[si+18]		; -> text after DEVICE=
+SRscan:
+		lodsb
+		cmp	al,0dh
+		je	SRdone
+		cmp	al,0ah
+		je	SRdone
+		or	al,al
+		jz	SRdone
+		cmp	al,'/'
+		jne	SRscan
+		lodsb
+		or	al,20h			; either case
+		cmp	al,'r'
+		jne	SRscan
+		lodsb
+		cmp	al,':'
+		jne	SRscan
+		xor	bx,bx
+SRdigit:
+		lodsb
+		sub	al,'0'
+		cmp	al,9
+		ja	SRdone
+		xor	ah,ah
+		push	ax
+		mov	ax,10
+		mul	bx
+		mov	bx,ax
+		pop	ax
+		add	bx,ax
+		jmp	SRdigit
+SRdone:
+		pop	si
+		pop	ds
+		mov	[RsvKB],bx
+		add	bx,3			; KB -> 4 KB pages, round up
+		shr	bx,1
+		shr	bx,1
+		push	bx
+		mov	ax,7790h		; SET_DPMI_RESERVE
+		int	6fh
+;
+; measure: largest available block, allocated then released at once
+;
+		mov	ah,1
+		mov	cx,0ffffh
+		call	cs:[memman]
+		push	cx
+		mov	ah,2			; bx = start, cx = count as returned
+		call	cs:[memman]
+		pop	cx
+		pop	bx			; reserve, pages
+		sub	cx,bx
+		jnc	SRpos
+		xor	cx,cx
+SRpos:
+;
+; KB = pages * 4 into dx:ax, then 7 decimal digits into MsgMem,
+; leading zeros shown as blanks
+;
+		mov	ax,cx
+		xor	dx,dx
+		shl	ax,1
+		rcl	dx,1
+		shl	ax,1
+		rcl	dx,1
+		mov	di,offset ddt:MsgMem+6
+		mov	cx,7
+		mov	bx,10
+SRconv:
+		push	ax			; divide dx:ax by 10, long form
+		mov	ax,dx
+		xor	dx,dx
+		div	bx			; ax = high quotient, dx = rem
+		mov	si,ax
+		pop	ax
+		div	bx			; ax = low quotient, dx = digit
+		add	dl,'0'
+		mov	[di],dl
+		dec	di
+		mov	dx,si
+		loop	SRconv
+		mov	di,offset ddt:MsgMem
+		mov	cx,6
+SRblank:
+		cmp	byte ptr [di],'0'
+		jne	SRexit
+		mov	byte ptr [di],' '
+		inc	di
+		loop	SRblank
+SRexit:
+		ret
+SetupReserve	endp
+
 
 
 ;--------------------------------------------------------------------;
