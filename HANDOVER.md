@@ -1727,3 +1727,44 @@ CF, `ax=0008`, `bx=862C`; 0101h forged -> CF, own -> CF clear; the next
 
 The memory side of DPMI 0.9 is now complete: 0100h-0102h, 0500h-0503h,
 plus int 21h 48h/49h/4Ah from protected mode.
+
+## UPDATE 49 (2026-09-24) — int 31h 0200h/0201h; design for 0202h-0205h
+
+`_386.ASM`: `$386.SYS` 24912 -> 24992, 0 warnings, 0 severe.
+
+### 0200h/0201h get/set real-mode interrupt vector
+
+`bl` = vector, `cx:dx` = segment:offset. Read/written at linear
+`bl*4` through `ds`, the absolute-zero flat selector einative leaves
+loaded, i.e. the current task's real-mode vector table. `[esi]` is
+hand-encoded (`8B 06` / `89 06`): MASM's `[si]` (rm=100) is a SIB form
+under the 32-bit cs. 0201h writes the dword with interrupts off.
+
+Measured: DOS 35h in real mode before the switch gives int 21h =
+`FFF8:5008`; 0200h from protected mode gives the same. 0201h sets
+vector 60h to `1234:5678`, 0200h reads it back, then it is restored
+(second run in the same boot is identical). This also confirms
+`fff8:5008` as DOS's int 21h entry -- the address the working 48h
+trace in UPDATE 47 started at. Regression: clean (Divide/Internal 0).
+
+### 0202h-0205h: design, not yet built
+
+Setting a protected-mode vector is only honest if the monitor then
+DELIVERS the client's `int N` to that handler, and 0204h must return a
+default handler a client can chain to. Plan:
+
+- per-task hook table (like `dblktab`): task id, vector, sel:off32
+- delivery for SOFTWARE interrupts raised by the client: in `einative`,
+  before the int 21h / int 31h dispatch, look the vector up; if hooked,
+  build an iret frame on the client's stack (16- or 32-bit by the D bit
+  of its cs, as elsewhere) and redirect the frame on `p0stack` to the
+  handler; the handler's `iret` returns straight to the client, ring 3
+  to ring 3
+- default handlers returned by 0204h: small ring-3 stubs, one per
+  vector, that re-enter the monitor through a PRIVATE path meaning
+  "reflect vector N to real mode now" -- NOT `int N` itself, or a
+  client chaining to the default would re-enter its own hook forever
+- hardware IRQs while a client runs are NOT covered by this and need
+  their own path; 0202h/0203h (exception handlers) likewise need
+  delivery from the monitor's exception entry with the DPMI exception
+  frame, and should not claim success before that exists
