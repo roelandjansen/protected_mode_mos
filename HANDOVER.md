@@ -1768,3 +1768,72 @@ default handler a client can chain to. Plan:
   their own path; 0202h/0203h (exception handlers) likewise need
   delivery from the monitor's exception entry with the DPMI exception
   frame, and should not claim success before that exists
+
+## UPDATE 50 (2026-09-24) — int 31h 0204h/0205h: protected-mode vectors, delivered
+
+`_386.ASM`: `$386.SYS` 24992 -> 27216, 0 warnings, 0 severe (about
+1.4 KB is the stub table and the hook table).
+
+### What
+
+- **0205h** hooks vector `bl` for the calling task with `cx:(e)dx`
+  (16-bit client: `dx` only). The selector must be a present dpl-3
+  code descriptor inside the gdt. Setting a default stub back (see
+  below) unhooks.
+- **delivery**: `einative` now jumps to `einvhook` right after loading
+  the vector into `dl`, before the normal dispatch (now labelled
+  `eindisp`). If the task has hooked that vector, `einvdl` writes an
+  iret frame on the client's own stack (16- or 32-bit by the D bit of
+  its cs) and redirects the client's return to the handler; the
+  handler's iret goes straight back to the client, ring 3 to ring 3.
+- **0204h** returns the hook, or a DEFAULT handler: `dpmistub`, 256
+  stubs of 4 bytes (`int 0E6h` / N / `iret`) reached through two
+  permanent (`0FEh`) stub selectors, 16- and 32-bit, made on first use.
+  The monitor accepts int 0E6h only when the client's cs is a stub
+  selector: it reads N from the stub, steps eip onto the iret, and
+  re-enters `eindisp` with vector N. So chaining to the default behaves
+  exactly like an unhooked int N -- int 21h translations included --
+  and cannot re-enter the client's hook.
+- **cleanup**: a task's hooks are cleared at 4Ch (`e31hclr`, called
+  from `einfun4c`) and on the driver's Unregister path (inline in
+  `e6f8f`); otherwise a later program in the same task would get
+  interrupts delivered to a dead handler.
+- `phooktab`: `DPHKN` (32) entries of 12 bytes, in the code region
+  next to `dblktab`.
+
+### einback rebuilds the WHOLE return frame -- read this before touching returns
+
+`einback` does `rep movsw` with `cx=18`, which under the 32-bit cs is
+`rep movsd`: 18 DWORDS, 72 bytes, from `ncairegs+4` to `p0stack-72..-1`.
+That covers the entire iret frame, rebuilt from the NCA's copy
+(`ncanip`, `ncancs`, `ncanflag`, `ncansp`, `ncanss`) taken at einative
+entry. The first delivery version wrote `ss:[p0stack-20]` etc. and the
+client simply returned to its own code: einback had overwritten it.
+Measured with the tracer: the frame held the handler address right
+up to einback, the IRET event's popped frame showed the original.
+Anything that changes where a client returns (delivery, stubs,
+future callbacks) must write the `ncan*` copy, never `p0stack`.
+
+### Measured
+
+Client, twice in one boot: 0204h(60h) default = `0073:0180` (stub16,
+60h x 4); 0205h(60h) -> CF clear; two `int 60h` -> the counting handler
+reached 2; 0204h(60h) -> the client's `cs:0285`. Then int 21h hooked
+with a handler that counts and chains to the default via `jmp far`:
+a string printed through the hook appears on screen and the count is 1.
+Unhook both, exit; the second run behaves identically (hooks cleaned).
+
+Regression, all nine clients, Divide/Internal 0 everywhere. Segments
+and largest-block figures moved up by 4 KB (`19D4` -> `1AD4`, `852B`
+-> `842B`): the larger `$386.SYS` shifts everything above it; the
+relations the tests check are unchanged.
+
+### Scope limits
+
+- delivery covers what reaches `einative`; hardware IRQs arriving
+  while a client runs are expected to go the same way but are NOT
+  verified
+- IF/TF are not cleared for the handler: a ring-3 handler could not set
+  IF back when IOPL < 3
+- 0202h/0203h (exception handlers) not implemented
+- 32 hooks system-wide

@@ -7117,6 +7117,9 @@ einative:				; bp,ds,es,cx,bx already pushed
 	xor	dx,dx			; dx to contain vector number
 	db	67h
 	mov	dl,ss:[iveccode]
+	db	66h
+	jmp	einvhook		; pm vector hooks, default stubs
+eindisp:
 	cmp	dl,38h			
 	je	eint38
 	cmp	dl,0d4h
@@ -7544,6 +7547,30 @@ e31n02:
 	jmp	e310102
 e31n03:
 	db	66h
+	cmp	ax,0200h
+	jne	e31n20
+	db	66h
+	jmp	e310200
+e31n20:
+	db	66h
+	cmp	ax,0201h
+	jne	e31n21
+	db	66h
+	jmp	e310201
+e31n21:
+	db	66h
+	cmp	ax,0204h
+	jne	e31n24
+	db	66h
+	jmp	e310204
+e31n24:
+	db	66h
+	cmp	ax,0205h
+	jne	e31n25
+	db	66h
+	jmp	e310205
+e31n25:
+	db	66h
 	cmp	ax,0400h
 	je	e310400
 	db	66h
@@ -7605,6 +7632,18 @@ dpmirsv dw	0,0
 ; DPMI extended memory blocks per task (UPDATE 43), ss-addressable
 DBLKN	equ	128			; 128 blocks system-wide (1 KB)
 dblktab db	DBLKN*8 dup(0)
+
+; DPMI protected-mode interrupt hooks and default stubs (UPDATE 50)
+DPHKN	equ	32
+phooktab db	DPHKN*12 dup(0)
+stubsel16 dw	0
+stubsel32 dw	0
+dpmistub label	byte			; int 0E6h / N / iret, N = 0..255
+DSTUBN	=	0
+	rept	256
+	db	0cdh,0e6h,DSTUBN,0cfh
+DSTUBN	=	DSTUBN+1
+	endm
 
 	page
 ;--------------------------------------------------------------------
@@ -8699,6 +8738,410 @@ e310102:
 	db	66h
 	jmp	e31dsel
 
+	page
+;--------------------------------------------------------------------
+;	int 31h 0200h/0201h - get/set real-mode interrupt vector
+;--------------------------------------------------------------------
+;
+; bl = vector; cx:dx = segment:offset. The vector table is read and
+; written at linear bl*4 through ds, the absolute-zero flat selector
+; einative leaves loaded -- i.e. the CURRENT task's real-mode table.
+; [esi] is hand-encoded (8B 06 / 89 06): MASM's [si] form (rm=100) is
+; a SIB byte under the 32-bit cs.
+;
+e310200:
+	NLD	ncavbx
+	EAXI	25h,0ffh,0		; vector
+	shl	ax,2			; shl eax,2
+	mov	si,ax			; mov esi,eax
+	db	8bh,06h 		; mov eax,[esi]
+	NSTW	ncavdx			; offset
+	shr	ax,16
+	NSTW	ncavcx			; segment
+	db	66h
+	jmp	e31dok
+
+e310201:
+	NLD	ncavbx
+	EAXI	25h,0ffh,0
+	shl	ax,2
+	mov	si,ax			; mov esi,eax
+	xor	ax,ax
+	NLDW	ncavcx
+	shl	ax,16
+	NLDW	ncavdx			; eax = segment:offset
+	cli				; no interrupt may see half a vector
+	db	89h,06h 		; mov [esi],eax
+	sti
+	db	66h
+	jmp	e31dok
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0204h/0205h - protected-mode interrupt vectors
+;--------------------------------------------------------------------
+;
+; A client may hook vector N with 0205h. From then on, an int N it
+; raises is DELIVERED to its handler (eindeliv, called from einative
+; before the normal dispatch): an iret frame goes onto the client's
+; own stack (16/32-bit by the D bit of its cs) and the return frame
+; on p0stack is pointed at the handler, so the handler's iret goes
+; straight back to the client, ring 3 to ring 3.
+;
+; 0204h returns the hook, or a DEFAULT handler: one 4-byte stub per
+; vector (dpmistub: int 0E6h / N / iret) reached through two stub
+; selectors (16- and 32-bit). The monitor accepts int 0E6h only from
+; a stub selector, reads N, steps eip past it onto the iret, and
+; re-enters the normal dispatch with vector N -- so chaining to the
+; default behaves exactly like an unhooked int N (int 21h
+; translations included) and cannot re-enter the client's hook.
+;
+; Scope: interrupts that reach einative. Exceptions (0202h/0203h) are
+; not delivered. IF/TF are not cleared for the handler (a ring-3
+; handler could not set IF back when IOPL < 3).
+;
+; phooktab: DPHKN entries of 12 bytes: +0 in use, +1 task id,
+; +2 vector, +4 handler offset (dd), +8 handler selector (dw).
+
+e31hclr:				; free every hook of task dl
+	xor	si,si			;  (no dovmint: a subroutine is safe)
+e31hclp:
+	db	67h
+	cmp	byte ptr ss:[si+phooktab],1
+	jne	e31hcnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+1],dl
+	jne	e31hcnx
+	db	67h
+	mov	byte ptr ss:[si+phooktab],0
+e31hcnx:
+	add	si,12
+	db	66h
+	cmp	si,DPHKN*12
+	jb	e31hclp
+	db	66h
+	ret
+
+e31hfind:				; cl = vector, ch = task: si = entry
+	xor	si,si			;  CF set if not hooked
+e31hflp:
+	db	67h
+	cmp	byte ptr ss:[si+phooktab],1
+	jne	e31hfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+1],ch
+	jne	e31hfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+2],cl
+	jne	e31hfnx
+	clc
+	db	66h
+	ret
+e31hfnx:
+	add	si,12
+	db	66h
+	cmp	si,DPHKN*12
+	jb	e31hflp
+	stc
+	db	66h
+	ret
+
+e31hnew:				; si = free entry, CF set if full
+	xor	si,si
+e31hnlp:
+	db	67h
+	cmp	byte ptr ss:[si+phooktab],0
+	je	e31hnok
+	add	si,12
+	db	66h
+	cmp	si,DPHKN*12
+	jb	e31hnlp
+	stc
+	db	66h
+	ret
+e31hnok:
+	clc
+	db	66h
+	ret
+
+e31stubs:				; make the two stub selectors once
+	db	66h,67h
+	cmp	word ptr ss:[stubsel16],0
+	je	e31stb1
+	clc
+	db	66h
+	ret
+e31stb1:
+	mov	dl,0			; 16-bit first, then 32-bit (40h)
+e31stb2:
+	xor	si,si
+e31stb3:
+	db	67h
+	cmp	ss:[si+dtitable],0ffh
+	je	e31stb4
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e31stb3
+	stc
+	db	66h
+	ret
+e31stb4:
+	db	67h
+	mov	ss:[si+dtitable],0feh	; permanent: never swept, never freed
+	mov	di,si
+	shl	di,3
+	db	66h
+	add	di,gdtspace-gdt
+	db	66h,67h
+	mov	word ptr ss:[di+gdt],3ffh	; limit: 256 stubs x 4
+	db	66h,67h
+	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],0
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],0fah	; p=1,dpl=3,s=1,code r/x
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],dl	; d=0 or d=1
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],0
+	mov	ax,di
+	or	al,3
+	or	dl,dl
+	jnz	e31stb5
+	db	66h,67h
+	mov	ss:[stubsel16],ax
+	mov	dl,40h
+	jmp	short e31stb2
+e31stb5:
+	db	66h,67h
+	mov	ss:[stubsel32],ax
+	clc
+	db	66h
+	ret
+
+e31vtask:				; cl = vector (from bl), ch = task id
+	NLD	ncavbx
+	mov	cl,al
+	db	66h
+	call	e31tid
+	mov	ch,dl
+	db	66h
+	ret
+
+;---- 0204h get protected-mode vector: cx:(e)dx
+
+e310204:
+	db	66h
+	call	e31vtask
+	db	66h
+	call	e31hfind
+	jc	e0204d
+	db	66h,67h
+	mov	ax,word ptr ss:[si+phooktab+8]
+	NSTW	ncavcx
+	db	67h
+	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax,dword
+	NST	ncavdx
+	db	66h
+	jmp	e31dok
+e0204d:					; not hooked: the default stub
+	push	cx
+	db	66h
+	call	e31stubs
+	pop	cx
+	jnc	e0204s
+	db	66h
+	jmp	e31bad
+e0204s:
+	db	66h,67h
+	mov	ax,ss:[stubsel16]
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jz	e0204t
+	db	66h,67h
+	mov	ax,ss:[stubsel32]
+e0204t:
+	NSTW	ncavcx
+	xor	ax,ax
+	mov	al,cl
+	shl	ax,2			; vector * 4
+	NST	ncavdx
+	db	66h
+	jmp	e31dok
+
+;---- 0205h set protected-mode vector from cx:(e)dx
+
+e310205:
+	db	66h
+	call	e31vtask
+	NLDW	ncavcx			; the handler selector
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	e0205u
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	je	e0205u
+	EAXI	25h,0fff8h,0		; must be a present dpl-3 code descriptor
+	db	66h			;  inside the gdt
+	cmp	ax,gdtlen
+	jae	e0205x
+	mov	di,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+5]
+	and	al,0f8h
+	cmp	al,0f8h
+	jne	e0205x
+	db	66h
+	call	e31hfind
+	jnc	e0205s
+	db	66h
+	call	e31hnew
+	jnc	e0205s
+e0205x:
+	db	66h
+	jmp	e31bad
+e0205s:					; si = entry for (task, vector)
+	db	67h
+	mov	byte ptr ss:[si+phooktab],1
+	db	67h
+	mov	byte ptr ss:[si+phooktab+1],ch
+	db	67h
+	mov	byte ptr ss:[si+phooktab+2],cl
+	NLDW	ncavcx
+	db	66h,67h
+	mov	word ptr ss:[si+phooktab+8],ax
+	NLD	ncavdx			; offset; 16-bit client: dx only
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e0205o
+	EAXI	25h,0ffffh,0
+e0205o:
+	db	67h
+	mov	word ptr ss:[si+phooktab+4],ax	; mov dword
+	db	66h
+	jmp	e31dok
+e0205u:					; the default again: unhook
+	db	66h
+	call	e31hfind
+	jc	e0205v
+	db	67h
+	mov	byte ptr ss:[si+phooktab],0
+e0205v:
+	db	66h
+	jmp	e31dok
+
+;---- einative: stub re-entry and hook delivery. dl = vector,
+;     ebx = nca. Falls back to eindisp with edx = the vector.
+
+einvhook:
+	cmp	dl,0e6h 		; default-stub re-entry?
+	jne	einvh1
+	NLDW	ncancs			; (was ss:[p0stack-16])
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	einvst
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	je	einvst
+	db	66h
+	jmp	eindisp 		; a plain int 0E6h: normal handling
+einvst:
+	NLD	ncanip			; (was ss:[p0stack-20])
+	EAXI	05h,<offset mmgrp:dpmistub+700h>,0
+	mov	si,ax			; mov esi,eax: linear, via flat ds
+	db	8ah,06h 		; mov al,[esi]: N
+	db	0ffh,01000011b		; inc dword [ebx+ncanip]: onto the iret
+	db	offset nca:ncanip
+	xor	dx,dx
+	mov	dl,al
+	db	66h
+	jmp	eindisp 		; as if the client raised int N
+einvh1:
+	mov	cl,dl
+	db	66h
+	call	e31tid
+	mov	ch,dl
+	db	66h
+	call	e31hfind
+	jnc	einvdl
+	xor	dx,dx
+	mov	dl,cl
+	db	66h
+	jmp	eindisp
+einvdl:
+	db	67h
+	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax: handler offset
+	NST	ncabufer+00
+	xor	ax,ax
+	db	66h,67h
+	mov	ax,word ptr ss:[si+phooktab+8]
+	NST	ncabufer+04		; handler selector
+	NLD	ncancs			; (was ss:[p0stack-16])
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+6]
+	EAXI	25h,40h,0
+	NST	ncabufer+08		; nonzero: 32-bit client
+	NLD	ncanss			; (was ss:[p0stack-4])
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+7]
+	shl	ax,8
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+4]
+	shl	ax,16
+	db	66h,67h
+	mov	ax,ss:[di+gdt+2]
+	NST	ncabufer+12		; ss base
+	NLD	ncabufer+08
+	or	ax,ax
+	jz	einvd16
+
+					; 32-bit client: eip, cs, eflags
+	NLD	ncansp			; (was ss:[p0stack-8]) esp
+	db	83h,0e8h,0ch		; sub eax,12
+	NST	ncansp			; (was ss:[p0stack-8])
+	NADD	ncabufer+12
+	mov	di,ax			; mov edi,eax: linear, flat ds
+	NLD	ncanip			; (was ss:[p0stack-20])
+	db	89h,07h 		; mov [edi],eax
+	NLD	ncancs			; (was ss:[p0stack-16])
+	db	89h,47h,04h		; mov [edi+4],eax
+	NLD	ncanflag			; (was ss:[p0stack-12])
+	db	89h,47h,08h		; mov [edi+8],eax
+	jmp	short einvdgo
+
+einvd16:				; 16-bit client: ip, cs, flags
+	NLD	ncansp			; (was ss:[p0stack-8])
+	db	83h,0e8h,06h		; sub eax,6
+	EAXI	25h,0ffffh,0		; sp wraps within the segment
+	NST	ncansp			; (was ss:[p0stack-8])
+	NADD	ncabufer+12
+	mov	di,ax
+	NLD	ncanip			; (was ss:[p0stack-20])
+	db	66h,89h,07h		; mov [edi],ax
+	NLD	ncancs			; (was ss:[p0stack-16])
+	db	66h,89h,47h,02h 	; mov [edi+2],ax
+	NLD	ncanflag			; (was ss:[p0stack-12])
+	db	66h,89h,47h,04h 	; mov [edi+4],ax
+
+einvdgo:				; return into the handler
+	NLD	ncabufer+00
+	NST	ncanip			; (was ss:[p0stack-20])
+	NLD	ncabufer+04
+	NST	ncancs			; (was ss:[p0stack-16])
+	db	66h
+	jmp	einback
+
 einfun4c:
 	db	66h
 	call	freeclsel		; descriptors; preserves ebx (nca)
@@ -8712,6 +9155,8 @@ einfun4c:
 	NST	ncauregs+08		; client ax
 	db	66h
 	call	e31tid			; dl = task id
+	db	66h
+	call	e31hclr			; its protected-mode interrupt hooks
 	xor	ax,ax
 	mov	al,dl
 	NST	ncauregs+00
@@ -10309,6 +10754,17 @@ e6f8fnx:
 	add	edi,8
 	cmp	edi,DBLKN*8
 	jb	e6f8flp
+	xor	edi,edi			; and the task's pm interrupt hooks
+e6f8fh:
+	cmp	byte ptr ss:[edi+phooktab],1
+	jne	e6f8fhn
+	cmp	byte ptr ss:[edi+phooktab+1],dl
+	jne	e6f8fhn
+	mov	byte ptr ss:[edi+phooktab],0
+e6f8fhn:
+	add	edi,12
+	cmp	edi,DPHKN*12
+	jb	e6f8fh
 	pop	es
 	pop	ds
 	pop	edi
