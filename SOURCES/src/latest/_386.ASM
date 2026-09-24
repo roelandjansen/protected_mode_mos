@@ -7458,6 +7458,12 @@ einfun49:
 	db	offset nca:ncavflag
 	db	0feh			; immediate data, sign-extended
 
+; dovmint takes the VECTOR in edx, and the conversion above used dl
+; for base bits 16-23: 49h was being reflected through vector 10h
+; (dl = base byte << 4), the video BIOS -- never reaching DOS. That
+; was the whole "49h does nothing from PM" story (UPDATE 25/35/45).
+	xor	dx,dx			; xor edx,edx
+	mov	dl,21h
 	db	66h
 	call	dovmint 		; edx contains vector number
 	db	0f6h,01000011b		; test [ebx+ncavflag],01h
@@ -7519,6 +7525,24 @@ einint31:
 	db	66h
 	jmp	e31desc
 e31n00:
+	db	66h
+	cmp	ax,0100h
+	jne	e31n01
+	db	66h
+	jmp	e310100
+e31n01:
+	db	66h
+	cmp	ax,0101h
+	jne	e31n02
+	db	66h
+	jmp	e310101
+e31n02:
+	db	66h
+	cmp	ax,0102h
+	jne	e31n03
+	db	66h
+	jmp	e310102
+e31n03:
 	db	66h
 	cmp	ax,0400h
 	je	e310400
@@ -8418,6 +8442,263 @@ e31dok:
 	db	66h
 	jmp	einback
 
+	page
+;--------------------------------------------------------------------
+;	int 31h 0100h - allocate DOS memory block
+;--------------------------------------------------------------------
+;
+; bx = paragraphs. Reflects DOS 48h (as einfun48 does), then builds a
+; selector for the block: base = segment * 16, limit = size - 1,
+; byte-granular, data r/w, dpl 3, tagged 80h|taskid so freeclsel
+; releases it at 4Ch; DOS reclaims the block itself at termination.
+;
+; out: CF clear: ax = real-mode segment, dx = selector
+;      CF set:   ax = DOS error, bx = largest available (from DOS)
+;
+; DEVIATION: DPMI 0.9 gives a block over 64 KB several consecutive
+; selectors, one per 64 KB. This gives ONE selector with the whole
+; limit (up to 1 MB): fine for 32-bit clients, not for 16-bit ones
+; needing more than 64 KB. 0101h/0102h are not implemented: DOS 49h
+; from a native-mode task does not take effect (UPDATE 45).
+;
+e310100:
+	NLD	ncavbx
+	NST	ncauregs+00		; paragraphs, for the limit
+	db	0c6h,01000011b		; mov [ebx+ncavax+1],48h
+	db	offset nca:ncavax+1
+	db	48h
+	xor	dx,dx			; xor edx,edx
+	mov	dl,21h			; vector for dovmint
+	db	66h
+	call	dovmint
+	db	0f6h,01000011b		; test [ebx+ncavflag],01h
+	db	offset nca:ncavflag
+	db	01h
+	jz	e0100ok
+	db	66h			; DOS refused: ax = error, bx =
+	jmp	einback 		;  largest, CF set -- as DPMI wants
+
+e0100ok:
+	db	66h
+	call	e31tid			; dl = task id
+	mov	dh,dl
+	or	dh,80h			; the client-descriptor tag
+	xor	si,si
+e0100lp:
+	db	67h
+	cmp	ss:[si+dtitable],0ffh
+	je	e0100got
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e0100lp
+	db	66h,0c7h,01000011b	; no descriptor: ax = 8, CF set
+	db	offset nca:ncavax	;  (the DOS block goes back at exit)
+	dw	8
+	db	66h
+	jmp	e31bad
+e0100got:
+	db	67h
+	mov	ss:[si+dtitable],dh
+	mov	di,si			; mov edi,esi
+	shl	di,3
+	db	66h
+	add	di,gdtspace-gdt
+	xor	ax,ax
+	NLDW	ncavax			; segment
+	shl	ax,4			; shl eax,4: linear base
+	db	66h,67h
+	mov	ss:[di+gdt+2],ax	; base 0-15
+	shr	ax,16
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],al	; base 16-23
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],0	; base 24-31
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],0f2h	; p=1,dpl=3,s=1,data r/w
+	NLD	ncauregs+00
+	EAXI	25h,0ffffh,0		; paragraphs
+	shl	ax,4
+	dec	ax			; dec eax: limit = size - 1
+	db	66h,67h
+	mov	ss:[di+gdt],ax		; limit 0-15
+	shr	ax,16
+	and	al,0fh			; limit 16-19, g=0, d=0
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],al
+	mov	ax,di
+	or	al,3
+	NSTW	ncavdx			; dx = selector; ax = segment already
+	db	66h
+	jmp	e31dok
+
+	page
+;--------------------------------------------------------------------
+;		4a - modify allocated memory block
+;--------------------------------------------------------------------
+;
+; As 49h, the client holds a SELECTOR in es where DOS wants a segment;
+; it is converted the same way. Nothing else changes: makegdte gives
+; every descriptor the same fixed limit and never records a block
+; size, so a resized block keeps its descriptor as it is. bx (new size
+; in, largest available out on failure) passes through untouched.
+;
+; A selector outside gdtspace is passed straight through.
+;
+einfun4a:
+	db	66h			; 16-bit data
+	db	8bh,01110011b		; mov si,[ebx+ncanes] (client's es)
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncanes
+	db	66h
+	and	si,0fff8h		; clear rpl bits 0-2
+	db	66h
+	cmp	si,gdtspace-gdt 	; below the user area?
+	jb	e4apass
+	db	66h
+	cmp	si,gdtspace-gdt+8*dtilen
+	jae	e4apass
+
+; convert the descriptor base back to a real-mode segment
+
+	db	66h			; 16-bit data
+	db	67h			; 16-bit address
+	mov	ax,ss:[si+gdt+2]	; base bits 0-15
+	db	67h
+	mov	dl,byte ptr ss:[si+gdt+4]  ; base bits 16-23
+	db	66h
+	shr	ax,4
+	shl	dl,4
+	or	ah,dl			; paragraph number
+	db	66h			; 16-bit data
+	db	89h,01000011b		; mov [ebx+ncaves],ax
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncaves
+e4apass:
+
+; MOS returns CF unchanged on success (see einfun49): enter clear
+
+	db	66h			; 16-bit data
+	db	83h,01100011b		; and [ebx+ncavflag],0fffeh
+	;	  01...011		; disp=byte,base=ebx
+	db	offset nca:ncavflag
+	db	0feh			; immediate data, sign-extended
+	xor	dx,dx			; dovmint takes the VECTOR in edx; the
+	mov	dl,21h			;  conversion above used dl (UPDATE 48)
+	db	66h
+	call	dovmint 		; edx contains vector number
+	db	66h
+	jmp	einback
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0101h/0102h - free / resize DOS memory block
+;--------------------------------------------------------------------
+;
+; dx = selector from 0100h (must be this task's: e31sel). Its base is
+; turned back into the real-mode segment for DOS 49h/4Ah.
+; 0101h: on success the descriptor is freed too.
+; 0102h: bx = new paragraphs; on success the descriptor's limit follows
+;        the new size; on failure ax = DOS error, bx = largest possible.
+; edx is set to 21h right before dovmint: it carries the VECTOR, and a
+; clobbered dl is exactly what made 49h/4Ah no-ops (UPDATE 48).
+;
+e31dsel:				; common: dx must be one of our selectors
+	NLD	ncavbx
+	NST	ncauregs+04		; client bx
+	NLDW	ncavdx
+	NSTW	ncavbx			; e31sel checks ncavbx
+	db	66h
+	call	e31tid
+	mov	dh,dl
+	or	dh,80h
+	db	66h
+	call	e31sel			; di = gdt offset, CF = not ours
+	pushf
+	NLD	ncauregs+04
+	NST	ncavbx			; client bx back
+	popf
+	jnc	e31ds1
+	db	66h
+	jmp	e31bad
+e31ds1:
+	mov	ax,di			; mov eax,edi
+	NST	ncauregs+00		; kept across dovmint
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+4]	; base 16-23
+	shl	ax,16
+	db	66h,67h
+	mov	ax,ss:[di+gdt+2]	; base 0-15
+	shr	ax,4			; segment
+	NSTW	ncaves
+	db	66h,83h,01100011b	; and [ebx+ncavflag],0fffeh: CF clear
+	db	offset nca:ncavflag
+	db	0feh
+	NLD	ncauregs+08		; function 49h or 4Ah, set by caller
+	db	88h,01100011b		; mov [ebx+ncavax+1],ah
+	db	offset nca:ncavax+1
+	xor	dx,dx
+	mov	dl,21h			; the vector
+	db	66h
+	call	dovmint
+	db	0f6h,01000011b		; test [ebx+ncavflag],01h
+	db	offset nca:ncavflag
+	db	01h
+	jz	e31ds2
+	db	66h			; DOS refused: ax/bx/CF as DOS left them
+	jmp	einback
+e31ds2:
+	NLD	ncauregs+00
+	mov	di,ax			; mov edi,eax: the descriptor again
+	NLD	ncauregs+08
+	cmp	ah,49h
+	jne	e3102lim
+
+; 0101h: DOS freed the block; free the descriptor
+
+	mov	si,di
+	db	66h
+	sub	si,gdtspace-gdt
+	shr	si,3
+	db	67h
+	mov	ss:[si+dtitable],0ffh
+	db	66h
+	jmp	e31dok
+
+; 0102h: limit = new paragraphs * 16 - 1 (bits 16-19 into byte 6)
+
+e3102lim:
+	NLD	ncauregs+04		; new size, paragraphs (client bx)
+	EAXI	25h,0ffffh,0
+	shl	ax,4
+	dec	ax			; dec eax
+	db	66h,67h
+	mov	ss:[di+gdt],ax		; limit 0-15
+	shr	ax,16
+	and	al,0fh
+	db	67h
+	mov	ah,byte ptr ss:[di+gdt+6]
+	and	ah,0f0h 		; keep g/d/avl
+	or	al,ah
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],al
+	NLD	ncauregs+04
+	NST	ncavbx			; bx as the client gave it
+	db	66h
+	jmp	e31dok
+
+e310101:
+	mov	ah,49h
+	NST	ncauregs+08
+	db	66h
+	jmp	e31dsel
+e310102:
+	mov	ah,4ah
+	NST	ncauregs+08
+	db	66h
+	jmp	e31dsel
+
 einfun4c:
 	db	66h
 	call	freeclsel		; descriptors; preserves ebx (nca)
@@ -8467,6 +8748,14 @@ e4cnext:
 e4cdone:
 	NLD	ncauregs+08
 	NST	ncavax			; 4Ch again
+
+; dovmint takes the VECTOR in edx. e31tid (dl = task id) and the
+; memory device calls (dx = rhentry) have overwritten it: without
+; this the termination was reflected through vector <task id> --
+; vector 0 for task 0, MOS's divide handler, "Divide by zero error"
+; after EVERY client exit since UPDATE 43 (found in UPDATE 46).
+	xor	dx,dx			; xor edx,edx
+	mov	dl,21h			; int 21h, as einative found it
 	db	66h
 	jmp	einstand
 
@@ -8599,7 +8888,7 @@ eintable label word
 	dw	offset mmgrp:einfun47	; 47 - get curr dir
 	dw	offset mmgrp:einfun48	; 48 - allocate memory
 	dw	offset mmgrp:einfun49	; 49 - release memory
-	dw	offset mmgrp:einstand	; 4a
+	dw	offset mmgrp:einfun4a	; 4a - modify memory block
 	dw	offset mmgrp:einstand	; 4b
 	dw	offset mmgrp:einfun4c	; 4c - terminate
 	dw	offset mmgrp:einstand	; 4d

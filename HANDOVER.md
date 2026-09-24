@@ -1531,3 +1531,199 @@ clients: no "Internal error". The imm16 sweep (UPDATE 43) over the
 
 The test clients live only as patches to `DPMITST.ASM` in the scratch
 tree; the shipped `DPMITST.ASM` is the original.
+
+## UPDATE 45 (2026-09-23) — before 0100h-0102h: PM 49h does not reach MOS
+
+No source change; tree is UPDATE 44. Investigated UPDATE 35 first,
+because DPMI 0101h/0102h go through DOS 49h/4Ah.
+
+`mosfun49` (MOSFUN00.ASM) takes the caller's es from the task save
+area (`tes`), validates the chain (`mmsetup`), checks the MCB at
+`es-1` for 'M'/'Z', sets its owner to 0, and on success puts the MCB
+segment into `ax` -- a fingerprint.
+
+Measured, the client reading the MCB itself (0006h gives the 48h
+selector's base; a 0000h/0007h/0008h selector aimed 16 bytes below it
+reads the MCB):
+
+	MCB lin 00019D30, type 'M', owner before/after 49h: 09AA / 09AA
+
+and `ax` after the protected-mode 49h is the client's own `4973h`
+(`ah=49h`, stale `al`), CF clear. So `mosfun49` never ran its success
+path, and the block is not freed.
+
+Experiment: 49h routed back to plain reflection (`einstand`, the raw
+selector in es) in a scratch build: same result, owner unchanged. So
+it is NOT the selector-to-segment conversion in `einfun49`, and NOT
+MOS expecting a selector. A 49h reflected from a native-mode task does
+not take effect in either form, while 48h through the same reflection
+works.
+
+Next: a v-86 level trace of the reflected 49h into MOS's int 21h entry
+(PMTRACE_STEPS currently triggers only after int 6fh 7705h or int
+0D4h ah=11h -- add a trigger for the reflection of int 21h ah=49h), to
+see where it goes instead of `mosfun49`. Until then 0101h/0102h would
+inherit the no-op; 0100h alone would work (48h does).
+
+## UPDATE 46 (2026-09-23) — int 31h 0100h; a regression since UPDATE 43 found and fixed
+
+`_386.ASM`: `$386.SYS` 24448 -> 24624, 0 warnings, 0 severe.
+
+### 0100h allocate DOS memory block
+
+Reflects DOS 48h (as `einfun48`), then builds a selector: base =
+segment * 16, limit = size - 1, byte-granular, data r/w, dpl 3, tagged
+`80h|taskid` (freed at 4Ch; DOS reclaims the block at termination).
+CF set on failure with DOS's `ax` (error) and `bx` (largest available)
+passed through, as DPMI specifies. No descriptor free: ax = 8, CF set.
+
+**Deviation:** a block over 64 KB gets ONE selector with the full limit
+(up to 1 MB) instead of one per 64 KB as DPMI 0.9 describes. Fine for
+32-bit clients, not for 16-bit clients needing more than 64 KB.
+
+Measured: 256 paragraphs -> segment `19D4`, selector `007B`, CF clear;
+0006h base `00019D40` = `19D4` x 16; writes at 0 and `FFEh` read back;
+`BX=FFFFh` -> CF set, `ax=0008`, `bx=852B`.
+
+0101h/0102h NOT implemented: they need DOS 49h/4Ah, which do not take
+effect from a native-mode task (UPDATE 45).
+
+### Regression: "Divide by zero error" after EVERY client exit since UPDATE 43
+
+Every DPMI client, including the unmodified base DPMITST, ended with
+MOS's `mosint00` message. Missed by UPDATES 43-45 because their
+regression runs only grepped for "Internal error". Bisected on the
+saved sources with the base client: UPDATE 34/40/42 clean, UPDATE 43
+not.
+
+Cause: `einstand` -> `dovmint` takes the VECTOR in `edx`. The 4Ch
+block-release loop added in UPDATE 43 overwrote it -- `e31tid` puts the
+task id in `dl`, the memory-device calls put `rhentry` in `dx` -- so
+the client's termination was reflected through vector <task id>:
+vector 0 for task 0, MOS's divide handler. No divide ever happened.
+Fix: `xor edx,edx / mov dl,21h` before `jmp einstand` in `e4cdone`.
+
+**UPDATE 44 corrected:** its "Divide by zero" after a mid-run 778Fh was
+attributed to Unregister freeing live descriptors. Wrong -- it was this
+bug, present on every exit. On the fixed build the same 778Fh test
+releases the block (`CB60`/`CA60`/`CB60`) and exits clean.
+
+Rule, from this: any handler that ends in `einstand` or `dovmint` must
+leave `edx` = the vector. And regression runs must check the screen
+for EVERY failure text (Divide, Internal, and so on), not one.
+
+### Regression (all with Divide/Internal counts)
+
+| client | result | Divide | Internal |
+| --- | --- | --- | --- |
+| base DPMITST + two-48h int 21h client | clean exit | 0 | 0 |
+| 0100h | as above | 0 | 0 |
+| descriptors + 0501h/0503h | grow copy `1234h`/`ABCDh` | 0 | 0 |
+| leak test, twice | `CB6000` both runs, forged handles refused | 0 | 0 |
+| mid-run 778Fh | block released, exits clean | 0 | 0 |
+
+Next: the 49h investigation (UPDATE 45) -- a PMTRACE_STEPS trigger on
+the reflection of int 21h ah=49h, and follow it into MOS.
+
+## UPDATE 47 (2026-09-23) — 49h investigation, first results
+
+No driver change; tree is UPDATE 46. Tracer extended (see RIG.md):
+`PMTRACE_STEP_AH` arms step mode on a protected-mode client's int 21h
+with that `ah`.
+
+Stepped the reflected 49h and, for comparison, the reflected 48h, from
+the same client, and cut each at the first return into the monitor:
+
+| call | v-86 steps | where it runs |
+| --- | --- | --- |
+| 48h (works) | 968 | entirely in segment `fff8`, entry `fff8:5008`; never enters MOSINT21 |
+| 49h (no effect) | 313 | enters `fff8:a8f5`, then `MOSINT21` -> helper -> `FUN00A` -> console and int 24h/25h code |
+
+- MOS receives the right registers: `ax=49AAh`, `es=19D4h` (the
+  segment `einfun49` converted), `ss=19ABh` (the task's control area).
+- The 49h path never reaches `MOSFUN49` (`0CB0:5BB0` = `d230:5BB0`);
+  the register holding `19D3h` (the MCB) never appears.
+- `FUN00A` is, per `MOSFUN00.ASM`, "entry point for mosfun4c" --
+  termination code. MOSINT21 dispatches on `[tah]` after `mossaver`
+  and goes through a `tcbnest` check (nest level 1 -> `mos21k`, else
+  `mos21b`).
+- `$$MOS.MAP`: `0CB0` = MOSSEG, which runs at `d230`. `fff8` does NOT
+  correspond to the kernel's `DDT` group (`0230`): offsets there map to
+  nonsense (`CRTINT3`), so `fff8` is some other resident code.
+
+Reading: something resident in `fff8` hooks int 21h and services 48h
+itself; 49h is passed on into MOSINT21, where it is handled as a
+termination-path call rather than dispatched to `mosfun49`. Unproven.
+
+Next:
+1. identify the `fff8` code: read IVT[21h] at the time of the call,
+   and find which driver or kernel part loads at `FFF80h`
+2. read MOSINT21 from `mossaver` to the dispatch: what `[tah]` holds
+   for this call, and whether the `tcbnest` path sends it to `mos21b`
+3. compare with a real-mode 49h (works), stepped the same way
+
+## UPDATE 48 (2026-09-24) — the 49h mystery solved; 4Ah, 0101h, 0102h in
+
+`_386.ASM`: `$386.SYS` 24624 -> 24912, 0 warnings, 0 severe.
+
+### Root cause of "PM 49h/4Ah do nothing" (UPDATES 25, 35, 45, 47)
+
+`einfun49` converts the client's selector to a segment with
+
+	mov dl,byte ptr ss:[si+gdt+4]	; base bits 16-23
+	shl dl,4
+
+and then calls `dovmint`, which takes the VECTOR in `edx`. For a block
+at `19D4h` (base `19D40h`) `dl` became `10h`: the call was reflected
+through int 10h, the video BIOS, and never reached DOS. That is why the
+UPDATE 47 trace showed console routines, BIOS code and MOS's int 10h
+hook instead of MOSINT21 -> MOSFUN49, and why the register values
+looked right (they were; only the vector was wrong). Every theory in
+UPDATES 45/47 about MOS rerouting the call is withdrawn.
+
+Fix: `xor edx,edx / mov dl,21h` immediately before `dovmint`. Same
+class as UPDATE 46; the rule stands: **anything that ends in
+`dovmint` or `einstand` must set `edx` = the vector right before the
+call.**
+
+The UPDATE 47 tracer work stays useful: `PMTRACE_STEP_AH` (RIG.md)
+arms step mode on a protected-mode int 21h, and it was the comparison
+of two entry points (`fff8:5008` for 48h vs `fff8:a8f5` for "49h")
+that pointed at the vector.
+
+### Now working
+
+- 49h: owner of the freed block goes `09AAh` -> `0000h` (read by the
+  client through a 0000h/0007h/0008h selector aimed at the MCB)
+- 4Ah (`einfun4a`, parked since UPDATE 35, same fix): UPDATE 35's
+  sequence now gives A = `19D4`, B = `19DD` (after the grown A), C =
+  `19DD` (B's space reused); an impossible grow returns CF, `ax=0008`,
+  `bx=0008` -- A cannot pass the block behind it, DOS's own answer
+- 0101h free DOS memory block: `dx` = selector; ownership via
+  `e31sel` (a forged selector, `18h`, is refused with CF); base ->
+  segment -> 49h; on success the descriptor slot is freed too
+- 0102h resize DOS memory block: `bx` = new size, `dx` = selector;
+  4Ah; on success the descriptor's limit follows (bits 16-19 into byte
+  6, G/D/AVL kept); on failure DOS's `ax`/`bx` pass through
+- common code `e31dsel` for both; the client's `bx` is restored after
+  the ownership check borrows `ncavbx`
+
+Measured: 0100h 256 paragraphs -> `19D4` / `0073`; 0102h to 512 ->
+CF clear and a write at `1FFEh` reads back (`7E7Eh`); 0102h `FFFFh` ->
+CF, `ax=0008`, `bx=862C`; 0101h forged -> CF, own -> CF clear; the next
+0100h gets `19D4` back.
+
+### Regression (Divide / Internal checked on every run)
+
+| client | result | Div | Int |
+| --- | --- | --- | --- |
+| two-48h int 21h client | clean | 0 | 0 |
+| descriptors + 0501h/0503h grow copy | `1234h`/`ABCDh` | 0 | 0 |
+| 0501h leak test | `CB6000` both runs, forged refused | 0 | 0 |
+| mid-run 778Fh | block released | 0 | 0 |
+| 0100h | `5A5Ah`/`A5A5h`, huge refused | 0 | 0 |
+| 48h/4Ah/49h sequence | `19D4 19DD 19DD` | 0 | 0 |
+| 0100h/0101h/0102h | as above | 0 | 0 |
+
+The memory side of DPMI 0.9 is now complete: 0100h-0102h, 0500h-0503h,
+plus int 21h 48h/49h/4Ah from protected mode.
