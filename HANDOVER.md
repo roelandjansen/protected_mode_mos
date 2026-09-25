@@ -1890,3 +1890,53 @@ write.
 
 Regression, all ten clients including the UPDATE 50 hook client:
 Divide/Internal 0.
+
+## UPDATE 52 (2026-09-25) — int 31h 0301h/0302h: call real-mode far procedure
+
+`_386.ASM`: `$386.SYS` 27520 -> 27616, 0 warnings, 0 severe.
+
+### How
+
+`dovmint` takes its real-mode target from the vector table (or, for
+the memory device, `mysegadr:dx`) and builds a real-mode IRET frame on
+the NCA stack: flags, `mysegadr`, `dovmcont`. A far call needs only a
+third target source, so:
+
+- **`dovmfar`** (next to `dovmrh`, before `dovmint`): the same prologue
+  (`pop [ncaretad]`, `sp` reset), then `cs:ip` from `ncauregs+08`
+  (`cs<<16|ip`), joining dovmint at `dovmrbak`
+- **0301h / 0302h** (`e310301`, one entry for both): the same `CX=0`
+  check as 0300h, set `ncauregs+04 = -1` as a far-call marker, and
+  join 0300h after its vector step (`e0300s`); once the structure's
+  address is known, `CS:IP` is read from `+2Ch`/`+2Ah` into
+  `ncauregs+08`; at the reflect step the marker selects `dovmfar`
+  instead of `dovmint`
+
+One frame serves both: the iret frame is exactly right for 0302h; a
+0301h procedure returns with `retf`, leaving the flags word behind,
+which `dovmcont` discards when it resets `sp` to a fixed value before
+saving anything. Registers in/out, parking of the client's own
+registers and the limits (`CX` must be 0, `SS:SP` ignored) are those
+of 0300h (UPDATE 51).
+
+`jmp dovmrbak` in `dovmfar` assembled SHORT (`EB 43 90`), which is
+correct under either operand size; a near `E9 rel16` would not have
+been. Check any unprefixed near jump in this region in the listing.
+
+### Measured (twice in one boot)
+
+Two real-mode routines written through a 0100h selector into DOS
+memory: `add ax,cx / iret` at offset 0, `add bx,cx / retf` at 8.
+Structure `AX=1000h`, `BX=5000h`, `CX=0234h`:
+
+	0302h -> CF clear, AX = 1234h
+	0301h -> CF clear, BX = 5234h
+
+Regression, all eleven clients (incl. hooks and 0300h): Divide/
+Internal 0.
+
+### Open in 0300h-0306h
+
+0303h/0304h (allocate/free real-mode callback), 0305h (state
+save/restore addresses), 0306h (raw mode switch addresses), and the
+stack-copy (`CX>0`) / explicit `SS:SP` cases of 0300h-0302h.

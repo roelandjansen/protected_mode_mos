@@ -7577,6 +7577,16 @@ e31n25:
 	jmp	e310300
 e31n30:
 	db	66h
+	cmp	ax,0301h
+	je	e31n31
+	db	66h
+	cmp	ax,0302h
+	jne	e31n32
+e31n31:
+	db	66h
+	jmp	e310301
+e31n32:
+	db	66h
 	cmp	ax,0400h
 	je	e310400
 	db	66h
@@ -9169,6 +9179,20 @@ einvdgo:				; return into the handler
 ; which is what DPMI specifies when SS:SP is 0. FS/GS/IP/CS are not
 ; used by an interrupt and are left as they were.
 ;
+;---- 0301h/0302h call real-mode far procedure (retf / iret frame):
+;     0300h with the structure's CS:IP as target (see dovmfar)
+e310301:
+	NLDW	ncavcx
+	or	ax,ax
+	jz	e0301a
+	db	66h
+	jmp	e31bad
+e0301a:
+	db	83h,11001000b,0ffh	; or eax,-1: the far-call marker
+	NST	ncauregs+04
+	db	66h
+	jmp	e0300s
+
 e310300:
 	NLDW	ncavcx
 	or	ax,ax
@@ -9179,6 +9203,7 @@ e0300a:
 	NLD	ncavbx
 	EAXI	25h,0ffh,0
 	NST	ncauregs+04		; vector
+e0300s:					; 0301h/0302h join here
 
 ; linear address of the structure: es base + (e)di
 
@@ -9223,6 +9248,15 @@ e0300b:
 
 	NLD	ncauregs+00
 	mov	si,ax			; mov esi,eax
+	NLD	ncauregs+04		; far call? its target from the structure
+	EAXI	3dh,0ffffh,0ffffh	; cmp eax,-1
+	jne	e0300t
+	xor	ax,ax
+	db	66h,8bh,46h,2ch 	; mov ax,[esi+2Ch]: CS
+	shl	ax,16
+	db	66h,8bh,46h,2ah 	; mov ax,[esi+2Ah]: IP
+	NST	ncauregs+08
+e0300t:
 	db	8bh,46h,00h		; mov eax,[esi+00]
 	NST	ncavdi
 	db	8bh,46h,04h
@@ -9250,9 +9284,16 @@ e0300b:
 ; reflect: dovmint takes the VECTOR in edx (UPDATE 46/48)
 
 	NLD	ncauregs+04
+	EAXI	3dh,0ffffh,0ffffh	; cmp eax,-1: 0301h/0302h?
+	jne	e0300v
+	db	66h
+	call	dovmfar			; far call to the structure's CS:IP
+	jmp	short e0300r
+e0300v:
 	mov	dx,ax			; mov edx,eax
 	db	66h
 	call	dovmint
+e0300r:
 
 ; results back into the structure
 
@@ -9554,6 +9595,27 @@ eixtable label word
 ;  is not preserved in ncairegs by the interrupt handler. ncap0stk
 ;  and other fields in the nca are provided for this purpose.
 ;--------------------------------------------------------------------
+;
+; dovmfar: as dovmint, but the real-mode target is an explicit far
+; address -- ncauregs+08 = cs<<16|ip -- instead of an interrupt
+; vector. Used by int 31h 0301h/0302h (UPDATE 52). The frame built
+; is the same iret frame; a procedure that returns with retf leaves
+; the flags word behind, which dovmcont discards when it resets sp.
+;
+dovmfar:
+	db	66h
+	db	8fh,01000011b		; pop [ebx+ncaretad]
+	db	offset nca:ncaretad
+	db	66h			; 16-bit data
+	mov	sp,offset mmgrp:s0ip-28 ; as dovmint
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+08]
+	db	offset nca:ncauregs+08
+	mov	cx,ax			; mov ecx,eax
+	db	0c1h,0e9h,10h		; shr ecx,16: cs
+	db	25h			; and eax,0ffffh: ip
+	dw	0ffffh,0
+	jmp	dovmrbak
+
 dovmrh: 				; enter at dovmint, not here!
 	db	66h
 	mov	ax,dx
