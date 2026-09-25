@@ -7600,6 +7600,18 @@ e31n30:
 	jmp	e310305
 e31n35:
 	db	66h
+	cmp	ax,0303h
+	jne	e31n33
+	db	66h
+	jmp	e310303
+e31n33:
+	db	66h
+	cmp	ax,0304h
+	jne	e31n34
+	db	66h
+	jmp	e310304
+e31n34:
+	db	66h
 	cmp	ax,0301h
 	je	e31n31
 	db	66h
@@ -7710,6 +7722,17 @@ DPHKN	equ	32
 phooktab db	DPHKN*12 dup(0)
 stubsel16 dw	0
 stubsel32 dw	0
+
+; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
+DCBN	equ	8
+DCBSZ	equ	96
+dcbtab	db	DCBN*DCBSZ dup(0)
+dcbstub label	byte			; push ax / mov ax,7791h / push n / int 6fh
+DCBI	=	0
+	rept	DCBN
+	db	50h,0b8h,91h,77h,6ah,DCBI,0cdh,6fh
+DCBI	=	DCBI+1
+	endm
 dpmistub label	byte			; int 0E6h / N / iret, N = 0..255
 DSTUBN	=	0
 	rept	256
@@ -8928,6 +8951,22 @@ e31hcnx:
 	db	66h
 	cmp	si,DPHKN*12
 	jb	e31hclp
+	xor	si,si			; and its real-mode callbacks
+e31hcc:
+	db	67h
+	cmp	byte ptr ss:[si+dcbtab],1
+	jne	e31hcn
+	db	67h
+	cmp	byte ptr ss:[si+dcbtab+1],dl
+	jne	e31hcn
+	db	67h
+	mov	byte ptr ss:[si+dcbtab],0
+e31hcn:
+	db	66h
+	add	si,DCBSZ
+	db	66h
+	cmp	si,DCBN*DCBSZ
+	jb	e31hcc
 	db	66h
 	ret
 
@@ -10208,6 +10247,152 @@ einxfg2:
 	xor	dh,dh			; edx = the vector (dx held N only)
 	db	66h
 	jmp	eindisp
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0303h/0304h - real-mode callbacks (step 2a: bookkeeping)
+;--------------------------------------------------------------------
+;
+; dcbtab: DCBN records of DCBSZ bytes: +0 in use, +1 task id, +4 proc
+; offset (dd), +8 proc selector, +10 structure selector, +12 structure
+; offset (dd); +16.. room for the outer v-86 state saved when the
+; callback fires (step 2b).
+; dcbstub: one real-mode stub per record, in this driver's real-mode
+; code (mysegadr:offset): push ax / mov ax,7791h / push idx / int 6fh.
+;
+e31cfind:				; dx = stub offset, ch = task:
+	xor	si,si			;  si = record, CF set if none
+	db	0bfh			; mov edi,offset dcbstub (imm32: MASM's BF iw
+	dw	offset mmgrp:dcbstub,0 ;  would swallow 2 bytes under the 32-bit cs)
+e31cflp:
+	db	67h
+	cmp	byte ptr ss:[si+dcbtab],1
+	jne	e31cfnx
+	db	67h
+	cmp	byte ptr ss:[si+dcbtab+1],ch
+	jne	e31cfnx
+	cmp	di,dx
+	je	e31cfok
+e31cfnx:
+	db	66h
+	add	si,DCBSZ
+	add	di,8
+	db	66h
+	cmp	si,DCBN*DCBSZ
+	jb	e31cflp
+	stc
+	db	66h
+	ret
+e31cfok:
+	clc
+	db	66h
+	ret
+
+;---- 0303h allocate real-mode callback: ds:(e)si = procedure,
+;     es:(e)di = real-mode call structure -> cx:dx = real-mode address
+
+e310303:
+	db	66h
+	call	e31tid
+	mov	ch,dl			; task
+	NLD	ncands			; the procedure selector must be a
+	EAXI	25h,0fff8h,0		;  present dpl-3 code descriptor
+	db	66h
+	cmp	ax,gdtlen
+	jae	e0303x
+	mov	di,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+5]
+	and	al,0f8h
+	cmp	al,0f8h
+	jne	e0303x
+	xor	si,si			; a free record
+	db	0bfh			; mov edi,offset dcbstub (imm32: MASM's BF iw
+	dw	offset mmgrp:dcbstub,0 ;  would swallow 2 bytes under the 32-bit cs)
+e0303lp:
+	db	67h
+	cmp	byte ptr ss:[si+dcbtab],0
+	je	e0303got
+	db	66h
+	add	si,DCBSZ
+	add	di,8
+	db	66h
+	cmp	si,DCBN*DCBSZ
+	jb	e0303lp
+e0303x:
+	db	66h
+	jmp	e31bad
+e0303got:
+	db	67h
+	mov	byte ptr ss:[si+dcbtab],1
+	db	67h
+	mov	byte ptr ss:[si+dcbtab+1],ch
+	NLD	ncavsi			; procedure offset
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e0303a
+	EAXI	25h,0ffffh,0
+e0303a:
+	db	67h
+	mov	word ptr ss:[si+dcbtab+4],ax	; mov dword
+	NLDW	ncands
+	db	66h,67h
+	mov	word ptr ss:[si+dcbtab+8],ax
+	NLDW	ncanes
+	db	66h,67h
+	mov	word ptr ss:[si+dcbtab+10],ax
+	NLD	ncavdi			; structure offset
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs] (again: flags)
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e0303b
+	EAXI	25h,0ffffh,0
+e0303b:
+	db	67h
+	mov	word ptr ss:[si+dcbtab+12],ax	; mov dword
+
+; NCA2 -- used while a callback runs -- is NCA1's block + its total
+; size (256 + ncalen + ncabufsz); give it the same buffer size.
+
+	NLD	ncabufsz
+	push	ax
+	db	05h			; add eax,256+ncalen
+	dw	256+ncalen,0
+	db	03h,0c3h		; add eax,ebx: NCA2's nca, linear
+	mov	si,ax			; mov esi,eax
+	pop	ax
+	db	89h,46h 		; mov [esi+ncabufsz],eax
+	db	offset nca:ncabufsz
+
+	db	66h,67h
+	mov	ax,ss:[mysegadr]
+	NSTW	ncavcx			; cx = real-mode segment
+	mov	ax,di
+	NSTW	ncavdx			; dx = the stub
+	db	66h
+	jmp	e31dok
+
+;---- 0304h free real-mode callback: cx:dx = its real-mode address
+
+e310304:
+	db	66h
+	call	e31tid
+	mov	ch,dl
+	NLDW	ncavdx
+	mov	dx,ax
+	db	66h
+	call	e31cfind
+	jnc	e0304a
+	db	66h
+	jmp	e31bad
+e0304a:
+	db	67h
+	mov	byte ptr ss:[si+dcbtab],0
+	db	66h
+	jmp	e31dok
 
 einfun4c:
 	db	66h
@@ -11869,6 +12054,17 @@ e6f8fhn:
 	add	edi,12
 	cmp	edi,DPHKN*12
 	jb	e6f8fh
+	xor	edi,edi			; and the task's real-mode callbacks
+e6f8fc:
+	cmp	byte ptr ss:[edi+dcbtab],1
+	jne	e6f8fcn
+	cmp	byte ptr ss:[edi+dcbtab+1],dl
+	jne	e6f8fcn
+	mov	byte ptr ss:[edi+dcbtab],0
+e6f8fcn:
+	add	edi,DCBSZ
+	cmp	edi,DCBN*DCBSZ
+	jb	e6f8fc
 	pop	es
 	pop	ds
 	pop	edi
