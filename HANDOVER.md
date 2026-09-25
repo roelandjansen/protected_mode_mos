@@ -1940,3 +1940,42 @@ Internal 0.
 0303h/0304h (allocate/free real-mode callback), 0305h (state
 save/restore addresses), 0306h (raw mode switch addresses), and the
 stack-copy (`CX>0`) / explicit `SS:SP` cases of 0300h-0302h.
+
+## UPDATE 53 (2026-09-25) — the cheap batch: 0002h, 0009h, 000Ah-000Ch, 0600h-0604h, 0702h/0703h, 0900h-0902h
+
+`_386.ASM`: `$386.SYS` 27616 -> 28256, 0 warnings, 0 severe.
+
+| function | behaviour |
+| --- | --- |
+| 0002h | real-mode segment -> data selector, base seg*16, limit 64 KB; a repeat for the same segment returns the SAME selector (this task's existing data descriptor with that base, 64 KB, byte-granular), as DPMI asks |
+| 0009h | set access rights, `CL` = access byte, `CH` = G/D/AVL; refused unless DPL 3 and S=1; limit bits 16-19 kept |
+| 000Ah | data alias of an owned selector: same base and limit, data r/w, dpl 3 |
+| 000Bh / 000Ch | get / set the 8-byte descriptor at `es:(e)di`; 000Ch refused unless DPL 3 and S=1 |
+| 0600h-0603h, 0702h/0703h | succeed as no-ops: nothing pages to disk on this host |
+| 0604h | page size, `BX:CX` = `0000:1000h` |
+| 0900h / 0901h / 0902h | disable / enable / get the virtual interrupt flag; `AL` = the state before the call. IF lives in `ncavflag`, which `einback` folds into the client's returned flags |
+
+All selector-taking functions go through `e31sel`: only this task's
+`80h|taskid` descriptors are accepted. New helpers (no dovmint, so
+near subroutines): `e31base` (gdt offset -> base), `e31free1` (claim
+one free slot for tag `dh`), `e31ptr` (linear address of the client's
+`es:(e)di`, edi preserved).
+
+Still returning CF on purpose: 0800h (physical address mapping),
+0A00h (vendor API), 0B00h-0B03h (debug watchpoints).
+
+Checks on the new code: the imm16-accumulator sweep, plus a new sweep
+for unprefixed near `E8`/`E9` in the 32-bit-executed region; both
+empty.
+
+### Measured (second run in one boot)
+
+	0002h  B800h twice -> 007B, 007B; base 000B8000
+	0009h  valid -> CF clear; access 92h (DPL 0) -> CF set
+	000Ah  alias of cs: [100h] via alias = cs:[100h] = 00BBh
+	000Ch  round-trip with base 1000h -> CF clear, 0006h low word 1000h;
+	       access 92h -> CF set
+	0604h  0000:1000; 0600h CF clear
+	0900h -> 1, 0902h -> 0; 0901h -> 0, 0902h -> 1
+
+Regression, all twelve clients: Divide/Internal 0.

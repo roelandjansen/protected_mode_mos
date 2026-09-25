@@ -7587,6 +7587,39 @@ e31n31:
 	jmp	e310301
 e31n32:
 	db	66h
+	cmp	ax,0600h
+	jb	e31n70
+	db	66h
+	cmp	ax,0603h
+	ja	e31n64
+	db	66h
+	jmp	e31nop
+e31n64:
+	db	66h
+	cmp	ax,0604h
+	jne	e31n70
+	db	66h
+	jmp	e310604
+e31n70:
+	db	66h
+	cmp	ax,0702h
+	jb	e31n90
+	db	66h
+	cmp	ax,0703h
+	ja	e31n90
+	db	66h
+	jmp	e31nop
+e31n90:
+	db	66h
+	cmp	ax,0900h
+	jb	e31n99
+	db	66h
+	cmp	ax,0902h
+	ja	e31n99
+	db	66h
+	jmp	e3190x
+e31n99:
+	db	66h
 	cmp	ax,0400h
 	je	e310400
 	db	66h
@@ -8276,9 +8309,39 @@ e31dn6:
 e31dn7:
 	db	66h
 	cmp	ax,0008h
-	jne	e31dbad
+	jne	e31dm
 	db	66h
 	jmp	e3108
+e31dm:
+	db	66h
+	cmp	ax,0002h
+	jne	e31dm9
+	db	66h
+	jmp	e3102
+e31dm9:
+	db	66h
+	cmp	ax,0009h
+	jne	e31dmA
+	db	66h
+	jmp	e3109
+e31dmA:
+	db	66h
+	cmp	ax,000Ah
+	jne	e31dmB
+	db	66h
+	jmp	e310A
+e31dmB:
+	db	66h
+	cmp	ax,000Bh
+	jne	e31dmC
+	db	66h
+	jmp	e310B
+e31dmC:
+	db	66h
+	cmp	ax,000Ch
+	jne	e31dbad
+	db	66h
+	jmp	e310C
 e31dbad:
 	db	66h
 	jmp	e31bad
@@ -9337,6 +9400,292 @@ e0300r:
 	db	0feh
 	db	66h
 	jmp	einback
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0002h/0009h/000Ah/000Bh/000Ch, 0600h-0604h,
+;	0702h/0703h, 0900h-0902h (UPDATE 53)
+;--------------------------------------------------------------------
+
+e31base:				; di = gdt offset -> eax = base
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+7]
+	shl	ax,8
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+4]
+	shl	ax,16
+	db	66h,67h
+	mov	ax,ss:[di+gdt+2]
+	db	66h
+	ret
+
+e31free1:				; si = free slot claimed for tag dh,
+	xor	si,si			;  di = its gdt offset; CF if none
+e31f1lp:
+	db	67h
+	cmp	ss:[si+dtitable],0ffh
+	je	e31f1ok
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e31f1lp
+	stc
+	db	66h
+	ret
+e31f1ok:
+	db	67h
+	mov	ss:[si+dtitable],dh
+	mov	di,si
+	shl	di,3
+	db	66h
+	add	di,gdtspace-gdt
+	clc
+	db	66h
+	ret
+
+e31ptr:					; ncauregs+00 = linear es:(e)di
+	push	di			;  of the caller (edi preserved)
+	NLD	ncanes
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	db	66h
+	call	e31base
+	mov	cx,ax			; mov ecx,eax
+	NLD	ncavdi
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e31pt32
+	EAXI	25h,0ffffh,0
+e31pt32:
+	add	ax,cx			; add eax,ecx
+	NST	ncauregs+00
+	pop	di
+	db	66h
+	ret
+
+;---- 0002h segment to descriptor: bx = segment -> ax = selector.
+;     Reuses this task's existing data descriptor for the same base
+;     and a 64 KB limit, as DPMI asks; otherwise claims a new one.
+
+e3102:
+	NLD	ncavbx
+	EAXI	25h,0ffffh,0
+	shl	ax,4			; base
+	NST	ncauregs+04
+	xor	si,si
+e3102lp:
+	db	67h
+	cmp	ss:[si+dtitable],dh	; one of ours?
+	jne	e3102nx
+	mov	di,si
+	shl	di,3
+	db	66h
+	add	di,gdtspace-gdt
+	db	67h
+	cmp	byte ptr ss:[di+gdt+5],0f2h	; data r/w dpl 3
+	jne	e3102nx
+	db	66h,67h
+	cmp	word ptr ss:[di+gdt],0ffffh	; 64 KB
+	jne	e3102nx
+	db	67h
+	test	byte ptr ss:[di+gdt+6],8fh	; byte-granular, <= 1 MB
+	jnz	e3102nx
+	push	si
+	db	66h
+	call	e31base
+	pop	si
+	NCMP	ncauregs+04
+	je	e3102hit
+e3102nx:
+	inc	si
+	db	66h
+	cmp	si,dtilen
+	jb	e3102lp
+	db	66h
+	call	e31free1
+	jnc	e3102new
+	db	66h
+	jmp	e31bad
+e3102new:
+	NLD	ncauregs+04
+	db	66h,67h
+	mov	ss:[di+gdt+2],ax	; base 0-15
+	shr	ax,16
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],al
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],0
+	db	66h,67h
+	mov	word ptr ss:[di+gdt],0ffffh
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],0f2h
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],0
+e3102hit:
+	mov	ax,di
+	or	al,3
+	NSTW	ncavax
+	db	66h
+	jmp	e31dok
+
+;---- 0009h set access rights: bx = selector, cl = access byte,
+;     ch = G/D/AVL (bits 7/6/4). DPL must stay 3 and S = 1.
+
+e3109:
+	db	66h
+	call	e31sel
+	jnc	e3109a
+	db	66h
+	jmp	e31bad
+e3109a:
+	NLDW	ncavcx
+	mov	cl,al
+	and	cl,70h
+	cmp	cl,70h			; dpl 3, system bit set
+	je	e3109b
+	db	66h
+	jmp	e31bad
+e3109b:
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],al
+	and	ah,0d0h 		; G, D, AVL
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+6]
+	and	al,0fh			; limit 16-19 kept
+	or	al,ah
+	db	67h
+	mov	byte ptr ss:[di+gdt+6],al
+	db	66h
+	jmp	e31dok
+
+;---- 000Ah create alias descriptor: bx = selector -> ax = data
+;     selector with the same base and limit
+
+e310A:
+	db	66h
+	call	e31sel
+	jnc	e310Aa
+	db	66h
+	jmp	e31bad
+e310Aa:
+	push	di			; source
+	db	66h
+	call	e31free1
+	pop	si			; si = source gdt offset
+	jnc	e310Ab
+	db	66h
+	jmp	e31bad
+e310Ab:
+	db	67h
+	mov	ax,word ptr ss:[si+gdt]		; mov eax: limit 0-15, base 0-15
+	db	67h
+	mov	word ptr ss:[di+gdt],ax		; mov dword
+	db	67h
+	mov	ax,word ptr ss:[si+gdt+4]	; mov eax: base, access, g/lim, base
+	db	67h
+	mov	word ptr ss:[di+gdt+4],ax	; mov dword
+	db	67h
+	mov	byte ptr ss:[di+gdt+5],0f2h	; data r/w dpl 3
+	mov	ax,di
+	or	al,3
+	NSTW	ncavax
+	db	66h
+	jmp	e31dok
+
+;---- 000Bh get descriptor / 000Ch set descriptor: bx = selector,
+;     es:(e)di = 8 bytes. 000Ch keeps DPL 3 and S = 1.
+
+e310B:
+	db	66h
+	call	e31sel
+	jnc	e310Ba
+	db	66h
+	jmp	e31bad
+e310Ba:
+	db	66h
+	call	e31ptr
+	NLD	ncauregs+00
+	mov	si,ax			; mov esi,eax
+	db	67h
+	mov	ax,word ptr ss:[di+gdt]		; mov eax
+	db	89h,06h 		; mov [esi],eax
+	db	67h
+	mov	ax,word ptr ss:[di+gdt+4]	; mov eax
+	db	89h,46h,04h		; mov [esi+4],eax
+	db	66h
+	jmp	e31dok
+
+e310C:
+	db	66h
+	call	e31sel
+	jnc	e310Ca
+	db	66h
+	jmp	e31bad
+e310Ca:
+	db	66h
+	call	e31ptr
+	NLD	ncauregs+00
+	mov	si,ax
+	db	8bh,46h,04h		; mov eax,[esi+4]
+	mov	cl,ah			; access byte
+	and	cl,70h
+	cmp	cl,70h
+	je	e310Cb
+	db	66h
+	jmp	e31bad
+e310Cb:
+	db	67h
+	mov	word ptr ss:[di+gdt+4],ax	; mov dword
+	db	8bh,06h 		; mov eax,[esi]
+	db	67h
+	mov	word ptr ss:[di+gdt],ax		; mov dword
+	db	66h
+	jmp	e31dok
+
+;---- 0600h-0603h, 0702h/0703h: nothing pages to disk here -- succeed
+
+e31nop:
+	db	66h
+	jmp	e31dok
+
+;---- 0604h get page size: bx:cx = 0000:1000h
+
+e310604:
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavbx],0
+	db	offset nca:ncavbx
+	dw	0
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavcx],1000h
+	db	offset nca:ncavcx
+	dw	1000h
+	db	66h
+	jmp	e31dok
+
+;---- 0900h/0901h/0902h virtual interrupt state. The client's IF
+;     lives in ncavflag, which einback folds into its returned flags.
+;     al = the state BEFORE the call (1 = enabled).
+
+e3190x:
+	mov	cx,ax			; function, low byte 00/01/02
+	NLD	ncavflag
+	mov	dl,ah
+	shr	dl,1
+	and	dl,1			; old IF
+	cmp	cl,0
+	jne	e3190y
+	and	ah,0fdh 		; 0900h: disable
+e3190y:
+	cmp	cl,1
+	jne	e3190z
+	or	ah,02h			; 0901h: enable
+e3190z:
+	NST	ncavflag
+	db	88h,01010011b		; mov [ebx+ncavax],dl: al = old state
+	db	offset nca:ncavax
+	db	66h
+	jmp	e31dok
 
 einfun4c:
 	db	66h
