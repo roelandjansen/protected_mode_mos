@@ -2129,3 +2129,168 @@ UPDATE 23b trace saw at `27C4`.)
   #GP from emulated instructions) are not delivered
 - 0205h on vectors 0-7 still gets faults with an INTERRUPT frame --
   clients should use 0203h for faults, as DPMI intends
+
+## UPDATE 56 (2026-09-25) — callbacks, step 1 (NCA2 space); a cleanup gap found
+
+`_DPMI.ASM`: `$DPMI.SYS` unchanged in size (5117), same four
+pre-existing A4057 warnings. `_386.ASM` unchanged (29472).
+
+### Callback design (0303h/0304h), from an inventory of the state
+
+- `dovmcont` finds the nca from `s0ss` (the v-86 ss) + `256/16`, not
+  from a fixed variable, and saves the real-mode results by resetting
+  `sp` to a fixed spot inside `ncairegs` -- never into the live v-86
+  stack
+- all reflection state is nca-relative (`ebx` from `addrnca` via the
+  task's `tcbncadr`): `ncairegs`, the `ncan*` frame copy, `ncaretad`,
+  `ncauregs`/`ncabufer` scratch, and the real-mode stack in the nca's
+  first 256 bytes (the size is hard-wired in six places)
+
+So nesting needs no save stack through the central path: while a
+callback runs, point `tcbncadr` at a SECOND nca. Every inner
+`dovmint`/`dovmcont`/`einative`/`einback` then uses NCA2 and the paused
+outer call in NCA1 is untouched; swap back when the callback returns.
+
+Steps:
+1. NCA2 space (THIS UPDATE): 1687h reports `NCAPAIR` = 2 x `NCATOTAL`
+   (80 paragraphs); GoProtect still passes `cx = NCATOTAL`, so the
+   monitor sizes NCA1 exactly as before; NCA2 is the second half of
+   the client's host-data block
+2. real-mode trap: per callback a real-mode stub
+   (`push ax / mov ax,7791h / push idx / int 6fh`); the new int 6fh
+   function saves the outer v-86 frame, swaps to NCA2, fills the
+   client's structure and enters its protected-mode procedure with
+   `ds:(e)si` = real-mode stack, `es:(e)di` = structure
+3. return: the procedure's iret lands on a new stub (int 0E9h); the
+   monitor swaps back to NCA1 and resumes the real-mode caller at the
+   structure's CS:IP with its registers
+4. 0303h/0304h, tested with a real-mode routine in DOS memory that
+   far-calls the callback, invoked through 0301h -- the nested case
+
+Measured for step 1: `1687h` `si = 0050h`. Regression, all fifteen
+clients: clean except as below. Segments moved up by `28h` paragraphs
+(`1AD4` -> `1AFC`) and the largest DOS block shrank by the same
+(`842B` -> `8403`): NCA2's 640 bytes, as expected.
+
+### Gap found: cleanup only happens at int 21h ah=4Ch
+
+The UPDATE 55 client, run twice in one boot: the first run ends by
+chaining a #DE to the default handler, so MOS terminates it through
+its divide handler -- NOT through the client's own int 21h ah=4Ch.
+`einfun4c` never runs, so the client's exception hook, descriptors and
+DPMI memory blocks survive it; the second run's 0202h returned the dead
+handler `008B:0256` instead of the default `0073:0404`. The same holds
+for every MOS-initiated termination: default exception handler,
+Ctrl-C, critical-error abort, int 20h, int 21h ah=00h.
+
+Fix planned: ALSO clean up at the START of a DPMI session. A task runs
+one DPMI client at a time, so anything tagged `80h|taskid` (hooks,
+descriptors, blocks) when a new client switches in belongs to a dead
+predecessor. First confirm that `nmswitch` runs exactly once per
+session (int 0D4h ax=1001h), not on every return to native mode, then
+call the same release that `e6f8f` does (with the host's own new cs
+descriptor built AFTER the sweep).
+
+## UPDATE 57 (2026-09-25) — cleanup also at the start of every DPMI session
+
+`_386.ASM`: `$386.SYS` 29472 -> 29488, 0 warnings, 0 severe.
+
+Closes UPDATE 56's gap: a client ending without int 21h ah=4Ch (MOS's
+default exception handling, Ctrl-C, critical-error abort, int 20h)
+left its hooks, descriptors and DPMI memory blocks behind.
+
+### Why the session start is a safe place
+
+Measured with a hook on `nmswitch`: it runs once at boot
+(`$DPMI.SYS`'s `InitProtect`) and once per client session -- never
+per DOS call (3 hits over two client runs making 52 protected-mode DOS
+calls; 1 hit booting alone). And `GoProtect` calls `778Eh`
+(CODE_SELECTOR) BEFORE `int 0D4h ax=1001h`, so at that moment the new
+client has allocated nothing; a task runs one client at a time, so
+anything still tagged `80h|taskid` belongs to a dead predecessor.
+
+### Change
+
+`e6f8f`'s release body is now a shared use32 routine, `dpmiclr`
+(descriptors via `fcs_ptr`, blocks via `nrelease`, interrupt and
+exception hooks; preserves all registers). `e6f8f` calls it, then
+returns as before; `e6f8e` calls it first, before building the new
+client's code selector. `nmswitch` (use16) was the other candidate but
+cannot reach `nrelease` (use32) without a new cross-segment pointer.
+
+### Measured
+
+- the UPDATE 55 exception client twice in one boot: the second run's
+  0202h(0) now returns the default `0073:0404` (before: the dead
+  first run's handler `008B:0256`)
+- a client that allocates 64 KB with 0501h and then dies by #DE (no
+  4Ch), three runs: largest free block `CB6000` every run; on UPDATE 55
+  the same client leaks 64 KB per run (`CA6000`, `C96000`)
+- regression, all fifteen clients: clean (the exception client's
+  Divide=2 is its deliberate chained #DE, once per run)
+
+### Limit (pre-existing, now documented)
+
+Resources are tagged per TASK, not per client. A DPMI program that
+EXECs another DPMI program in the same task is unsupported: the child's
+4Ch has always freed the parent's descriptors, blocks and hooks, and
+now the child's START does the same. Supporting it needs per-client
+ownership (e.g. the client PSP) instead of the task id.
+
+## UPDATE 58 (2026-09-25) — callbacks step 2: the facts the implementation rests on
+
+No source change; tree is UPDATE 57.
+
+### How an excursion gets home (e6f02, int 6fh 7702h)
+
+`e6f02` pops the int 6fh frame's registers and does `jmp ss:[s0ip]`
+with `s0ip` = the v-86 IP just after `dovmcont`'s `int 6fh`. The
+driver's real-mode code segment (`mysegadr`) and the monitor's cs have
+the same base (`700h`), so the same bytes after that `int 6fh` simply
+continue in native mode. That continuation finds its nca from `s0ss`
+(the v-86 ss, + `256/16`) and returns to that nca's `ncaretad`.
+
+Consequence for callbacks: the OUTER excursion goes home through its
+own `int 6fh 7702h` from its own stack (NCA1's), so its way back does
+not depend on any global the callback disturbs. Resuming it after a
+callback = iret back into v-86 with the saved outer frame.
+
+### The int 6fh handler frame (from v-86)
+
+- below `p0stack`: the v-86 iret frame `s0ip s0cs s0flags s0sp s0ss
+  s0es s0ds s0fs s0gs`, 9 dwords
+- pushed by the entry, above that: `ebp ds es ecx ebx` (the caller's
+  `bx` at `[bp-16]`, as `e6f8e` reads it); `cgrm7` pops `ebx ecx es ds
+  ebp`, sets `sp = s0ip` and does `iretd` back to v-86
+- live in the CPU: `eax edx esi edi` (handlers preserve them)
+
+### Step 2 plan (int 6fh 7791h, `e6f91`)
+
+Real-mode stub per callback, in the driver's real-mode code:
+`push ax / mov ax,7791h / push <index> / int 6fh`.
+
+1. capture the WHOLE outer v-86 state into the callback's save record:
+   the 9 `s0*` dwords, `ebx ecx es ds ebp` from the frame, `eax edx esi
+   edi` from the CPU, and the stub's pushed `ax` and index from the
+   v-86 stack (then drop them from `s0sp`)
+2. fill the client's real-mode call structure (registered at 0303h)
+   with the real-mode registers
+3. swap the task's nca pointer (`tcbncadr`) to NCA2 = NCA1 + NCATOTAL
+4. build NCA2's native frame: `ncanip/ncancs` = the procedure,
+   `ncanss/ncansp` = the client's stack from NCA1's `ncan*` minus a
+   margin (the client is blocked in its outer call, its stack below is
+   free), `ncanflag` with IF clear; `ds:(e)si` = a data selector for
+   the real-mode `SS:SP`, `es:(e)di` = the structure; on the procedure's
+   stack an iret frame pointing at a new return stub (int 0E9h)
+5. `ebx` = NCA2 and leave through `einback` -- it builds `p0stack` from
+   the nca and irets into the procedure
+
+Step 3 (int 0E9h): copy the structure back into the saved v-86 state
+(including CS:IP and SS:SP as DPMI specifies), swap `tcbncadr` back to
+NCA1, rebuild the `s0*` frame and the pushed registers, and leave via
+`cgrm7`'s pops + `iretd` into v-86.
+
+Open question to settle first in step 2: NCA2 must be initialised
+(`ncabufsz` and the fields `nmswitch` sets for NCA1) before its first
+use -- do it once at the session switch, next to where `nmswitch` sets
+up NCA1.

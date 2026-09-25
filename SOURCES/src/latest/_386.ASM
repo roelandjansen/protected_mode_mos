@@ -11798,6 +11798,22 @@ e6f90:
 	jmp	cgrm7
 
 e6f8f:
+	call	dpmiclr
+	and	byte ptr ss:[s0flags],0feh   ; cf clear
+	jmp	cgrm7
+
+;
+; dpmiclr: release everything tagged for the calling task -- client
+; descriptors (freeclsel via fcs_ptr), DPMI memory blocks (nrelease)
+; and protected-mode interrupt/exception hooks. Preserves all
+; registers. Called at the driver's Unregister (e6f8f) AND at the
+; start of every DPMI session (e6f8e, CODE_SELECTOR, which GoProtect
+; calls before the switch): a task runs one client at a time, so
+; anything still tagged then belongs to a dead predecessor that ended
+; without int 21h ah=4Ch -- default exception handler, Ctrl-C,
+; critical-error abort, int 20h (UPDATE 57).
+;
+dpmiclr:
 	call	dword ptr mmgrp:[fcs_ptr]	; use32 -> use16 wrapper
 ;
 ; Also release this task's DPMI memory blocks (UPDATE 44). This path
@@ -11861,8 +11877,7 @@ e6f8fhn:
 	pop	ecx
 	pop	ebx
 	pop	eax
-	and	byte ptr ss:[s0flags],0feh   ; cf clear
-	jmp	cgrm7
+	ret
 
 
 ;==== dpmi func 8e - code selector for a real-mode segment
@@ -11879,6 +11894,7 @@ e6f8fhn:
 ; out:	caller's bx = selector, cf clear; cf set if the table is full
 ;
 e6f8e:
+	call	dpmiclr			; a new session: drop a dead predecessor's leftovers
 	push	eax
 	push	edx
 	push	esi
