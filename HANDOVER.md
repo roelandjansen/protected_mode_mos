@@ -2044,3 +2044,88 @@ per-level save area and a real-mode stack per level, as a separately
 tested stage, before the callback entry and 0303h/0304h.
 
 Regression, all thirteen clients: Divide/Internal 0.
+
+## UPDATE 55 (2026-09-25) — int 31h 0202h/0203h exception handlers; a TSL #GP bug fixed
+
+`_386.ASM`: `$386.SYS` 28336 -> 29472, 0 warnings, 0 severe. This
+completes option B (UPDATE 54).
+
+### Where client faults arrive
+
+- vectors 0, 1, 3-7 come through the generic stubs and reach
+  `einative` with the vector in `dl`, like an interrupt
+- a client #GP goes to `entint0d`; an instruction the monitor does not
+  emulate goes to `dobad`, which sets `parm6ec = 2` and continues as
+  INT 6 into `entirq`. So #GP arrives as `dl = 6`, `parm6ec = 2`, the
+  error code (`[bp+4]`) already dropped
+- 8-0Fh reaching `einative` are IRQs: the monitor splits exceptions
+  off earlier by error-code position. `dl = 0Dh` here is IRQ5
+  (`jentirq2`) and must never be taken for #GP
+
+### Design
+
+- `phooktab` entries gain a KIND byte at `+3`: 0 = interrupt (0205h),
+  1 = exception (0203h); `e31hfind` now requires kind 0, `e31xfind`
+  kind 1; 0205h writes kind 0
+- `einvhook` -> `einvh0`: int 0E7h/0E8h from a stub selector go to
+  `einxret` / `einxdef`; everything else to `einxcpt`, which picks out
+  client faults (0, 1, 3-7; int 6 with `parm6ec = 2` -> exception 0Dh)
+  and delivers a hooked one, else falls through to the interrupt-hook
+  path (`einvh1`) unchanged
+- delivery (`einxdl`): the DPMI exception frame on the CLIENT's own
+  stack -- return address stub:401h, error code (0: the entry path has
+  dropped it), ip, cs, flags, sp, ss; words for a 16-bit client,
+  dwords for 32-bit -- and the handler entered via the `ncan*` copy
+  (UPDATE 50)
+- the handler's `retf` lands on stub `401h` = `int 0E7h`; `einxret`
+  resumes the client from the frame as the handler left it (ip, cs,
+  flags into both `ncanflag` and `ncavflag`, sp, ss)
+- defaults (0202h, unhooked): 32 stubs at `404h + N*4` =
+  `int 0E8h / N`; `einxdef` restores the client from the frame and
+  re-dispatches the fault through `eindisp` as it was (0Dh back as int
+  6 with `parm6ec = 2`) -- i.e. exactly the behaviour without DPMI
+- the stub table grew: `401h` E7 stub, `404h`-`483h` E8 stubs; stub
+  limit `483h`
+
+Two self-review catches before the first build: `parm6ec` is a WORD
+(`db 66h,67h` on its compare and store, else a dword compare / an imm32
+store under the 32-bit cs), and the IRQ5 trap above.
+
+### The TSL bug: every native-mode #GP corrupted memory
+
+The first test died in the monitor itself: `INT 0d` from the client,
+then a page fault at `27C4` (`mov ecx,[ebx]` right after `calcinad`),
+`ebx = FA00AC8D`. In `calcinad`'s native branch TSL wrote
+
+	and	bx,0ffffh
+	dw	00ffh		; "32-bit data": meant and ebx,00FFFFFFh
+
+relying on MASM's imm16 form `81 E3 FFFF`. MASM chose the sign-extended
+`83 E3 FF` (0FFFFh = -1), so the 32-bit cs ran `and ebx,-1` (no-op) and
+then `FF 00` = `inc dword ptr [eax]`: every native-mode #GP since 1992
+corrupted a dword and page-faulted with the descriptor's access byte
+(`FA`) still in the top of ebx. Now spelled out as `81 E3 FFFF 00FF`.
+A listing sweep for any `83`-form instruction directly followed by a
+`dw` line found no other instance. (This is also what the early
+UPDATE 23b trace saw at `27C4`.)
+
+### Measured
+
+- 0202h(0) default = `0073:0404`
+- 0203h hooks 0Dh and 0 with a handler that adds 2 to the frame's IP
+  and counts; `mov es,0FFF8h` (#GP) and `div cl` with `cl = 0` (#DE)
+  are both delivered and skipped: count 2, the client resumes
+- a #DE handler that chains to the default: MOS's "Divide by zero
+  error", termination, `VER` works afterwards
+- regression, all fifteen clients (incl. 0305h, IRQ0): Divide/Internal
+  0 (the only Divide in any run is the deliberate one above)
+
+### Limits
+
+- the frame lives on the client's stack, not a host-locked one (differs
+  only for stack faults)
+- error code always 0 (the entry path drops it before `einative`)
+- exceptions that do not reach `einative` (page faults, double faults,
+  #GP from emulated instructions) are not delivered
+- 0205h on vectors 0-7 still gets faults with an INTERRUPT frame --
+  clients should use 0203h for faults, as DPMI intends

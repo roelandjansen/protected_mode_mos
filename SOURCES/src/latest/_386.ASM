@@ -5004,8 +5004,13 @@ cinative:
 	and	bl,11111000b		; turn off trash bits
 	db	67h			; 16-bit address
 	mov	bx,ss:[bx+gdt+2]	; load base bits 0-23
-	and	bx,0ffffh		; and clear bits 24-31
-	dw	00ffh			; 32-bit data
+; and ebx,00FFFFFFh, spelled out: TSL wrote "and bx,0ffffh" + "dw 00ffh",
+; relying on MASM's imm16 form (81 E3 FFFF). MASM chose 83 E3 FF (-1,
+; sign-extended), so the dw ran as FF 00 = inc dword ptr [eax]: every
+; native-mode #GP corrupted a dword and then page-faulted here with the
+; access byte left in ebx (UPDATE 55).
+	db	81h,0e3h		; and ebx,00FFFFFFh: clear bits 24-31
+	dw	0ffffh,00ffh
 	db	67h			; 16-bit address
 	add	bx,ss:[p0stack-20]	; add ip to get instruction address
 	db	66h
@@ -7559,6 +7564,18 @@ e31n20:
 	jmp	e310201
 e31n21:
 	db	66h
+	cmp	ax,0202h
+	jne	e31n22
+	db	66h
+	jmp	e310202
+e31n22:
+	db	66h
+	cmp	ax,0203h
+	jne	e31n23
+	db	66h
+	jmp	e310203
+e31n23:
+	db	66h
 	cmp	ax,0204h
 	jne	e31n24
 	db	66h
@@ -7700,6 +7717,12 @@ DSTUBN	=	0
 DSTUBN	=	DSTUBN+1
 	endm
 	db	0cbh			; +400h: retf, the 0305h protected-mode routine
+	db	0cdh,0e7h,90h		; +401h: int 0E7h, exception-handler return
+DXSTBN	=	0			; +404h: default exception stubs
+	rept	32
+	db	0cdh,0e8h,DXSTBN,90h
+DXSTBN	=	DXSTBN+1
+	endm
 
 	page
 ;--------------------------------------------------------------------
@@ -8920,6 +8943,9 @@ e31hflp:
 	db	67h
 	cmp	byte ptr ss:[si+phooktab+2],cl
 	jne	e31hfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+3],0	; kind: interrupt
+	jne	e31hfnx
 	clc
 	db	66h
 	ret
@@ -8980,7 +9006,7 @@ e31stb4:
 	db	66h
 	add	di,gdtspace-gdt
 	db	66h,67h
-	mov	word ptr ss:[di+gdt],400h	; limit: 256 stubs x 4, + retf
+	mov	word ptr ss:[di+gdt],483h	; limit: stubs, retf, E7, 32 E8 stubs
 	db	66h,67h
 	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
 	db	67h
@@ -9091,6 +9117,8 @@ e0205x:
 	jmp	e31bad
 e0205s:					; si = entry for (task, vector)
 	db	67h
+	mov	byte ptr ss:[si+phooktab+3],0	; kind: interrupt
+	db	67h
 	mov	byte ptr ss:[si+phooktab],1
 	db	67h
 	mov	byte ptr ss:[si+phooktab+1],ch
@@ -9126,7 +9154,7 @@ e0205v:
 
 einvhook:
 	cmp	dl,0e6h 		; default-stub re-entry?
-	jne	einvh1
+	jne	einvh0
 	NLDW	ncancs			; (was ss:[p0stack-16])
 	db	66h,67h
 	cmp	ax,ss:[stubsel16]
@@ -9147,6 +9175,35 @@ einvst:
 	mov	dl,al
 	db	66h
 	jmp	eindisp 		; as if the client raised int N
+einvh0:					; E7/E8 from an exception stub, else faults
+	cmp	dl,0e7h
+	je	einvx7
+	cmp	dl,0e8h
+	je	einvx8
+	db	66h
+	jmp	einxcpt
+einvx7:
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	einvx7s
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	jne	einvh1
+einvx7s:
+	db	66h
+	jmp	einxret
+einvx8:
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	einvx8s
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	jne	einvh1
+einvx8s:
+	db	66h
+	jmp	einxdef
 einvh1:
 	mov	cl,dl
 	db	66h
@@ -9739,6 +9796,418 @@ e0305b:
 	dw	400h,0
 	db	66h
 	jmp	e31dok
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0202h/0203h - protected-mode exception handlers
+;--------------------------------------------------------------------
+;
+; Client faults that reach einative: vectors 0, 1, 3-7 directly, and
+; #GP, which entint0d/dobad turns into int 6 with parm6ec = 2 (the
+; error code is gone by then: delivered as exception 0Dh, error 0).
+; 8-0Fh arriving here are IRQs (the monitor splits them off earlier
+; by error-code position), so they are never exceptions.
+;
+; A 0203h hook (phooktab kind byte +3 = 1) gets the DPMI exception
+; frame on the CLIENT's own stack (DPMI wants a host-locked stack;
+; this differs only for stack faults): return address = stub:401h
+; (int 0E7h), error code, then ip/cs/flags/sp/ss -- words for a
+; 16-bit client, dwords for 32-bit. The handler's retf lands on the
+; E7 stub; the monitor resumes the client from the (possibly changed)
+; frame. The DEFAULT handler (0202h, unhooked) is stub 404h + N*4
+; (int 0E8h / N): it restores the client from the frame and handles
+; the fault exactly as without DPMI -- MOS reports and terminates.
+;
+; Client stack linear address: ncanss base + ncansp.
+
+e31sslin:				; eax = linear of client ss:(e)sp
+	NLD	ncanss
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	db	66h
+	call	e31base
+	mov	cx,ax			; mov ecx,eax: ss base
+	NLD	ncansp
+	add	ax,cx			; add eax,ecx
+	db	66h
+	ret
+
+e31xfind:				; as e31hfind, kind 1 (exception)
+	xor	si,si
+e31xflp:
+	db	67h
+	cmp	byte ptr ss:[si+phooktab],1
+	jne	e31xfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+1],ch
+	jne	e31xfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+2],cl
+	jne	e31xfnx
+	db	67h
+	cmp	byte ptr ss:[si+phooktab+3],1
+	jne	e31xfnx
+	clc
+	db	66h
+	ret
+e31xfnx:
+	add	si,12
+	db	66h
+	cmp	si,DPHKN*12
+	jb	e31xflp
+	stc
+	db	66h
+	ret
+
+;---- 0202h get exception handler: bl = 0..1Fh -> cx:(e)dx
+
+e310202:
+	db	66h
+	call	e31vtask		; cl = exception, ch = task
+	cmp	cl,20h
+	jb	e0202a
+	db	66h
+	jmp	e31bad
+e0202a:
+	db	66h
+	call	e31xfind
+	jc	e0202d
+	db	66h,67h
+	mov	ax,word ptr ss:[si+phooktab+8]
+	NSTW	ncavcx
+	db	67h
+	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax
+	NST	ncavdx
+	db	66h
+	jmp	e31dok
+e0202d:
+	push	cx
+	db	66h
+	call	e31stubs
+	pop	cx
+	jnc	e0202s
+	db	66h
+	jmp	e31bad
+e0202s:
+	db	66h,67h
+	mov	ax,ss:[stubsel16]
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jz	e0202t
+	db	66h,67h
+	mov	ax,ss:[stubsel32]
+e0202t:
+	NSTW	ncavcx
+	xor	ax,ax
+	mov	al,cl
+	shl	ax,2
+	db	05h			; add eax,404h
+	dw	404h,0
+	NST	ncavdx
+	db	66h
+	jmp	e31dok
+
+;---- 0203h set exception handler from cx:(e)dx
+
+e310203:
+	db	66h
+	call	e31vtask
+	cmp	cl,20h
+	jb	e0203a
+	db	66h
+	jmp	e31bad
+e0203a:
+	NLDW	ncavcx
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	e0203u
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	je	e0203u
+	EAXI	25h,0fff8h,0
+	db	66h
+	cmp	ax,gdtlen
+	jae	e0203x
+	mov	di,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+5]
+	and	al,0f8h
+	cmp	al,0f8h 		; present dpl-3 code
+	jne	e0203x
+	db	66h
+	call	e31xfind
+	jnc	e0203s
+	db	66h
+	call	e31hnew
+	jnc	e0203s
+e0203x:
+	db	66h
+	jmp	e31bad
+e0203s:
+	db	67h
+	mov	byte ptr ss:[si+phooktab],1
+	db	67h
+	mov	byte ptr ss:[si+phooktab+1],ch
+	db	67h
+	mov	byte ptr ss:[si+phooktab+2],cl
+	db	67h
+	mov	byte ptr ss:[si+phooktab+3],1	; kind: exception
+	NLDW	ncavcx
+	db	66h,67h
+	mov	word ptr ss:[si+phooktab+8],ax
+	NLD	ncavdx
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h
+	dw	0,0040h
+	jnz	e0203o
+	EAXI	25h,0ffffh,0
+e0203o:
+	db	67h
+	mov	word ptr ss:[si+phooktab+4],ax	; mov dword
+	db	66h
+	jmp	e31dok
+e0203u:
+	db	66h
+	call	e31xfind
+	jc	e0203v
+	db	67h
+	mov	byte ptr ss:[si+phooktab],0
+e0203v:
+	db	66h
+	jmp	e31dok
+
+;---- einative side. einxcpt: dl = vector, from einvhook's interrupt
+;     path; delivers an exception if one is hooked, else falls back.
+
+einxcpt:
+	cmp	dl,06h			; int 6: #UD, or a #GP turned into int 6?
+	jne	einx1
+	mov	cl,06h
+	db	66h,67h
+	cmp	ss:[parm6ec],2		; word compare: 66h 67h
+	jne	einx2
+	mov	cl,0dh			; #GP, delivered as exception 0Dh
+	jmp	short einx2
+einx1:					; 0, 1, 3-7 only -- NOT 0Dh: a dl of 0Dh
+	cmp	dl,02h			;  here is IRQ5 (jentirq2)
+	je	einxno
+	cmp	dl,07h
+	ja	einxno
+	mov	cl,dl
+einx2:
+	push	cx
+	push	dx
+	db	66h
+	call	e31tid
+	mov	ch,dl
+	pop	dx
+	pop	ax
+	mov	cl,al
+	db	66h
+	call	e31xfind
+	jnc	einxdl
+einxno:
+	db	66h
+	jmp	einvh1			; the normal interrupt-hook path
+
+einxdl:					; si = hook entry
+	db	67h
+	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax: handler offset
+	NST	ncabufer+00
+	xor	ax,ax
+	db	66h,67h
+	mov	ax,word ptr ss:[si+phooktab+8]
+	NST	ncabufer+04		; handler selector
+	db	66h
+	call	e31stubs		; the E7 return stub must exist
+	NLD	ncancs			; client bitness
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+6]
+	EAXI	25h,40h,0
+	NST	ncabufer+08
+	db	66h
+	call	e31sslin
+	NST	ncabufer+12		; old stack, linear
+	NLD	ncabufer+08
+	or	ax,ax
+	jz	einxd16
+
+	NLD	ncansp			; 32-bit: 8 dwords
+	db	83h,0e8h,20h		; sub eax,32
+	NST	ncansp
+	NLD	ncabufer+12
+	db	83h,0e8h,20h
+	mov	di,ax			; mov edi,eax
+	db	0b8h			; mov eax,401h
+	dw	401h,0
+	db	89h,07h 		; [edi+00] return eip
+	db	66h,67h
+	mov	ax,ss:[stubsel32]
+	db	89h,47h,04h		; [edi+04] return cs
+	xor	ax,ax
+	db	89h,47h,08h		; [edi+08] error code 0
+	NLD	ncanip
+	db	89h,47h,0ch
+	NLD	ncancs
+	db	89h,47h,10h
+	NLD	ncanflag
+	db	89h,47h,14h
+	NLD	ncansp
+	db	83h,0c0h,20h		; add eax,32: sp at the fault
+	db	89h,47h,18h
+	NLD	ncanss
+	db	89h,47h,1ch
+	jmp	short einxdgo
+
+einxd16:				; 16-bit: 8 words
+	NLD	ncansp
+	db	83h,0e8h,10h		; sub eax,16
+	EAXI	25h,0ffffh,0
+	NST	ncansp
+	NLD	ncabufer+12
+	db	83h,0e8h,10h
+	mov	di,ax
+	db	66h,0c7h,07h		; mov word [edi],401h
+	dw	401h
+	db	66h,67h
+	mov	ax,ss:[stubsel16]
+	db	66h,89h,47h,02h
+	xor	ax,ax
+	db	66h,89h,47h,04h 	; error code 0
+	NLD	ncanip
+	db	66h,89h,47h,06h
+	NLD	ncancs
+	db	66h,89h,47h,08h
+	NLD	ncanflag
+	db	66h,89h,47h,0ah
+	NLD	ncansp
+	db	83h,0c0h,10h		; add eax,16: sp at the fault
+	db	66h,89h,47h,0ch
+	NLD	ncanss
+	db	66h,89h,47h,0eh
+
+einxdgo:
+	NLD	ncabufer+00
+	NST	ncanip
+	NLD	ncabufer+04
+	NST	ncancs
+	db	66h
+	jmp	einback
+
+;---- int 0E7h from the stub at 401h: the handler returned (retf).
+;     Client stack now at the error code; resume from the frame.
+
+einxret:
+	db	66h
+	call	e31sslin
+	mov	si,ax			; mov esi,eax
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	je	einxr32
+	xor	ax,ax			; 16-bit frame: err ip cs fl sp ss
+	db	66h,8bh,46h,02h
+	NST	ncanip
+	xor	ax,ax
+	db	66h,8bh,46h,04h
+	NST	ncancs
+	xor	ax,ax
+	db	66h,8bh,46h,06h
+	NST	ncanflag
+	NST	ncavflag
+	xor	ax,ax
+	db	66h,8bh,46h,08h
+	NST	ncansp
+	xor	ax,ax
+	db	66h,8bh,46h,0ah
+	NST	ncanss
+	db	66h
+	jmp	einback
+einxr32:
+	db	8bh,46h,04h		; mov eax,[esi+4]: eip
+	NST	ncanip
+	db	8bh,46h,08h
+	NST	ncancs
+	db	8bh,46h,0ch
+	NST	ncanflag
+	NST	ncavflag
+	db	8bh,46h,10h
+	NST	ncansp
+	db	8bh,46h,14h
+	NST	ncanss
+	db	66h
+	jmp	einback
+
+;---- int 0E8h from a default stub at 404h+N*4: unhandled exception N.
+;     Client stack at the return address; restore the client from the
+;     frame, then handle the fault as without DPMI.
+
+einxdef:
+	NLD	ncanip			; eip is on N (stub offset + 2)
+	mov	cx,ax			; mov ecx,eax
+	db	66h,67h
+	mov	ax,ss:[stubsel16]	; any stub selector: same base
+	EAXI	25h,0fff8h,0
+	mov	di,ax
+	db	66h
+	call	e31base
+	add	ax,cx			; add eax,ecx
+	mov	si,ax
+	db	8ah,16h 		; mov dl,[esi]: N
+	push	dx
+	db	66h
+	call	e31sslin
+	mov	si,ax
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	je	einxf32
+	xor	ax,ax			; 16-bit: ret ip, ret cs, err, then frame
+	db	66h,8bh,46h,06h
+	NST	ncanip
+	xor	ax,ax
+	db	66h,8bh,46h,08h
+	NST	ncancs
+	xor	ax,ax
+	db	66h,8bh,46h,0ah
+	NST	ncanflag
+	NST	ncavflag
+	xor	ax,ax
+	db	66h,8bh,46h,0ch
+	NST	ncansp
+	xor	ax,ax
+	db	66h,8bh,46h,0eh
+	NST	ncanss
+	jmp	short einxfgo
+einxf32:
+	db	8bh,46h,0ch
+	NST	ncanip
+	db	8bh,46h,10h
+	NST	ncancs
+	db	8bh,46h,14h
+	NST	ncanflag
+	NST	ncavflag
+	db	8bh,46h,18h
+	NST	ncansp
+	db	8bh,46h,1ch
+	NST	ncanss
+einxfgo:
+	pop	dx
+	cmp	dl,0dh			; #GP goes back the way it came: int 6
+	jne	einxfg2 		;  with parm6ec still saying "protection"
+	mov	dl,06h
+	db	66h,67h			; word store: 66h 67h
+	mov	ss:[parm6ec],2
+einxfg2:
+	xor	dh,dh			; edx = the vector (dx held N only)
+	db	66h
+	jmp	eindisp
 
 einfun4c:
 	db	66h
