@@ -7577,6 +7577,12 @@ e31n25:
 	jmp	e310300
 e31n30:
 	db	66h
+	cmp	ax,0305h
+	jne	e31n35
+	db	66h
+	jmp	e310305
+e31n35:
+	db	66h
 	cmp	ax,0301h
 	je	e31n31
 	db	66h
@@ -7693,6 +7699,7 @@ DSTUBN	=	0
 	db	0cdh,0e6h,DSTUBN,0cfh
 DSTUBN	=	DSTUBN+1
 	endm
+	db	0cbh			; +400h: retf, the 0305h protected-mode routine
 
 	page
 ;--------------------------------------------------------------------
@@ -8973,7 +8980,7 @@ e31stb4:
 	db	66h
 	add	di,gdtspace-gdt
 	db	66h,67h
-	mov	word ptr ss:[di+gdt],3ffh	; limit: 256 stubs x 4
+	mov	word ptr ss:[di+gdt],400h	; limit: 256 stubs x 4, + retf
 	db	66h,67h
 	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
 	db	67h
@@ -9684,6 +9691,52 @@ e3190z:
 	NST	ncavflag
 	db	88h,01010011b		; mov [ebx+ncavax],dl: al = old state
 	db	offset nca:ncavax
+	db	66h
+	jmp	e31dok
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0305h - get state save/restore addresses
+;--------------------------------------------------------------------
+;
+; This host keeps no per-switch state a client must save, so the size
+; is 0 and both routines are a bare far return, as DPMI allows:
+;	BX:CX   real mode: mysegadr:rhe1, the memory-device dispatcher's
+;	        own retf in this driver's real-mode code
+;	SI:(E)DI protected mode: the retf byte after the 256 stubs
+;	        (dpmistub+400h), through the stub selector matching the
+;	        client's bitness
+;
+e310305:
+	db	66h
+	call	e31stubs
+	jnc	e0305a
+	db	66h
+	jmp	e31bad
+e0305a:
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavax],0: size
+	db	offset nca:ncavax
+	dw	0
+	db	66h,67h
+	mov	ax,ss:[mysegadr]
+	NSTW	ncavbx
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavcx],offset rhe1
+	db	offset nca:ncavcx
+	dw	offset mmgrp:rhe1
+	db	66h,67h
+	mov	ax,ss:[stubsel16]
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jz	e0305b
+	db	66h,67h
+	mov	ax,ss:[stubsel32]
+e0305b:
+	NSTW	ncavsi
+	db	0c7h,01000011b		; mov dword [ebx+ncavdi],400h
+	db	offset nca:ncavdi
+	dw	400h,0
 	db	66h
 	jmp	e31dok
 

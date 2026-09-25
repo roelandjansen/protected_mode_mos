@@ -1979,3 +1979,68 @@ empty.
 	0900h -> 1, 0902h -> 0; 0901h -> 0, 0902h -> 1
 
 Regression, all twelve clients: Divide/Internal 0.
+
+## UPDATE 54 (2026-09-25) — 0305h; hardware IRQ delivery verified; exceptions examined
+
+`_386.ASM`: `$386.SYS` 28256 -> 28336, 0 warnings, 0 severe.
+
+Plan agreed with Roeland: the small and medium items first (option B),
+then real-mode callbacks as their own project (see "Callbacks" below).
+
+### 0305h get state save/restore addresses
+
+No per-switch state needs saving, so size 0 and both routines are a
+bare far return, as DPMI allows:
+
+- real mode `BX:CX` = `mysegadr:rhe1`, the `retf` that ends the memory
+  device dispatcher in this driver's real-mode code
+- protected mode `SI:(E)DI` = stub selector (by client bitness) :
+  `400h`, a `retf` (`CBh`) appended after the 256 stubs; the stub
+  limit went from `3FFh` to `400h`
+
+Measured: CF clear, size 0, rm `0070:051C`, pm `0073:0400`; the client
+far-called the pm routine and it returned; the rm routine via 0301h
+(retf frame) returned with CF clear.
+
+### Hardware IRQ delivery -- VERIFIED for IRQ0
+
+UPDATE 50 listed this as unverified. A client hooked vector 08h with a
+handler that counts and chains to the default stub, then busy-waited:
+the count reached 5 after about 40K loop iterations, the timer kept
+running (the chain reflects to the BIOS handler, which does the EOI),
+and the client exited cleanly. Hardware interrupts arriving while a
+client runs DO reach its hooked handler through `einvhook`.
+
+### Exceptions today, and a trap -- 0202h/0203h still open
+
+A client `div` by zero: the event log shows `INT 00 t=2` from
+`cs=008B`; it travels the same `einative` path as an interrupt,
+reaches MOS's int 0 handler, which prints "Divide by zero error" and
+terminates the program cleanly. A sane default (DPMI also terminates
+on an unhandled exception).
+
+TRAP: because faults use the interrupt path, a client that hooks
+vector 0-1Fh with 0205h gets the fault with an INTERRUPT frame; an
+iret re-executes the faulting instruction for ever. Proper 0202h/0203h
+needs the DPMI exception frame (return address to a host stub, error
+code, then the client's ip/cs/flags/sp/ss), the handler's `retf` into
+that host stub, and the host resuming from the possibly modified frame
+-- written into the `ncan*` copy (UPDATE 50), not `p0stack`. Also
+needed: telling a fault from a software `int N` for vectors 0-1Fh, and
+the error code for #GP and friends, which the entry path has but
+`einative` does not currently keep.
+
+### Callbacks (0303h/0304h) -- analysis, not started
+
+All reflection state is single-level: `dovmint` resets the monitor
+stack to `s0ip-28` and keeps one return address (`ncaretad`); the
+real-mode stack is always the same 256-byte `ncastack`; `dovmcont`
+saves into the one `ncairegs` and the client frame lives in the one
+`ncan*` copy. A callback re-enters the client from INSIDE a v-86
+excursion and, if the callback itself calls DOS (usual), `dovmint`
+would restart the real-mode stack on top of the one the caller is
+still using. Callbacks therefore need nested reflection first: a
+per-level save area and a real-mode stack per level, as a separately
+tested stage, before the callback entry and 0303h/0304h.
+
+Regression, all thirteen clients: Divide/Internal 0.
