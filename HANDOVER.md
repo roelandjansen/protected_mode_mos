@@ -1837,3 +1837,56 @@ relations the tests check are unchanged.
   IF back when IOPL < 3
 - 0202h/0203h (exception handlers) not implemented
 - 32 hooks system-wide
+
+## UPDATE 51 (2026-09-25) — int 31h 0300h: simulate real-mode interrupt
+
+`_386.ASM`: `$386.SYS` 27216 -> 27520, 0 warnings, 0 severe.
+
+The call DOS extenders route nearly all their DOS I/O through: real-
+mode registers in, real-mode registers out, no translation.
+
+### How
+
+`bl` = vector, `es:(e)di` = the 50-byte DPMI real-mode call structure
+(+00 EDI, +04 ESI, +08 EBP, +10 EBX, +14 EDX, +18 ECX, +1C EAX, words
++20 FLAGS, +22 ES, +24 DS). The structure's linear address is the es
+descriptor's base plus (e)di (zero-extended for a 16-bit client).
+
+1. the client's protected-mode register set -- `ncairegs`, 10 dwords
+   -- is parked in `ncabufer` with one `rep movsd` through the flat
+   ds/es
+2. the v-86 set (`ncav*`) is loaded from the structure
+3. `dovmint` reflects the vector like any other interrupt, `edx` set
+   to the vector right before the call (the UPDATE 46/48 rule)
+4. the resulting `ncav*` are written back into the structure
+5. the client's registers are restored; only CF (clear) changes
+
+Nothing is translated: pointers in the structure are real-mode
+segment:offset pairs, which is what a DPMI client expects here (and
+what makes this simpler than the int 21h translation layer).
+
+### Limits
+
+- `CX` (stack words to copy) must be 0, otherwise CF set
+- the structure's `SS:SP` is ignored: `dovmint` always supplies the
+  real-mode stack, as DPMI specifies for `SS:SP` = 0
+- `FS/GS/IP/CS` in the structure are not used by an interrupt and are
+  left as they were; `BH` (reserved flags) ignored
+- 0301h/0302h (call real-mode far procedure / iret procedure) not yet
+
+### Measured
+
+- `ah=30h` via 0300h returns the same `ax` (`0005`) as a direct
+  protected-mode `int 21h ah=30h`; CF clear
+- the real test of real-mode semantics: 0100h allocates DOS memory, a
+  `$`-string is written through the SELECTOR, then 0300h with `ah=09h`
+  and `DS` = the REAL-MODE SEGMENT prints it
+- `CX=1` refused with CF
+
+Test-client lesson: the first run allocated 1 paragraph and copied a
+~45-byte string into it -- an overrun into the next MCB that produced
+"Internal error #0" at exit, UPDATE 32's symptom. Allocate what you
+write.
+
+Regression, all ten clients including the UPDATE 50 hook client:
+Divide/Internal 0.

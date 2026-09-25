@@ -7571,6 +7571,12 @@ e31n24:
 	jmp	e310205
 e31n25:
 	db	66h
+	cmp	ax,0300h
+	jne	e31n30
+	db	66h
+	jmp	e310300
+e31n30:
+	db	66h
 	cmp	ax,0400h
 	je	e310400
 	db	66h
@@ -9139,6 +9145,155 @@ einvdgo:				; return into the handler
 	NST	ncanip			; (was ss:[p0stack-20])
 	NLD	ncabufer+04
 	NST	ncancs			; (was ss:[p0stack-16])
+	db	66h
+	jmp	einback
+
+	page
+;--------------------------------------------------------------------
+;	int 31h 0300h - simulate real mode interrupt
+;--------------------------------------------------------------------
+;
+; bl = vector, cx = stack words to copy, es:(e)di -> 50-byte real-mode
+; call structure (DPMI 0.9): +00 EDI +04 ESI +08 EBP +0C reserved
+; +10 EBX +14 EDX +18 ECX +1C EAX, words +20 FLAGS +22 ES +24 DS +26 FS
+; +28 GS +2A IP +2C CS +2E SP +30 SS.
+;
+; The v-86 register set (ncav*) is loaded from the structure, the
+; interrupt is reflected by dovmint exactly like any other, and the
+; results are written back into the structure. The client's own
+; protected-mode registers (ncairegs, 10 dwords) are parked in
+; ncabufer meanwhile and put back, so only CF (clear) changes for it.
+;
+; LIMITS: CX (stack words) must be 0, else CF set; the structure's
+; SS:SP is ignored -- dovmint always supplies the real-mode stack,
+; which is what DPMI specifies when SS:SP is 0. FS/GS/IP/CS are not
+; used by an interrupt and are left as they were.
+;
+e310300:
+	NLDW	ncavcx
+	or	ax,ax
+	jz	e0300a
+	db	66h
+	jmp	e31bad
+e0300a:
+	NLD	ncavbx
+	EAXI	25h,0ffh,0
+	NST	ncauregs+04		; vector
+
+; linear address of the structure: es base + (e)di
+
+	NLD	ncanes
+	EAXI	25h,0fff8h,0
+	mov	di,ax			; mov edi,eax
+	xor	ax,ax
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+7]
+	shl	ax,8
+	db	67h
+	mov	al,byte ptr ss:[di+gdt+4]
+	shl	ax,16
+	db	66h,67h
+	mov	ax,ss:[di+gdt+2]
+	mov	cx,ax			; mov ecx,eax: es base
+	NLD	ncavdi
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e0300b
+	EAXI	25h,0ffffh,0		; 16-bit client: di
+e0300b:
+	add	ax,cx			; add eax,ecx
+	NST	ncauregs+00		; structure, linear
+
+; park the client's protected-mode registers in ncabufer
+
+	mov	ax,ds			; es = ds = absolute zero, flat
+	mov	es,ax
+	mov	si,bx			; mov esi,ebx: ncairegs is at nca+0
+	mov	di,bx
+	db	83h,11000111b		; add edi,offset nca:ncabufer
+	db	offset nca:ncabufer
+	xor	cx,cx
+	mov	cl,10
+	cld
+	rep	movsw			; rep movsd: 10 dwords
+
+; real-mode registers from the structure
+
+	NLD	ncauregs+00
+	mov	si,ax			; mov esi,eax
+	db	8bh,46h,00h		; mov eax,[esi+00]
+	NST	ncavdi
+	db	8bh,46h,04h
+	NST	ncavsi
+	db	8bh,46h,08h
+	NST	ncavbp
+	db	8bh,46h,10h
+	NST	ncavbx
+	db	8bh,46h,14h
+	NST	ncavdx
+	db	8bh,46h,18h
+	NST	ncavcx
+	db	8bh,46h,1ch
+	NST	ncavax
+	xor	ax,ax
+	db	66h,8bh,46h,20h 	; mov ax,[esi+20h]: flags
+	NST	ncavflag
+	xor	ax,ax
+	db	66h,8bh,46h,22h 	; es
+	NST	ncaves
+	xor	ax,ax
+	db	66h,8bh,46h,24h 	; ds
+	NST	ncavds
+
+; reflect: dovmint takes the VECTOR in edx (UPDATE 46/48)
+
+	NLD	ncauregs+04
+	mov	dx,ax			; mov edx,eax
+	db	66h
+	call	dovmint
+
+; results back into the structure
+
+	NLD	ncauregs+00
+	mov	si,ax
+	NLD	ncavdi
+	db	89h,46h,00h		; mov [esi+00],eax
+	NLD	ncavsi
+	db	89h,46h,04h
+	NLD	ncavbp
+	db	89h,46h,08h
+	NLD	ncavbx
+	db	89h,46h,10h
+	NLD	ncavdx
+	db	89h,46h,14h
+	NLD	ncavcx
+	db	89h,46h,18h
+	NLD	ncavax
+	db	89h,46h,1ch
+	NLD	ncavflag
+	db	66h,89h,46h,20h 	; mov [esi+20h],ax
+	NLD	ncaves
+	db	66h,89h,46h,22h
+	NLD	ncavds
+	db	66h,89h,46h,24h
+
+; the client's own registers back, CF clear
+
+	mov	ax,ds
+	mov	es,ax
+	mov	di,bx			; mov edi,ebx: ncairegs
+	mov	si,bx
+	db	83h,11000110b		; add esi,offset nca:ncabufer
+	db	offset nca:ncabufer
+	xor	cx,cx
+	mov	cl,10
+	cld
+	rep	movsw			; rep movsd
+	db	66h,83h,01100011b	; and [ebx+ncavflag],0fffeh
+	db	offset nca:ncavflag
+	db	0feh
 	db	66h
 	jmp	einback
 
