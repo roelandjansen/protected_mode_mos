@@ -2421,3 +2421,59 @@ With this, DPMI 0.9's 0300h-0305h group is complete except 0306h.
 
 Next: 0306h (raw mode switch addresses) is the last 0.9 function
 missing; then the list of limits above.
+
+## UPDATE 61 (2026-09-26) — 0306h raw mode switch: DPMI 0.9 function set complete
+
+`_386.ASM`: `$386.SYS` 31872 -> 32496, 0 warnings, 0 severe; binary
+verified against the listing at `einvxa` before testing (UPDATE 60 rule).
+
+### What
+
+- **0306h** returns `BX:CX` = `rawstub` (real -> protected, in this
+  driver's real-mode code: `push ax / mov ax,7792h / int 6fh`) and
+  `SI:(E)DI` = stub selector : `488h` (protected -> real, `int 0EAh`)
+- **protected -> real, `e6frawpm`** (use32; reached from `einvhook`
+  via `raw_ptr`): builds the v-86 iret frame (`s0*`) from the client's
+  registers -- `AX` = DS, `CX` = ES, `DX` = SS, `BX` = SP, `SI` = CS,
+  `DI` = IP -- with flags as `dovmint` makes them (VM, IOPL 3, the
+  arithmetic flags, NT and IF off: MOS keeps the virtual IF), abandons
+  the native context and `iretd`s into v-86
+- **real -> protected, `e6f92`** (int 6fh 7792h): the pushed `ax` is
+  the new DS; CS must be a present dpl-3 code descriptor and SS a
+  present dpl-3 writable data descriptor, else CF back to the caller
+  (not a monitor crash); `(E)SP`/`(E)IP` taken 16-bit for a 16-bit
+  target CS; the new frame goes into the task's nca and `einback`
+  enters it (IF on, IOPL 3)
+- the stub table grew: `488h` EA stub; limit `48Bh`
+
+### Pointer setup moved to the session start
+
+`cbr_ptr` and the new `raw_ptr` (use16 data pointing into use32 code,
+which use16 cannot reference at assembly time) are now filled in
+`e6f8e` -- CODE_SELECTOR, called by GoProtect at the start of every
+session -- instead of in the first function that needs them. So they
+are valid whichever DPMI call a client happens to make first.
+
+### Measured (second run in one boot)
+
+	0306h  CF clear; rm->pm 0070:3D34, pm->rm 0073:0488
+	a raw switch down: "IN REAL MODE after a raw switch" printed by a
+	    real-mode int 21h ah=09h with DS = the plain real segment
+	a raw switch back: int 31h 0400h -> 005A (only possible in
+	    protected mode); clean exit
+
+Regression, all seventeen clients incl. the callback client (full
+line `3246 1234 0005`, `*` printed): clean.
+
+Process: at most THREE `chk.sh` checks per tool call -- five exceeded
+the 300-second limit and lost the whole call's output.
+
+### Status of DPMI 0.9
+
+Every function is implemented. What remains are the documented limits:
+per-task (not per-client) resource ownership, one callback nesting
+level, exception and callback frames on the client's own stack (not a
+host-locked one), exception error codes always 0, fixed table sizes
+(30 descriptors, 32 hooks, 8 callbacks, 128 memory blocks), stack copy
+(`CX>0`) in 0300h-0302h, 0800h (physical mapping) and the debug and
+vendor functions returning CF.

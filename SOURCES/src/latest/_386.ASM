@@ -7612,6 +7612,12 @@ e31n33:
 	jmp	e310304
 e31n34:
 	db	66h
+	cmp	ax,0306h
+	jne	e31n36
+	db	66h
+	jmp	e310306
+e31n36:
+	db	66h
 	cmp	ax,0301h
 	je	e31n31
 	db	66h
@@ -7731,6 +7737,7 @@ einb_ptr dw	offset mmgrp:einback,0	; use32 -> einback (use16); dw+0, not
 					;  dd: a dd emits a segment fixup exe2bin rejects
 cbr_ptr	dd	0			; -> e6fcbret: filled by e6f91 (use16 cannot
 					;  refer forward into the use32 segment)
+raw_ptr	dd	0			; -> e6frawpm: filled by e6f8e, as cbr_ptr
 
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
@@ -7742,6 +7749,7 @@ DCBI	=	0
 	db	50h,0b8h,91h,77h,6ah,DCBI,0cdh,6fh
 DCBI	=	DCBI+1
 	endm
+rawstub	db	50h,0b8h,92h,77h,0cdh,6fh	; push ax / mov ax,7792h / int 6fh
 dpmistub label	byte			; int 0E6h / N / iret, N = 0..255
 DSTUBN	=	0
 	rept	256
@@ -7756,6 +7764,7 @@ DXSTBN	=	0			; +404h: default exception stubs
 DXSTBN	=	DXSTBN+1
 	endm
 	db	0cdh,0e9h,90h,90h	; +484h: int 0E9h, callback return
+	db	0cdh,0eah,90h,90h	; +488h: int 0EAh, raw switch to real mode
 
 	page
 ;--------------------------------------------------------------------
@@ -9055,7 +9064,7 @@ e31stb4:
 	db	66h
 	add	di,gdtspace-gdt
 	db	66h,67h
-	mov	word ptr ss:[di+gdt],487h	; limit: stubs, retf, E7, E8s, E9
+	mov	word ptr ss:[di+gdt],48bh	; limit: stubs, retf, E7, E8s, E9, EA
 	db	66h,67h
 	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
 	db	67h
@@ -9238,6 +9247,19 @@ einvx9:
 	db	67h,36h,0ffh,26h	; jmp dword ptr ss:[cbr_ptr] (use32 target)
 	dw	offset mmgrp:cbr_ptr
 einvh0b:
+	cmp	dl,0eah			; raw switch to real mode from stub 488h?
+	jne	einvh0c
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	einvxa
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	jne	einvh0c
+einvxa:
+	db	67h,36h,0ffh,26h	; jmp dword ptr ss:[raw_ptr] (use32 target)
+	dw	offset mmgrp:raw_ptr
+einvh0c:
 	cmp	dl,0e7h
 	je	einvx7
 	cmp	dl,0e8h
@@ -10423,6 +10445,46 @@ e0304a:
 	db	66h
 	jmp	e31dok
 
+	page
+;--------------------------------------------------------------------
+;	int 31h 0306h - get raw mode switch addresses (UPDATE 61)
+;--------------------------------------------------------------------
+;
+; BX:CX    real -> protected: rawstub, in this driver's real-mode code
+; SI:(E)DI protected -> real: stub 488h (int 0EAh) via the stub
+;          selector matching the client's bitness
+; The switches themselves: e6f92 (int 6fh 7792h) and e6frawpm.
+;
+e310306:
+	db	66h
+	call	e31stubs
+	jnc	e0306a
+	db	66h
+	jmp	e31bad
+e0306a:
+	db	66h,67h
+	mov	ax,ss:[mysegadr]
+	NSTW	ncavbx
+	db	66h,0c7h,01000011b	; mov word [ebx+ncavcx],offset rawstub
+	db	offset nca:ncavcx
+	dw	offset mmgrp:rawstub
+	db	66h,67h
+	mov	ax,ss:[stubsel16]
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jz	e0306b
+	db	66h,67h
+	mov	ax,ss:[stubsel32]
+e0306b:
+	NSTW	ncavsi
+	db	0c7h,01000011b		; mov dword [ebx+ncavdi],488h
+	db	offset nca:ncavdi
+	dw	488h,0
+	db	66h
+	jmp	e31dok
+
 einfun4c:
 	db	66h
 	call	freeclsel		; descriptors; preserves ebx (nca)
@@ -11491,6 +11553,7 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6f8f	; 8fh FREE_CLIENT_SEL
 	dd	offset mmgrp:e6f90	; 90h SET_DPMI_RESERVE
 	dd	offset mmgrp:e6f91	; 91h CALLBACK (real-mode stub fired)
+	dd	offset mmgrp:e6f92	; 92h RAW real -> protected
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -12322,6 +12385,137 @@ e6fcbg:
 	mov	edi,[edi+00h]
 	jmp	cgrm7
 
+;
+;==== raw mode switch (int 31h 0306h), UPDATE 61
+;
+; e6frawpm: protected -> real. The client jumped to stub 488h (int
+; 0EAh) with AX = real DS, CX = ES, DX = SS, BX = SP, SI = CS, DI = IP.
+; Build the v-86 iret frame from them -- flags as dovmint makes them:
+; VM, IOPL 3, the arithmetic flags, NT and IF off (MOS keeps the
+; virtual IF) -- abandon the native context and iretd into v-86.
+; Reached from einvhook via raw_ptr: ds flat, ebx = the task's nca.
+;
+e6frawpm:
+	movzx	eax,word ptr [ebx+N_ncavdi]
+	mov	dword ptr ss:[s0ip],eax
+	movzx	eax,word ptr [ebx+N_ncavsi]
+	mov	dword ptr ss:[s0cs],eax
+	mov	eax,[ebx+N_ncavflag]
+	and	eax,0cd5h		; CF PF AF ZF SF DF OF
+	or	eax,00023000h		; VM, IOPL 3
+	mov	dword ptr ss:[s0flags],eax
+	movzx	eax,word ptr [ebx+N_ncavbx]
+	mov	dword ptr ss:[s0sp],eax
+	movzx	eax,word ptr [ebx+N_ncavdx]
+	mov	dword ptr ss:[s0ss],eax
+	movzx	eax,word ptr [ebx+N_ncavcx]
+	mov	dword ptr ss:[s0es],eax
+	movzx	eax,word ptr [ebx+N_ncavax]
+	mov	dword ptr ss:[s0ds],eax
+	xor	eax,eax
+	mov	dword ptr ss:[s0fs],eax
+	mov	dword ptr ss:[s0gs],eax
+	mov	ebp,[ebx+N_ncavbp]
+	mov	eax,[ebx+N_ncavax]
+	mov	ecx,[ebx+N_ncavcx]
+	mov	edx,[ebx+N_ncavdx]
+	mov	esi,[ebx+N_ncavsi]
+	mov	edi,[ebx+N_ncavdi]
+	mov	ebx,[ebx+N_ncavbx]
+	mov	esp,offset mmgrp:s0ip
+	iretd
+
+;
+;==== dpmi func 92 - real -> protected raw switch (rawstub fired)
+;
+; rawstub in v-86: push ax / mov ax,7792h / int 6fh, with AX (pushed)
+; = DS, CX = ES, DX = SS, (E)BX = (E)SP, SI = CS, (E)DI = (E)IP --
+; selectors. CS must be a present dpl-3 code descriptor and SS a
+; present dpl-3 writable data descriptor, else CF back into v-86. The
+; new native frame goes into the task's nca and einback enters it.
+; On entry: [esp] = ebx ecx es ds ebp (eicommon); eax edx esi edi live.
+;
+e6f92:
+	mov	ss:[cbedx],edx
+	mov	ss:[cbesi],esi
+	mov	ss:[cbedi],edi
+	mov	ax,gdtzero-gdt
+	mov	ds,ax
+	movzx	edi,word ptr ss:[s0ss]	; the pushed ax: the new DS
+	shl	edi,4
+	movzx	eax,word ptr ss:[s0sp]
+	add	edi,eax
+	movzx	eax,word ptr [edi]
+	mov	ss:[cbeax],eax
+	movzx	eax,word ptr ss:[cbesi]	; CS: present dpl-3 code?
+	and	eax,0fff8h
+	cmp	eax,gdtlen
+	jae	e6f92x
+	mov	al,byte ptr ss:[eax+gdt+5]
+	and	al,0f8h
+	cmp	al,0f8h
+	jne	e6f92x
+	movzx	eax,word ptr ss:[cbedx]	; SS: present dpl-3 writable data?
+	and	eax,0fff8h
+	cmp	eax,gdtlen
+	jae	e6f92x
+	mov	al,byte ptr ss:[eax+gdt+5]
+	and	al,0fah
+	cmp	al,0f2h
+	jne	e6f92x
+
+	call	dword ptr mmgrp:[nca_ptr]	; ebx -> the task's nca
+	movzx	eax,word ptr ss:[cbesi]
+	mov	[ebx+N_ncancs],eax
+	and	eax,0fff8h
+	test	byte ptr ss:[eax+gdt+6],40h	; 16-bit target: 16-bit ip/sp
+	mov	eax,ss:[cbedi]
+	mov	ecx,[esp]		; the caller's (e)bx: the new (e)sp
+	jnz	e6f92w
+	movzx	eax,ax
+	movzx	ecx,cx
+e6f92w:
+	mov	[ebx+N_ncanip],eax
+	mov	[ebx+N_ncansp],ecx
+	movzx	eax,word ptr ss:[cbedx]
+	mov	[ebx+N_ncanss],eax
+	movzx	eax,word ptr ss:[cbeax]
+	mov	[ebx+N_ncands],eax
+	movzx	eax,word ptr [esp+4]	; the caller's cx: the new ES
+	mov	[ebx+N_ncanes],eax
+	xor	eax,eax
+	mov	[ebx+N_ncanfs],eax
+	mov	[ebx+N_ncangs],eax
+	mov	eax,dword ptr ss:[s0flags]
+	and	eax,0dd5h		; arithmetic flags and DF
+	or	eax,3200h		; IOPL 3, IF on
+	mov	[ebx+N_ncanflag],eax
+	mov	[ebx+N_ncavflag],eax
+	mov	eax,ss:[cbeax]		; general registers as the caller left them
+	mov	[ebx+N_ncavax],eax
+	mov	eax,[esp]
+	mov	[ebx+N_ncavbx],eax
+	mov	eax,[esp+4]
+	mov	[ebx+N_ncavcx],eax
+	mov	eax,ss:[cbedx]
+	mov	[ebx+N_ncavdx],eax
+	mov	eax,ss:[cbesi]
+	mov	[ebx+N_ncavsi],eax
+	mov	eax,ss:[cbedi]
+	mov	[ebx+N_ncavdi],eax
+	mov	eax,[esp+16]
+	mov	[ebx+N_ncavbp],eax
+	jmp	dword ptr mmgrp:[einb_ptr]
+
+e6f92x:					; refused: CF, back to the caller
+	mov	eax,ss:[cbeax]		;  with its ax, stub push dropped
+	add	word ptr ss:[s0sp],2
+	mov	edx,ss:[cbedx]
+	mov	esi,ss:[cbesi]
+	mov	edi,ss:[cbedi]
+	or	byte ptr ss:[s0flags],01h
+	jmp	cgrm7
+
 e6f8f:
 	call	dpmiclr
 	and	byte ptr ss:[s0flags],0feh   ; cf clear
@@ -12430,6 +12624,8 @@ e6f8fcn:
 ; out:	caller's bx = selector, cf clear; cf set if the table is full
 ;
 e6f8e:
+	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret	; use16 -> use32 targets:
+	mov	dword ptr ss:[raw_ptr],offset mmgrp:e6frawpm	;  set before any client runs
 	call	dpmiclr			; a new session: drop a dead predecessor's leftovers
 	push	eax
 	push	edx
