@@ -132,7 +132,7 @@ ALL:    ADDDEV.COM  ADDTASK.COM  DIRMAP.COM  ALIAS.COM  CLASS.COM  DEBUG.COM \
         _MOUSE.SYS  _NETBIOS.SYS  _PIPE.SYS  _RAMDISK.SYS  _SERIAL.SYS \
         INIT.COM   __SHELL.SYS _ARNET.SYS FILTER.COM  PATCHID.COM \
         MINBRDPC.SYS  MISPEED.COM COMPFILE.EXE HELPGEN.EXE \
-	VIDPATCH.COM ED.EXE DPMITST.COM
+	VIDPATCH.COM ED.EXE DPMITST.COM DPMI32.COM
 
 ############ General purpose publics #############
 
@@ -160,6 +160,13 @@ DPMITST.COM:    DPMITST.ASM
         exe2bin dpmitst DPMITST.COM
         del dpmitst.obj
         del dpmitst.exe
+
+DPMI32.COM:     DPMI32.ASM
+        masm dpmi32;
+        link dpmi32;
+        exe2bin dpmi32 DPMI32.COM
+        del dpmi32.obj
+        del dpmi32.exe
 
 ADDDEV.COM:     ADDDEV.ASM PAGE.INC OPTIONS.INC MACROS.INC VERSION.INC
 

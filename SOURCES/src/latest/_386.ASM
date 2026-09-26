@@ -5455,9 +5455,8 @@ einfun09:
 	db	8bh,01110011b		; mov esi,[ebx+ncavdx]
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavdx
-	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncancs
+	db	66h
+	call	c32eax		; eax bit 22 = 32-bit client (UPDATE 62)
 	db	0a9h			; test eax,00400000h (D bit)
 	dd	00400000h
 	jnz	e09is32
@@ -7283,9 +7282,8 @@ einfun0a:
 
 ; zero-extend the offset for a 16-bit client, in place
 
-	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncancs
+	db	66h
+	call	c32eax		; eax bit 22 = 32-bit client (UPDATE 62)
 	db	0a9h			; test eax,00400000h (D bit)
 	dd	00400000h
 	jnz	e0ais32
@@ -7739,6 +7737,8 @@ cbr_ptr	dd	0			; -> e6fcbret: filled by e6f91 (use16 cannot
 					;  refer forward into the use32 segment)
 raw_ptr	dd	0			; -> e6frawpm: filled by e6f8e, as cbr_ptr
 
+c32tab	db	128 dup(0)		; per task id: DPMI client type, 0 none,
+					;  1 16-bit, 2 32-bit (e6f8e; UPDATE 62)
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
 DCBSZ	equ	96
@@ -7849,8 +7849,8 @@ e05rsvok:
 
 	db	8bh,01111011b		; mov edi,[ebx+ncauregs+00]
 	db	offset nca:ncauregs+00
-	db	0fh,02h,01000011b	; lar eax,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32eax		; eax bit 22 = 32-bit client (UPDATE 62)
 	db	0a9h			; test eax,00400000h (D bit)
 	dd	00400000h
 	jnz	e05is32
@@ -8009,6 +8009,57 @@ e31tid:					; dl = caller's task id
 	call	addrnca 		; esi -> tcb, ebx -> nca
 	db	8ah,01010110b		; mov dl,[esi+tcbid]
 	db	tcbid
+	db	66h
+	ret
+
+;
+; c32edx: edx = 00400000h if the calling task's DPMI client is 32-bit,
+; 0 if 16-bit -- from c32tab, recorded at the mode switch (e6f8e). A
+; task with no DPMI session (c32tab 0) keeps the old rule: the D bit
+; of the interrupted CS. Replaces 'lar edx,[ebx+ncancs]' before the
+; callers' 'test edx,00400000h'. Preserves everything but edx.
+; (UPDATE 62)
+;
+c32edx:
+	push	ax			; push eax
+	push	si
+	push	bx
+	db	66h
+	call	e31tid		; dl = task id (clobbers esi, ebx)
+	xor	ax,ax			; xor eax,eax
+	mov	al,dl
+	and	al,7fh
+	mov	si,ax			; mov esi,eax
+	db	67h
+	mov	al,byte ptr ss:[si+c32tab]
+	pop	bx			; ebx -> nca again
+	pop	si
+	or	al,al
+	jz	c32lar
+	xor	dx,dx			; xor edx,edx
+	cmp	al,2
+	jne	c32x
+	db	0bah			; mov edx,00400000h
+	dw	0,0040h
+c32x:
+	pop	ax
+	db	66h
+	ret
+c32lar:
+	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
+	db	offset nca:ncancs
+	pop	ax
+	db	66h
+	ret
+;
+; c32eax: the same in eax; preserves everything but eax (UPDATE 62)
+;
+c32eax:
+	push	dx
+	db	66h
+	call	c32edx
+	mov	ax,dx			; mov eax,edx
+	pop	dx
 	db	66h
 	ret
 
@@ -9126,8 +9177,8 @@ e0204d:					; not hooked: the default stub
 e0204s:
 	db	66h,67h
 	mov	ax,ss:[stubsel16]
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jz	e0204t
@@ -9186,8 +9237,8 @@ e0205s:					; si = entry for (task, vector)
 	db	66h,67h
 	mov	word ptr ss:[si+phooktab+8],ax
 	NLD	ncavdx			; offset; 16-bit client: dx only
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e0205o
@@ -9308,13 +9359,9 @@ einvdl:
 	db	66h,67h
 	mov	ax,word ptr ss:[si+phooktab+8]
 	NST	ncabufer+04		; handler selector
-	NLD	ncancs			; (was ss:[p0stack-16])
-	EAXI	25h,0fff8h,0
-	mov	di,ax
-	xor	ax,ax
-	db	67h
-	mov	al,byte ptr ss:[di+gdt+6]
-	EAXI	25h,40h,0
+	db	66h
+	call	c32eax		; client type (UPDATE 62)
+	db	0c1h,0e8h,10h		; shr eax,16: 40h = 32-bit
 	NST	ncabufer+08		; nonzero: 32-bit client
 	NLD	ncanss			; (was ss:[p0stack-4])
 	EAXI	25h,0fff8h,0
@@ -9432,8 +9479,8 @@ e0300s:					; 0301h/0302h join here
 	mov	ax,ss:[di+gdt+2]
 	mov	cx,ax			; mov ecx,eax: es base
 	NLD	ncavdi
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e0300b
@@ -9601,8 +9648,8 @@ e31ptr:					; ncauregs+00 = linear es:(e)di
 	call	e31base
 	mov	cx,ax			; mov ecx,eax
 	NLD	ncavdi
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e31pt32
@@ -9866,8 +9913,8 @@ e0305a:
 	dw	offset mmgrp:rhe1
 	db	66h,67h
 	mov	ax,ss:[stubsel16]
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jz	e0305b
@@ -9975,8 +10022,8 @@ e0202d:
 e0202s:
 	db	66h,67h
 	mov	ax,ss:[stubsel16]
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jz	e0202t
@@ -10042,8 +10089,8 @@ e0203s:
 	db	66h,67h
 	mov	word ptr ss:[si+phooktab+8],ax
 	NLD	ncavdx
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h
 	dw	0,0040h
 	jnz	e0203o
@@ -10107,13 +10154,9 @@ einxdl:					; si = hook entry
 	NST	ncabufer+04		; handler selector
 	db	66h
 	call	e31stubs		; the E7 return stub must exist
-	NLD	ncancs			; client bitness
-	EAXI	25h,0fff8h,0
-	mov	di,ax
-	xor	ax,ax
-	db	67h
-	mov	al,byte ptr ss:[di+gdt+6]
-	EAXI	25h,40h,0
+	db	66h
+	call	c32eax		; client type (UPDATE 62)
+	db	0c1h,0e8h,10h		; shr eax,16: 40h = 32-bit
 	NST	ncabufer+08
 	db	66h
 	call	e31sslin
@@ -10379,8 +10422,8 @@ e0303got:
 	db	67h
 	mov	byte ptr ss:[si+dcbtab+1],ch
 	NLD	ncavsi			; procedure offset
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e0303a
@@ -10395,8 +10438,8 @@ e0303a:
 	db	66h,67h
 	mov	word ptr ss:[si+dcbtab+10],ax
 	NLD	ncavdi			; structure offset
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs] (again: flags)
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e0303b
@@ -10470,8 +10513,8 @@ e0306a:
 	dw	offset mmgrp:rawstub
 	db	66h,67h
 	mov	ax,ss:[stubsel16]
-	db	0fh,02h,01010011b	; lar edx,[ebx+ncancs]
-	db	offset nca:ncancs
+	db	66h
+	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jz	e0306b
@@ -12282,11 +12325,11 @@ e6f91s:
 	mov	dl,byte ptr ss:[eax+gdt+7]
 	shl	edx,24
 	or	esi,edx 		; esi = ss base
-	movzx	eax,word ptr ss:[ecx+dcbtab+8]	; procedure: 16 or 32-bit?
-	and	eax,0fff8h
-	test	byte ptr ss:[eax+gdt+6],40h
+	movzx	eax,byte ptr ss:[ecx+dcbtab+1]	; procedure frame: by client type
+	and	eax,7fh			;  (task id), not the CS D bit (UPDATE 62)
+	cmp	byte ptr ss:[eax+c32tab],2
 	mov	eax,[edi+N_ncansp]
-	jnz	e6f91f32
+	je	e6f91f32
 	sub	eax,512+6
 	and	eax,0ffffh
 	mov	[ebx+N_ncansp],eax
@@ -12533,6 +12576,19 @@ e6f8f:
 ; critical-error abort, int 20h (UPDATE 57).
 ;
 dpmiclr:
+	;
+	; No client type recorded until the next session's e6f8e (UPDATE 62)
+	;
+	push	eax
+	push	ebx
+	push	esi
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	eax,byte ptr [esi+tcbid]
+	and	eax,7fh
+	mov	byte ptr ss:[eax+c32tab],0
+	pop	esi
+	pop	ebx
+	pop	eax
 	call	dword ptr mmgrp:[fcs_ptr]	; use32 -> use16 wrapper
 ;
 ; Also release this task's DPMI memory blocks (UPDATE 44). This path
@@ -12653,16 +12709,10 @@ e6f8e:
 	or	ax,ax
 	jz	e6f8ef
 	;
-	; makegdte hardcodes 00c0h (g=1,d=1). The caller says which it
-	; wants in cl (0 = 16-bit, as DPMI passes the client's bitness in
-	; ax at the mode-switch entry); for 16-bit, clear g and d and
-	; keep the byte limit makegdte set.
-	;
-	db	66h
-	db	67h
-	mov	cx,[bp-12]		; caller's cx
-	or	cl,cl
-	jnz	e6f8e32			; nonzero: leave it 32-bit
+	; DPMI 0.9 5.2: a client resumes on a 16-bit CS with a 64K limit,
+	; 32-bit clients included -- only the interrupt and exception frames
+	; follow the client type (UPDATE 62). makegdte hardcodes 00c0h
+	; (g=1,d=1): clear g and d, keep the byte limit makegdte set.
 	;
 	push	di
 	mov	di,ax
@@ -12670,7 +12720,26 @@ e6f8e:
 	db	67h
 	and	byte ptr ss:[di+gdt+6],0fh   ; g=0,d=0, keep limit 19:16
 	pop	di
-e6f8e32:
+	;
+	; Record the client type for this task in c32tab (1 = 16-bit,
+	; 2 = 32-bit, from the caller's cl = the client's ax at the entry
+	; call). c32edx/c32eax read it instead of the D bit of the
+	; interrupted CS, which says nothing about the client type now.
+	;
+	push	eax
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	edi,byte ptr [esi+tcbid]
+	and	edi,7fh
+	db	66h
+	db	67h
+	mov	cx,[bp-12]		; caller's cx
+	mov	al,1
+	or	cl,cl
+	jz	e6f8e16
+	mov	al,2
+e6f8e16:
+	mov	byte ptr ss:[edi+c32tab],al
+	pop	eax
 	db	66h
 	db	67h
 	mov	[bp-16],ax		; hand the selector back in caller's bx
