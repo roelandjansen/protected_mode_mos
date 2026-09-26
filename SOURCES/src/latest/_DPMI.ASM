@@ -130,6 +130,13 @@ Zero		dw	0		; Segment 0
 ;
 NCABUF		equ	272
 NCATOTAL	equ	256+70h+NCABUF
+;
+; The client's host-data block holds TWO control areas: NCA1, handed
+; to the monitor as the task's nca (cx = NCATOTAL, as before), and
+; NCA2 right after it, used while a real-mode callback runs (the
+; monitor swaps the task's nca pointer to it, so a callback's own
+; DOS calls cannot disturb the paused outer call). UPDATE 56.
+NCAPAIR		equ	2*NCATOTAL
 
 dpmi2f		proc	far
 		cmp	ax,1680h
@@ -157,7 +164,7 @@ Not1686:
 ; a later 48h put an MCB inside the v86 stack and a pushed frame
 ; destroyed it, "Internal error #0" at exit (UPDATE 32/33).
 ;
-                mov     si,NCATOTAL/16		; 40 paragraphs
+                mov     si,NCAPAIR/16		; 80 paragraphs: NCA1 + NCA2
                 push    cs
                 pop     es
                 mov     di,offset ddt:GoProtect	; group-relative: plain
