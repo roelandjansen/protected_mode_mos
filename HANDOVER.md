@@ -2294,3 +2294,130 @@ Open question to settle first in step 2: NCA2 must be initialised
 (`ncabufsz` and the fields `nmswitch` sets for NCA1) before its first
 use -- do it once at the session switch, next to where `nmswitch` sets
 up NCA1.
+
+## UPDATE 59 (2026-09-25) — callbacks step 2a: 0303h/0304h bookkeeping
+
+`_386.ASM`: `$386.SYS` 29488 -> 30688, 0 warnings, 0 severe. The
+callback does NOT fire yet: its stub traps into int 6fh 7791h, which is
+step 2b.
+
+### Where NCA2 gets initialised
+
+`nmswitch` writes only two things into NCA1: `tcbncadr` and
+`ncabufsz`; every other nca field is written right before each use. So
+NCA2 needs only `ncabufsz`. NOT in `nmswitch`: that also serves
+`$DPMI.SYS`'s own `InitProtect` at boot, whose block has no second
+half. Instead in 0303h, which only a DPMI client (with the doubled
+block, UPDATE 56) reaches: NCA2 = NCA1 + 256 + `ncalen` + `ncabufsz`.
+
+### What exists now
+
+- `dcbtab`: `DCBN` (8) records of `DCBSZ` (96) bytes -- +0 in use, +1
+  task, +4 procedure offset, +8 procedure selector, +10 structure
+  selector, +12 structure offset, +16.. room for the outer v-86 state
+  step 2b saves
+- `dcbstub`: 8 real-mode stubs in this driver's real-mode code,
+  `push ax / mov ax,7791h / push idx / int 6fh` (`50 B8 91 77 6A nn CD
+  6F`), reached from real mode as `mysegadr:offset`
+- 0303h: `ds:(e)si` = procedure (must be a present dpl-3 code
+  descriptor), `es:(e)di` = real-mode call structure; returns `CX:DX` =
+  the stub's real-mode address; initialises NCA2's `ncabufsz`
+- 0304h: frees by real-mode address, own task only (`e31cfind`)
+- callbacks are released with the hooks: at 4Ch (`e31hclr`), at
+  Unregister and at session start (`dpmiclr`)
+
+### A trap class the sweep had missed
+
+`mov di,offset dcbstub` assembled `BF iw`; under the 32-bit cs `BF`
+takes an imm32 and swallows two bytes. Caught in self-review and
+hand-encoded (`BF imm32`). The standing listing sweep only looked at
+accumulator-immediate opcodes; it now also covers `mov r,imm16`
+(`B8`-`BF`) without a `66h` prefix. The widened sweep over the whole
+32-bit-executed region -- older code included -- is clean.
+
+### Measured (twice in one boot)
+
+0303h -> CF clear, real-mode address `0070:3CCC`; the stub read through
+a 0002h selector is `50 B8 91 77 6A 00 CD 6F`; 0304h -> CF clear; again
+-> CF set. The second run reused record 0, so the first run's callback
+was released at exit. Regression, all fifteen clients: clean.
+
+Next: step 2b, `e6f91` (int 6fh 7791h) per UPDATE 58.
+
+## UPDATE 60 (2026-09-26) — real-mode callbacks work (steps 2b + 3)
+
+`_386.ASM`: `$386.SYS` 30688 -> 31872, 0 warnings, 0 severe.
+With this, DPMI 0.9's 0300h-0305h group is complete except 0306h.
+
+### What
+
+- **e6f91** (int 6fh 7791h, use32): reached from a `dcbstub` in v-86,
+  i.e. from INSIDE an excursion on NCA1. Saves the whole outer v-86
+  state in the callback record (+16.. the 9 `s0*` dwords with `sp`
+  minus the stub's two pushes; +52.. eax ebx ecx edx esi edi ebp from
+  the eicommon frame at `[esp]`, the CPU and the stub's pushed `ax`),
+  fills the client's structure, makes a tagged data selector for the
+  real-mode stack, points `tcbncadr` at NCA2, builds NCA2's native
+  frame (procedure; `ds:(e)si` = real-mode stack; `es:(e)di` =
+  structure; the client's flags with IF clear; the client's stack 512
+  bytes below its outer call, topped with an iret frame to stub 484h)
+  and leaves through `einback`
+- **e6fcbret** (int 0E9h from stub 484h, routed by `einvhook` via
+  `cbr_ptr`): finds the task's active record, gives the task NCA1
+  back, rebuilds the `s0*` frame and the registers from the structure
+  (including CS:IP and SS:SP, as DPMI specifies) and leaves via
+  `cgrm7`'s pops + `iretd` into v-86
+- the outer excursion then finishes normally through its own
+  `int 6fh 7702h` (UPDATE 58): nothing it needs was touched
+
+### Bugs on the way, and a process lesson
+
+- **Tree drift**: at the start the working tree already held an earlier
+  half-inserted copy of this code and no longer matched the delivered
+  UPDATE 59 file. Restored from the delivered file, re-applied in one
+  pass. Check `cmp tree delivered` before starting a step.
+- **use32 code cannot address nca fields by label** (`[ebx+ncanflag]`:
+  A2068, even via `equ offset nca:x`): plain numeric equates
+  `N_ncaxxx = 0nnh` taken from the listing.
+- **use16 cannot refer forward into the use32 segment** (`dw offset
+  mmgrp:cbr_ptr` / `dd offset mmgrp:e6fcbret`: A2057): `cbr_ptr` is
+  `dd 0` in use16 data and `e6f91` fills it at run time.
+- **`dd offset mmgrp:label` in use16 emits a SEGMENT fixup** (`55CB
+  ----` in the listing); exe2bin then refuses ("Fix-ups needed - base
+  segment") -- while MASM still reports 0 errors, so the build left the
+  OLD `$386.SYS` in place and I tested a stale binary for one round.
+  Written as `dw offset mmgrp:einback,0`.
+  RULE: after every build, confirm `$386.SYS` was rewritten and that
+  its bytes at a known label match the listing -- not just MASM's error
+  counts.
+- **stub selectors are lazy** (`e31stubs`, made only by 0202h/0204h/
+  0305h): a client that never called those got an iret frame with
+  `CS=0000` ("IRET: CS selector zero"). 0303h now creates them.
+
+### Measured (second run in one boot)
+
+- 0303h -> `0070:3CE6`; 0301h runs a real-mode routine that far-calls
+  the callback; the client's procedure (on NCA2) sets `EAX = 1234h`,
+  pops the real-mode return address into the structure's CS:IP, adds 4
+  to SP and irets; the routine resumes and returns through 0301h:
+  CF clear, `EAX = 1234h`
+- NESTED: the procedure also prints `*` via int 21h ah=02h and fetches
+  the DOS version via ah=30h into the structure's EBX -- both inner
+  excursions on NCA2's real-mode stack while NCA1's call is paused in
+  v-86: `*` printed, `EBX = 0005`, the outer call still completes with
+  `EAX = 1234h`
+- regression, all sixteen clients: clean (segments moved up by `100h`
+  paragraphs: the larger `$386.SYS` occupies whole 4 KB pages)
+
+### Limits
+
+- one nesting level: a callback's own code that triggers ANOTHER
+  callback would need NCA3; `e6f91` does not check for that yet
+- the procedure's stack is the client's own, 512 bytes below its outer
+  call, not a host-locked stack
+- 8 callbacks system-wide (`DCBN`)
+- a `dcbstub` fired with no live record returns with CF set and the
+  stub's pushes left on the real-mode stack
+
+Next: 0306h (raw mode switch addresses) is the last 0.9 function
+missing; then the list of limits above.

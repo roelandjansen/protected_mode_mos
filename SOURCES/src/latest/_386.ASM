@@ -7722,6 +7722,15 @@ DPHKN	equ	32
 phooktab db	DPHKN*12 dup(0)
 stubsel16 dw	0
 stubsel32 dw	0
+cbeax	dd	0			; callback entry scratch (e6f91)
+cbedx	dd	0
+cbesi	dd	0
+cbedi	dd	0
+cbrmsel	dw	0
+einb_ptr dw	offset mmgrp:einback,0	; use32 -> einback (use16); dw+0, not
+					;  dd: a dd emits a segment fixup exe2bin rejects
+cbr_ptr	dd	0			; -> e6fcbret: filled by e6f91 (use16 cannot
+					;  refer forward into the use32 segment)
 
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
@@ -7746,6 +7755,7 @@ DXSTBN	=	0			; +404h: default exception stubs
 	db	0cdh,0e8h,DXSTBN,90h
 DXSTBN	=	DXSTBN+1
 	endm
+	db	0cdh,0e9h,90h,90h	; +484h: int 0E9h, callback return
 
 	page
 ;--------------------------------------------------------------------
@@ -9045,7 +9055,7 @@ e31stb4:
 	db	66h
 	add	di,gdtspace-gdt
 	db	66h,67h
-	mov	word ptr ss:[di+gdt],483h	; limit: stubs, retf, E7, 32 E8 stubs
+	mov	word ptr ss:[di+gdt],487h	; limit: stubs, retf, E7, E8s, E9
 	db	66h,67h
 	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
 	db	67h
@@ -9215,6 +9225,19 @@ einvst:
 	db	66h
 	jmp	eindisp 		; as if the client raised int N
 einvh0:					; E7/E8 from an exception stub, else faults
+	cmp	dl,0e9h			; callback return from stub 484h?
+	jne	einvh0b
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel16]
+	je	einvx9
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	jne	einvh0b
+einvx9:
+	db	67h,36h,0ffh,26h	; jmp dword ptr ss:[cbr_ptr] (use32 target)
+	dw	offset mmgrp:cbr_ptr
+einvh0b:
 	cmp	dl,0e7h
 	je	einvx7
 	cmp	dl,0e8h
@@ -10292,6 +10315,12 @@ e31cfok:
 ;     es:(e)di = real-mode call structure -> cx:dx = real-mode address
 
 e310303:
+	db	66h			; the return stub (484h) must exist before a
+	call	e31stubs		;  callback can fire: e6f91 puts its selector
+	jnc	e0303s			;  into the procedure's iret frame
+	db	66h
+	jmp	e31bad
+e0303s:
 	db	66h
 	call	e31tid
 	mov	ch,dl			; task
@@ -11461,6 +11490,7 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6f8e	; 8eh CODE_SELECTOR
 	dd	offset mmgrp:e6f8f	; 8fh FREE_CLIENT_SEL
 	dd	offset mmgrp:e6f90	; 90h SET_DPMI_RESERVE
+	dd	offset mmgrp:e6f91	; 91h CALLBACK (real-mode stub fired)
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -11980,6 +12010,316 @@ e6f90:
 	mov	ax,[bp-16]		; caller's bx = reserve, pages
 	mov	word ptr ss:[dpmirsv],ax
 	and	byte ptr ss:[s0flags],0feh   ; cf clear
+	jmp	cgrm7
+
+;
+; nca field offsets as plain constants: MASM will not address the nca
+; segment's labels through ds/ss in use32 code (A2068)
+;
+N_ncabufsz	=	06Ch			; offset nca:ncabufsz, from the listing
+N_ncancs	=	03Ch			; offset nca:ncancs, from the listing
+N_ncands	=	02Ch			; offset nca:ncands, from the listing
+N_ncanes	=	028h			; offset nca:ncanes, from the listing
+N_ncanflag	=	040h			; offset nca:ncanflag, from the listing
+N_ncanfs	=	030h			; offset nca:ncanfs, from the listing
+N_ncangs	=	034h			; offset nca:ncangs, from the listing
+N_ncanip	=	038h			; offset nca:ncanip, from the listing
+N_ncansp	=	044h			; offset nca:ncansp, from the listing
+N_ncanss	=	048h			; offset nca:ncanss, from the listing
+N_ncavax	=	010h			; offset nca:ncavax, from the listing
+N_ncavbp	=	024h			; offset nca:ncavbp, from the listing
+N_ncavbx	=	014h			; offset nca:ncavbx, from the listing
+N_ncavcx	=	018h			; offset nca:ncavcx, from the listing
+N_ncavdi	=	004h			; offset nca:ncavdi, from the listing
+N_ncavds	=	020h			; offset nca:ncavds, from the listing
+N_ncavdx	=	00Ch			; offset nca:ncavdx, from the listing
+N_ncaves	=	01Ch			; offset nca:ncaves, from the listing
+N_ncavflag	=	000h			; offset nca:ncavflag, from the listing
+N_ncavsi	=	008h			; offset nca:ncavsi, from the listing
+
+;
+;==== dpmi func 91 - a real-mode callback fired (UPDATE 60)
+;
+; Reached from a dcbstub in v-86 (push ax / mov ax,7791h / push idx /
+; int 6fh), i.e. from INSIDE an excursion the monitor started for this
+; task (NCA1). Saves the whole outer v-86 state in the callback's
+; record, fills the client's real-mode call structure, points the
+; task's nca at NCA2 (so everything the callback does -- including its
+; own DOS calls -- uses NCA2 and leaves NCA1 alone) and enters the
+; client's protected-mode procedure through einback, with
+; ds:(e)si = the real-mode stack, es:(e)di = the structure, and an
+; iret frame on its stack that leads to the int 0E9h stub (e6fcbret).
+;
+; On entry: [esp] = ebx ecx es ds ebp (eicommon), then the 9-dword
+; v-86 frame s0ip..s0gs; eax edx esi edi live in the CPU.
+;
+e6f91:
+	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret
+	mov	ss:[cbeax],eax		; the stub left ax = 7791h, high word ours
+	mov	ss:[cbedx],edx
+	mov	ss:[cbesi],esi
+	mov	ss:[cbedi],edi
+	mov	ax,gdtzero-gdt		; flat ds
+	mov	ds,ax
+	movzx	edi,word ptr ss:[s0ss]	; the v-86 stack: idx, then the caller's ax
+	shl	edi,4
+	movzx	eax,word ptr ss:[s0sp]
+	add	edi,eax
+	movzx	ecx,byte ptr [edi]
+	cmp	ecx,DCBN
+	jae	e6f91x
+	imul	ecx,ecx,DCBSZ		; ecx = record offset
+	cmp	byte ptr ss:[ecx+dcbtab],1
+	jne	e6f91x
+	mov	ax,[edi+2]		; the caller's own ax
+	mov	word ptr ss:[cbeax],ax
+
+; the outer state into the record: s0 frame (sp without the two
+; pushes), then eax..ebp
+
+	mov	esi,offset mmgrp:s0ip
+	xor	edx,edx
+e6f91s:
+	mov	eax,ss:[esi+edx*4]
+	mov	dword ptr ss:[ecx+dcbtab+16+edx*4],eax
+	inc	edx
+	cmp	edx,9
+	jb	e6f91s
+	add	word ptr ss:[ecx+dcbtab+16+12],4	; s0sp: idx and ax dropped
+	mov	eax,ss:[cbeax]
+	mov	dword ptr ss:[ecx+dcbtab+52],eax
+	mov	eax,[esp]		; ebx
+	mov	dword ptr ss:[ecx+dcbtab+56],eax
+	mov	eax,[esp+4]		; ecx
+	mov	dword ptr ss:[ecx+dcbtab+60],eax
+	mov	eax,ss:[cbedx]
+	mov	dword ptr ss:[ecx+dcbtab+64],eax
+	mov	eax,ss:[cbesi]
+	mov	dword ptr ss:[ecx+dcbtab+68],eax
+	mov	eax,ss:[cbedi]
+	mov	dword ptr ss:[ecx+dcbtab+72],eax
+	mov	eax,[esp+16]		; ebp
+	mov	dword ptr ss:[ecx+dcbtab+76],eax
+
+; the client's structure gets the real-mode registers
+
+	movzx	esi,word ptr ss:[ecx+dcbtab+10]
+	and	esi,0fff8h
+	mov	edi,dword ptr ss:[esi+gdt+2]
+	and	edi,00ffffffh
+	mov	al,byte ptr ss:[esi+gdt+7]
+	shl	eax,24
+	or	edi,eax
+	add	edi,dword ptr ss:[ecx+dcbtab+12]	; edi = structure, linear
+	mov	eax,dword ptr ss:[ecx+dcbtab+72]
+	mov	[edi+00h],eax		; EDI
+	mov	eax,dword ptr ss:[ecx+dcbtab+68]
+	mov	[edi+04h],eax		; ESI
+	mov	eax,dword ptr ss:[ecx+dcbtab+76]
+	mov	[edi+08h],eax		; EBP
+	mov	dword ptr [edi+0ch],0
+	mov	eax,dword ptr ss:[ecx+dcbtab+56]
+	mov	[edi+10h],eax		; EBX
+	mov	eax,dword ptr ss:[ecx+dcbtab+64]
+	mov	[edi+14h],eax		; EDX
+	mov	eax,dword ptr ss:[ecx+dcbtab+60]
+	mov	[edi+18h],eax		; ECX
+	mov	eax,dword ptr ss:[ecx+dcbtab+52]
+	mov	[edi+1ch],eax		; EAX
+	mov	ax,word ptr ss:[ecx+dcbtab+24]
+	mov	[edi+20h],ax		; FLAGS
+	mov	ax,word ptr ss:[ecx+dcbtab+36]
+	mov	[edi+22h],ax		; ES
+	mov	ax,word ptr ss:[ecx+dcbtab+40]
+	mov	[edi+24h],ax		; DS
+	mov	ax,word ptr ss:[ecx+dcbtab+44]
+	mov	[edi+26h],ax		; FS
+	mov	ax,word ptr ss:[ecx+dcbtab+48]
+	mov	[edi+28h],ax		; GS
+	mov	ax,word ptr ss:[ecx+dcbtab+16]
+	mov	[edi+2ah],ax		; IP
+	mov	ax,word ptr ss:[ecx+dcbtab+20]
+	mov	[edi+2ch],ax		; CS
+	mov	ax,word ptr ss:[ecx+dcbtab+28]
+	mov	[edi+2eh],ax		; SP
+	mov	ax,word ptr ss:[ecx+dcbtab+32]
+	mov	[edi+30h],ax		; SS
+
+; a data selector for the real-mode stack (tagged: freed at exit)
+
+	push	ecx
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb, ebx -> NCA1
+	pop	ecx
+	mov	dh,[esi+tcbid]
+	or	dh,80h
+	mov	dl,11110010b
+	movzx	eax,word ptr ss:[ecx+dcbtab+32]	; real-mode ss
+	push	ecx
+	push	esi
+	push	ebx
+	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector
+	pop	ebx
+	pop	esi
+	pop	ecx
+	mov	ss:[cbrmsel],ax
+
+; NCA1 -> NCA2: NCA2 = NCA1 + 256 + ncalen + ncabufsz
+
+	mov	ax,[esi+tcbncadr]
+	mov	word ptr ss:[ecx+dcbtab+80],ax	; NCA1, for the way back
+	mov	edx,[ebx+N_ncabufsz]
+	add	edx,256+ncalen
+	shr	edx,4
+	add	ax,dx
+	mov	[esi+tcbncadr],ax
+	mov	byte ptr ss:[ecx+dcbtab+2],1	; active
+	mov	edi,ebx 		; NCA1
+	movzx	ebx,ax
+	shl	ebx,4
+	add	ebx,256 		; ebx = NCA2, linear
+
+; NCA2's native frame: the procedure, ds:(e)si = real-mode stack,
+; es:(e)di = structure, the client's flags with IF clear
+
+	mov	eax,[edi+N_ncanflag]
+	and	eax,not 200h
+	mov	[ebx+N_ncanflag],eax
+	mov	[ebx+N_ncavflag],eax
+	mov	eax,dword ptr ss:[ecx+dcbtab+12]
+	mov	[ebx+N_ncavdi],eax
+	movzx	eax,word ptr ss:[ecx+dcbtab+28]
+	mov	[ebx+N_ncavsi],eax
+	xor	eax,eax
+	mov	[ebx+N_ncavdx],eax
+	mov	[ebx+N_ncavax],eax
+	mov	[ebx+N_ncavbx],eax
+	mov	[ebx+N_ncavcx],eax
+	mov	[ebx+N_ncavbp],eax
+	mov	[ebx+N_ncaves],eax
+	mov	[ebx+N_ncavds],eax
+	mov	[ebx+N_ncanfs],eax
+	mov	[ebx+N_ncangs],eax
+	movzx	eax,word ptr ss:[ecx+dcbtab+10]
+	mov	[ebx+N_ncanes],eax
+	movzx	eax,word ptr ss:[cbrmsel]
+	mov	[ebx+N_ncands],eax
+	mov	eax,dword ptr ss:[ecx+dcbtab+4]
+	mov	[ebx+N_ncanip],eax
+	movzx	eax,word ptr ss:[ecx+dcbtab+8]
+	mov	[ebx+N_ncancs],eax
+
+; stack: the client's, 512 bytes below where its outer call left it,
+; with an iret frame to stub 484h (int 0E9h) on top
+
+	mov	eax,[edi+N_ncanss]
+	mov	[ebx+N_ncanss],eax
+	and	eax,0fff8h
+	mov	esi,dword ptr ss:[eax+gdt+2]
+	and	esi,00ffffffh
+	mov	dl,byte ptr ss:[eax+gdt+7]
+	shl	edx,24
+	or	esi,edx 		; esi = ss base
+	movzx	eax,word ptr ss:[ecx+dcbtab+8]	; procedure: 16 or 32-bit?
+	and	eax,0fff8h
+	test	byte ptr ss:[eax+gdt+6],40h
+	mov	eax,[edi+N_ncansp]
+	jnz	e6f91f32
+	sub	eax,512+6
+	and	eax,0ffffh
+	mov	[ebx+N_ncansp],eax
+	add	esi,eax
+	mov	word ptr [esi],484h	; ip
+	mov	ax,ss:[stubsel16]
+	mov	[esi+2],ax		; cs
+	mov	ax,word ptr [ebx+N_ncanflag]
+	mov	[esi+4],ax		; flags
+	jmp	short e6f91go
+e6f91f32:
+	sub	eax,512+12
+	mov	[ebx+N_ncansp],eax
+	add	esi,eax
+	mov	dword ptr [esi],484h
+	movzx	eax,word ptr ss:[stubsel32]
+	mov	[esi+4],eax
+	mov	eax,[ebx+N_ncanflag]
+	mov	[esi+8],eax
+e6f91go:
+	jmp	dword ptr mmgrp:[einb_ptr]	; einback: p0stack from NCA2, iret
+
+e6f91x:					; not a live callback: ignore it
+	mov	eax,ss:[cbeax]
+	mov	edx,ss:[cbedx]
+	mov	esi,ss:[cbesi]
+	mov	edi,ss:[cbedi]
+	or	byte ptr ss:[s0flags],01h	; cf set
+	jmp	cgrm7
+
+;
+; e6fcbret: the callback procedure returned (iret onto stub 484h,
+; int 0E9h, routed here from einvhook). Resume the real-mode caller
+; from the structure, give the task NCA1 back, leave via cgrm7 into
+; v-86. ds is flat, ebx = NCA2 (einative context, discarded).
+;
+e6fcbret:
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb
+	mov	dl,[esi+tcbid]
+	xor	ecx,ecx
+e6fcbf:
+	cmp	byte ptr ss:[ecx+dcbtab],1
+	jne	e6fcbn
+	cmp	byte ptr ss:[ecx+dcbtab+2],1	; the active one
+	jne	e6fcbn
+	cmp	byte ptr ss:[ecx+dcbtab+1],dl
+	je	e6fcbg
+e6fcbn:
+	add	ecx,DCBSZ
+	cmp	ecx,DCBN*DCBSZ
+	jb	e6fcbf
+	jmp	cgrm7			; cannot happen
+e6fcbg:
+	mov	byte ptr ss:[ecx+dcbtab+2],0
+	mov	ax,word ptr ss:[ecx+dcbtab+80]
+	mov	[esi+tcbncadr],ax	; NCA1 again
+
+	movzx	esi,word ptr ss:[ecx+dcbtab+10]	; structure, linear
+	and	esi,0fff8h
+	mov	edi,dword ptr ss:[esi+gdt+2]
+	and	edi,00ffffffh
+	mov	al,byte ptr ss:[esi+gdt+7]
+	shl	eax,24
+	or	edi,eax
+	add	edi,dword ptr ss:[ecx+dcbtab+12]
+
+	movzx	eax,word ptr [edi+2ah]
+	mov	dword ptr ss:[s0ip],eax
+	movzx	eax,word ptr [edi+2ch]
+	mov	dword ptr ss:[s0cs],eax
+	mov	eax,dword ptr ss:[ecx+dcbtab+24]	; saved eflags (VM, IOPL)
+	mov	ax,[edi+20h]		; with the structure's flags
+	mov	dword ptr ss:[s0flags],eax
+	movzx	eax,word ptr [edi+2eh]
+	mov	dword ptr ss:[s0sp],eax
+	movzx	eax,word ptr [edi+30h]
+	mov	dword ptr ss:[s0ss],eax
+	movzx	eax,word ptr [edi+22h]
+	mov	dword ptr ss:[s0es],eax
+	movzx	eax,word ptr [edi+24h]
+	mov	dword ptr ss:[s0ds],eax
+	movzx	eax,word ptr [edi+26h]
+	mov	dword ptr ss:[s0fs],eax
+	movzx	eax,word ptr [edi+28h]
+	mov	dword ptr ss:[s0gs],eax
+
+	mov	esp,offset mmgrp:s0ip	; rebuild what cgrm7 pops
+	push	dword ptr [edi+08h]	; ebp
+	push	0			; ds
+	push	0			; es
+	push	dword ptr [edi+18h]	; ecx
+	push	dword ptr [edi+10h]	; ebx
+	mov	eax,[edi+1ch]
+	mov	edx,[edi+14h]
+	mov	esi,[edi+04h]
+	mov	edi,[edi+00h]
 	jmp	cgrm7
 
 e6f8f:
