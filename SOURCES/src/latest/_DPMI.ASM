@@ -233,6 +233,19 @@ GoProtect       proc    far
                 call    HookUnreg               ; cover termination for a client that
                                                 ;  never calls int 31h (must be here:
                                                 ;  real-mode addressing, pre-switch)
+;
+; High words of ESP and EBP to zero (UPDATE 64). They survive from
+; whatever 32-bit code ran in this task before -- a previous client's
+; registers pass through its 4Ch, COMMAND.COM and this program's
+; real-mode code untouched. The client's stack is 32-bit (B=1), so a
+; 16-bit LEAVE copies all of EBP to ESP: DOS/4GW's second run in a
+; session got ESP=003113E8 and failed. DPMI 0.9: the high word of ESP
+; is 0 after the switch. EBP has no defined real-mode high word.
+;
+                .386
+                movzx   esp,sp
+                movzx   ebp,bp
+                .286
                 mov     ax,1001h
                 int     0d4h                    ; protect mode
                 jnc     gp_switched

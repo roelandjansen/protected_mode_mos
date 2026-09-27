@@ -288,6 +288,98 @@ fr_fail:
         call    crlf
 fr_done:
         .286
+;
+; Segment register after 0009h (UPDATE 64 investigation). DS is loaded
+; with a data selector, 0009h turns that selector into code, then we
+; write through DS three times: straight after 0009h, after another
+; int 31h (0400h), and after a few timer ticks. A write through a
+; reloaded DS #GPs; hgp counts it and skips the 2-byte write. DOS/4GW
+; depends on the cached data descriptor surviving (HDPMI32: it does).
+; The base comes from the PSP (a .COM: ds base = PSP*16) -- 0006h on
+; our own ds is refused by this host (not tagged 80h|taskid).
+;
+        .386
+        mov     byte ptr [gpcount],0
+        mov     ax,0000h		; one descriptor
+        mov     cx,1
+        int     31h
+        jc      rl_fail
+        mov     word ptr [selD],ax
+        mov     bx,ax
+        mov     dx,word ptr [rPSP]	; base = PSP*16 in cx:dx
+        mov     cx,dx
+        shl     dx,4
+        shr     cx,12
+        mov     ax,0007h
+        int     31h
+        jc      rl_fail
+        mov     bx,word ptr [selD]
+        xor     cx,cx
+        mov     dx,0ffffh
+        mov     ax,0008h
+        int     31h
+        mov     bx,word ptr [selD]
+        mov     cx,00f2h		; data r/w dpl 3
+        mov     ax,0009h
+        int     31h
+        jc      rl_fail
+        mov     ax,0203h		; #GP -> sel32:hgp
+        mov     bl,0dh
+        mov     cx,word ptr [sel32]
+        xor     edx,edx
+        mov     dx,offset hgp
+        int     31h
+        jc      rl_fail
+        push    ds
+        mov     ds,word ptr ss:[selD]	; ds = the data selector
+        mov     bx,word ptr ss:[selD]
+        mov     cx,00fah		; now make it code r/x
+        mov     ax,0009h
+        int     31h
+        mov     si,offset scratch
+        mov     al,0a1h
+        mov     [si],al			; 88 04: write 1, straight after
+        mov     ax,0205h		; set pm vector 25h, as DOS/4GW does
+        mov     bl,25h		; the vector DOS/4GW set last
+        mov     cx,word ptr ss:[sel32]
+        xor     edx,edx
+        mov     dx,offset h60
+        int     31h
+        mov     si,offset scratch+1
+        mov     al,0a2h
+        mov     [si],al			; write 2, after 0205h
+        mov     cx,0ffffh		; a few timer ticks
+rl_spin:
+        push    cx
+        mov     cx,20h
+rl_spin2:
+        loop    rl_spin2
+        pop     cx
+        loop    rl_spin
+        mov     si,offset scratch+2
+        mov     al,0a3h
+        mov     [si],al			; write 3, after timer interrupts
+        pop     ds
+        mov     dx,offset msg32d
+        call    puts
+        mov     al,byte ptr [gpcount]
+        xor     ah,ah
+        call    puthex
+        mov     dx,offset msgbytes
+        call    puts
+        mov     ax,word ptr [scratch]
+        xchg    al,ah
+        call    puthex
+        mov     al,byte ptr [scratch+2]
+        xor     ah,ah
+        call    puthex
+        call    crlf
+        jmp     short rl_done
+rl_fail:
+        mov     dx,offset msgrlf
+        call    puts
+rl_done:
+        .286
         mov     dx,offset msgdone
         call    puts
         mov     ax,4c00h
@@ -329,6 +421,14 @@ h60:
 ; [esp+0Ch] eip, [esp+10h] cs, [esp+14h] eflags, [esp+18h] esp,
 ; [esp+1Ch] ss. Skip the 2-byte div; 32-bit retf.
 ;
+;
+; #GP for the 0009h test: count it, skip the 2-byte write; 32-bit retf.
+;
+hgp:
+        db      36h,0feh,05h		; inc byte ptr ss:[gpcount]
+        dw      offset gpcount,0
+        db      83h,44h,24h,0ch,02h	; add dword ptr [esp+0Ch],2
+        db      0cbh			; retf (32-bit)
 hde:
         db      8bh,44h,24h,0ch		; mov eax,[esp+0Ch]
         db      36h,0a3h		; mov ss:[x_eip],eax
@@ -442,6 +542,12 @@ h_cs       dd 0
 x_eip      dd 0
 x_cs       dd 0
 x_rcs      dd 0
+selD       dw 0
+gpcount    db 0
+scratch    db 0,0,0
+msg32d     db '  32d ds after 0009h: #GP count:','$'
+msgbytes   db ' bytes 1/2/3:','$'
+msgrlf     db 'FAIL setup','$'
 msg32i     db '  32i int60 eip:','$'
 msg32x     db '  32x #DE   eip:','$'
 msgexp     db ' exp:','$'

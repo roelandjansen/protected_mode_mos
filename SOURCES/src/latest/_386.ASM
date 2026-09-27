@@ -3105,7 +3105,9 @@ tss2len equ	$-tss2
 ;		     descriptor task id table
 ;--------------------------------------------------------------------
 dtitable label byte
-	db	30 dup(-1)		; allow up to 30 user selectors
+	db	250 dup(-1)		; user selectors (UPDATE 64: was 30, shared
+					;  by every task incl. the host's own client
+					;  selectors; one DOS/4GW client asks for 47)
 dtilen	equ	$-dtitable
 
 ;--------------------------------------------------------------------
@@ -7722,7 +7724,10 @@ DBLKN	equ	128			; 128 blocks system-wide (1 KB)
 dblktab db	DBLKN*8 dup(0)
 
 ; DPMI protected-mode interrupt hooks and default stubs (UPDATE 50)
-DPHKN	equ	32
+DPHKN	equ	320			; UPDATE 64: was 32, shared by 0203h and 0205h
+					;  across all tasks. One DOS/4GW client hooks all
+					;  256 vectors and 32 exceptions (288); its 33rd
+					;  hook failed, cf=1, and it aborted.
 phooktab db	DPHKN*12 dup(0)
 stubsel16 dw	0
 stubsel32 dw	0
@@ -7768,6 +7773,24 @@ DXSTBN	=	DXSTBN+1
 	endm
 	db	0cdh,0e9h,90h,90h	; +484h: int 0E9h, callback return
 	db	0cdh,0eah,90h,90h	; +488h: int 0EAh, raw switch to real mode
+;
+; UPDATE 64: default handlers that RETURN THE HOST'S FLAGS. The table
+; above ends in iret, which restores the flags the caller pushed: a
+; client that hooks int 31h/21h and chains to the default (DOS/4GW)
+; never saw cf. These end in retf 2 / retf 4, like a real-mode handler
+; that returns status in the flags. 0204h hands out these; einvhook
+; reads N after int 0E6h as before, so they need no other support.
+;
+DS16N	=	0			; +48Ch: 16-bit, int 0E6h / N / retf 2
+	rept	256
+	db	0cdh,0e6h,DS16N,0cah,02h,00h
+DS16N	=	DS16N+1
+	endm
+DS32N	=	0			; +A8Ch: 32-bit, int 0E6h / N / retf 4
+	rept	256
+	db	0cdh,0e6h,DS32N,0cah,04h,00h
+DS32N	=	DS32N+1
+	endm
 
 	page
 ;--------------------------------------------------------------------
@@ -9161,7 +9184,8 @@ e31stb4:
 	db	66h
 	add	di,gdtspace-gdt
 	db	66h,67h
-	mov	word ptr ss:[di+gdt],48bh	; limit: stubs, retf, E7, E8s, E9, EA
+	mov	word ptr ss:[di+gdt],108bh	; limit: stubs, retf, E7, E8s, E9, EA,
+					;  retf-n stubs (UPDATE 64)
 	db	66h,67h
 	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
 	db	67h
@@ -9234,7 +9258,19 @@ e0204t:
 	NSTW	ncavcx
 	xor	ax,ax
 	mov	al,cl
-	shl	ax,2			; vector * 4
+	db	0bah			; mov edx,6 -- UPDATE 64: retf-n stubs,
+	dw	6,0
+	mul	dx			;  6 bytes each (dx:ax; ax < 600h)
+	EAXI	05h,48ch,0		; add eax,48Ch: 16-bit table
+	push	ax
+	db	66h
+	call	c32edx
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	pop	ax
+	jz	e0204u
+	EAXI	05h,600h,0		; add eax,600h: 32-bit table at +A8Ch
+e0204u:
 	NST	ncavdx
 	db	66h
 	jmp	e31dok
