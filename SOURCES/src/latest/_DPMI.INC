@@ -7,7 +7,8 @@ I486			equ	4
 MOS_HOST_MAJOR		equ	0
 MOS_HOST_MINOR		equ	1
 
-DPMIVersion		equ	0100h
+DPMIVersion		equ	005Ah	; 0.90, as 0400h (monitor) reports; was 0100h
+					;  -- 1687h said 1.00 (UPDATE 65)
 DPMIVersion9		equ	005Ah
 AccessBits		equ	1
 

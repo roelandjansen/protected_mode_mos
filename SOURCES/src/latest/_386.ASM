@@ -8639,7 +8639,15 @@ e31sel:
 	shr	si,3			; dtitable index
 	db	67h
 	cmp	ss:[si+dtitable],dh	; owned by this task?
+	je	e31selok		; the client's own (80h|taskid)
+	push	ax			; UPDATE 64: or one the kernel made for this
+	mov	al,dh			;  task at the switch (taskid): the client's
+	and	al,7fh			;  initial cs/ds/ss. DOS/32A sets its ds limit
+	db	67h			;  to 4 GB (0008h); 0006h asks their bases.
+	cmp	ss:[si+dtitable],al	;  They live for the session: cleardti runs
+	pop	ax			;  only at the switch itself.
 	jne	e31selx
+e31selok:
 	clc
 	db	66h
 	ret
@@ -8657,6 +8665,12 @@ e3101:
 	db	66h
 	jmp	e31bad
 e31ok1:
+	db	67h
+	cmp	ss:[si+dtitable],dh	; UPDATE 64: never free a kernel-made
+	je	e31ok1f			;  initial selector, only 80h|taskid
+	db	66h
+	jmp	e31bad
+e31ok1f:
 	db	67h
 	mov	ss:[si+dtitable],0ffh
 	db	66h
@@ -11155,6 +11169,8 @@ nmswitch:
 	db	66h
 	call	makegdte
 	db	66h
+	call	clrgran			; g=0: a 64 KB limit (UPDATE 65)
+	db	66h
 	db	67h
 	mov	[bp-4],ax
 	db	66h
@@ -11162,6 +11178,8 @@ nmswitch:
 	mov	ax,ss:[s0es]		; translate es selector
 	db	66h
 	call	makegdte
+	db	66h
+	call	clrgran			; g=0: a 64 KB limit (UPDATE 65)
 	db	66h
 	db	67h
 	mov	[bp-8],ax
@@ -11171,6 +11189,8 @@ nmswitch:
 	db	66h
 	call	makegdte
 	db	66h
+	call	clrgran			; g=0: a 64 KB limit (UPDATE 65)
+	db	66h
 	db	67h
 	mov	[bp-36],ax
 	db	66h
@@ -11179,6 +11199,8 @@ nmswitch:
 	db	66h
 	call	makegdte
 	db	66h
+	call	clrgran			; g=0: a 64 KB limit (UPDATE 65)
+	db	66h
 	db	67h
 	mov	[bp-40],ax
 	db	66h
@@ -11186,6 +11208,8 @@ nmswitch:
 	mov	ax,ss:[s0ss]		; translate ss selector
 	db	66h
 	call	makegdte
+	db	66h
+	call	clrgran			; g=0: a 64 KB limit (UPDATE 65)
 	db	66h
 	db	67h
 	mov	ss:[s0ss],ax
@@ -11320,7 +11344,7 @@ mgdloop1:
 	db	81h,0e1h		;and ecx,00ffffffh
 	dw	0ffffh,00ffh
 	cmp	ax,cx
-	je	mgdgotav		; jump if same base address
+	je	mgdret			; same base: reuse it AS IT IS (UPDATE 65)
 mgdcont1:
 	db	67h
 	cmp	ss:[si+dtitable],0ffh	; available entry?
@@ -11345,6 +11369,14 @@ mgdgotav:
 	db	66h
 	db	67h
 	mov	ss:[di+gdt+6],00c0h	; g=1,d=1
+;
+; UPDATE 65: a matching entry (same task, access, base) used to fall
+; into mgdgotav and get limit FFFFh and g=1,d=1 again. That undid the
+; switch's g=0 (clrgran) on the client's ds/ss and any limit a client
+; set itself with 0008h (DOS/32A: ds to 4 GB) as soon as the kernel
+; translated the same segment again. Only a fresh entry is written.
+;
+mgdret:
 	mov	ax,di			; return selector with rpl=3
 	or	al,3
 mgdexit:
@@ -11413,6 +11445,31 @@ cdtskip1:
 	db	66h
 	ret
 cleardti endp
+
+;--------------------------------------------------------------------
+;	clrgran: g=0 on the descriptor of selector ax (UPDATE 65)
+;--------------------------------------------------------------------
+;
+; makegdte builds every descriptor with g=1,d=1 (00C0h). For the
+; data selectors of the native-mode switch that is a 256 MB limit on
+; a 64 KB real-mode segment; DPMI 0.9 gives the client 64 KB ones
+; (HDPMI32: 0040h). A bad stack pointer then faults (#SS) instead of
+; silently using memory above the segment (UPDATE 64, bug 4). ax = 0
+; (table full) is left alone. Preserves all registers.
+;
+clrgran proc	near
+	or	ax,ax
+	jz	clrgx
+	push	di
+	db	0fh,0b7h,0f8h		; movzx edi,ax
+	and	di,0fff8h		; drop the rpl: makegdte returns it or 3
+	db	67h
+	and	byte ptr ss:[di+gdt+6],7fh	; g=0, keep d/b and limit 19:16
+	pop	di
+clrgx:
+	db	66h
+	ret
+clrgran endp
 
 	page
 ;--------------------------------------------------------------------

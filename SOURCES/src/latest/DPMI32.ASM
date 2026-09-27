@@ -35,6 +35,7 @@ start:
         mov     [rSI],si
         mov     [rDI],di
         mov     [rES],es
+        mov     [rDX],dx		; host's DPMI version (UPDATE 65)
         mov     [rPSP],cs		; a .COM: cs = PSP
         mov     ax,ds:[2ch]
         mov     [rENV],ax		; environment segment, real mode
@@ -52,6 +53,10 @@ have_host:
         mov     dx,offset msgflags
         call    puts
         mov     ax,[rBX]		; bit 0: host supports 32-bit clients
+        call    puthex
+        mov     dx,offset msgver
+        call    puts
+        mov     ax,[rDX]
         call    puthex
         call    crlf
 
@@ -523,6 +528,7 @@ rAX     dw      0
 rBX     dw      0
 rSI     dw      0
 rBlk    dw      0
+rDX     dw      0
 rPSP    dw      0
 rENV    dw      0
 rESel   dw      0
@@ -530,6 +536,7 @@ rESel   dw      0
 msghdr     db 13,10,'DPMI32 - DPMI 0.9 32-bit client test',13,10,'$'
 msgnohost  db '  no DPMI host installed',13,10,'$'
 msgflags   db '  1687h flags: ','$'
+msgver     db ' version: ','$'
 msgnomem   db '  could not allocate the host data block',13,10,'$'
 msgfail    db '  32: switch refused (carry set), still real mode',13,10,'$'
 msg32cs    db '  32: FAIL cs is 32-bit after entry (DPMI 0.9: 16-bit)',13,10,'$'

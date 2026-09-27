@@ -1,11 +1,10 @@
-## UPDATE 64 (2026-09-27) — DOS/4GW runs
+## UPDATE 64 (2026-09-27) — DOS/4GW and DOS/32A run; full regression clean
 
-DOS/4GW 1.97 (Open Watcom v2) runs: `W4HELLO` three times and `W4MEM`
-(4 MB, sum `1FE00000`) twice in one boot, environment intact. Found
-with a differential trace against HDPMI32. DOS/32A: next (still only
-its banner). Full regression over all environments (DPMI32 kit,
-DJGPP, DOS/4GW, DOS/32A) comes when DOS/32A passes; not run yet for
-this update.
+Three real extenders now run, alone and mixed in one boot: DJGPP
+(UPDATE 63), DOS/4GW 1.97 and DOS/32A 9.1.2 (both Open Watcom v2).
+Each environment was fixed on its own first; then everything was run
+together (below). All fixes found with a differential trace against
+HDPMI32 as the reference host.
 
 ### Test environments (host side, not in the PC-MOS tree)
 
@@ -73,6 +72,18 @@ exposed (3). In plain DOSBox arm the tracer with `PMTRACE_ALL=1`.
    after the switch. **`movzx esp,sp` / `movzx ebp,bp`** right before
    `int 0d4h` 1001h.
 
+5. **The client's initial selectors were off limits** (`_386.ASM`
+   `e31sel`). DOS/32A switches in, builds its own descriptors, then
+   calls 0008h on its initial DS (`005B`) with limit `FFFFFFFF` -- the
+   classic flat-DS setup. `e31sel` accepted only `80h|taskid`; the
+   initial cs/ds/ss are made by the kernel at the switch and tagged
+   `taskid`, so it failed and DOS/32A exited 4CFFh without a word
+   (only its banner, even with `DOS32A=/VERBOSE`). These selectors
+   live for the session (`cleardti` runs only at the switch itself).
+   **`e31sel` accepts `taskid` too** (0006h..0009h, 000Bh, 000Ch);
+   **0001h still frees only `80h|taskid`**, so a client can never free
+   a kernel-made selector. Also fixes the open 0006h item.
+
 ### Ruled out (measured, keep)
 
 - *Segment reload after 0009h* (DPMI 1.0 requires it, 0.9 allows
@@ -86,9 +97,13 @@ exposed (3). In plain DOSBox arm the tracer with `PMTRACE_ALL=1`.
 
 ### Open (not blocking)
 
-- **0006h refuses the client's initial cs/ds/ss** (kernel-made, not
-  tagged `80h|taskid`; `e31sel` checks the tag for every 000xh). Right
-  for writes, wrong for reads. DOS/4GW copes; others may not.
+- **Version mismatch**: 1687h returns DX = `0100` (DPMI 1.00), 0400h
+  returns 0.90 (`005A`). We implement 0.90; 1687h should say so. Not
+  changed here: it needs its own regression run.
+- A client may now change the limit of its initial DS (DOS/32A: 4 GB).
+  `makegdte` reuses a descriptor with the same tag, access and base: a
+  later kernel translation for the same segment with tag `taskid` would
+  rewrite that limit. Not seen; watch for it.
 - **Initial ss/ds are `00C0`** (G=1, B=1); HDPMI32 gives `0040`. With
   G=0, bug (4) would have been a clean #SS instead of silent stack
   corruption. Change only with the full regression behind it.
@@ -101,22 +116,39 @@ exposed (3). In plain DOSBox arm the tracer with `PMTRACE_ALL=1`.
 
 | file | change |
 | --- | --- |
-| `_386.ASM` | `DPHKN` 320; `dtitable` 250; retf-n stub tables; stub limit `108Bh`; 0204h default |
+| `_386.ASM` | `DPHKN` 320; `dtitable` 250; retf-n stub tables; stub limit `108Bh`; 0204h default; `e31sel` accepts the initial selectors, 0001h does not |
 | `_DPMI.ASM` | `GoProtect`: `movzx esp,sp` / `movzx ebp,bp` before the switch |
 | `DPMI32.ASM` | `32d` test: 0000h/0007h/0008h/0009h, 32-bit #GP handler `hgp` (counts, skips 2 bytes), three writes through DS after 0009h (straight, after 0205h 25h, after timer ticks); base from PSP*16 |
 
-Build: `$386.SYS` 33664 -> 42208, 0 warnings. `$DPMI.SYS` 5133 -> 5149,
+Build: `$386.SYS` 33664 -> 42240, 0 warnings. `$DPMI.SYS` 5133 -> 5149,
 the 4 pre-existing warnings (A4057, `scbmmsub` / `memman`). Binary
 checked against the listing at the new 0204h code (`6F2B`).
 
 | file | size | md5 |
 | --- | --- | --- |
-| `$386.SYS` | 42208 | `a1ab24dffd13674c7cb7233198a789d5` |
+| `$386.SYS` | 42240 | `4b90403ed70fb588438cd0675d7f0492` |
 | `$DPMI.SYS` | 5149 | `52ebe63ec6ad7d23abe0222320c44841` |
 | `DPMI32.COM` | 1529 | `07e3d2cc7fec615fa913cd90d7428b70` |
-| `_386.ASM` | | `10d49fa10f072e7dc47adc8341c2ebd4` |
+| `_386.ASM` | | `bf243ac290778a4c21e3625cd2876863` |
 | `_DPMI.ASM` | | `ee86eb514c8898fca87c5dbc7d06c29a` |
 | `DPMI32.ASM` | | `3a525f6443472bb7409a6bb953ecfea3` |
+
+### Full regression (after all five fixes)
+
+Each environment alone:
+
+| environment | result |
+| --- | --- |
+| DPMI32 kit, 19 clients | all pass. Changed values are layout only (driver +8.5 KB, DOS memory higher): sB bx `8103` (was `8303`), sC/sD segments `1DFC`/`1E05` (were `1BFC`/`1C05`), sS rm->pm `54F5`, sL loop counter |
+| s32 (`DPMI32`), twice | frames, PSP/environment, `32d`; `32e` now reads ES's base through 0006h |
+| DJGPP | `DJHELLO`, `DJMEM` (sum `1FE00000`) |
+| DOS/4GW | `W4HELLO` x3, `W4MEM` x2 in one boot |
+| DOS/32A | `WAHELLO` x2, `WAMEM` x2 in one boot; only warning `9004 mouse initialization failed` (no mouse driver on the test floppy) |
+
+Mixed, one boot, in this order: `DJHELLO`, `DJMEM`, `W4HELLO`,
+`DOS32A WAHELLO`, `DJHELLO`, `W4MEM`, `DOS32A WAMEM`, `DJMEM`,
+`DPMI32`, `SET` -- every line and sum correct, environment intact. No
+extender leaves state that breaks the next.
 
 ### Rig
 
@@ -151,9 +183,9 @@ checked against the listing at the new 0204h code (`6F2B`).
 
 ### Next
 
-1. DOS/32A (`DOS32A WAHELLO`, `WAMEM`): banner only under PC-MOS, no
-   banner under HDPMI32 -- different path from the start. Differential
-   trace.
-2. All environments together: DPMI32 kit (19 clients), DJGPP,
-   DOS/4GW, DOS/32A.
-3. The open items above.
+1. 1687h: report 0.90 (DX = `005A`), then regression.
+2. Initial ss/ds G=1 -> G=0 (as HDPMI32), then regression.
+3. More real programs per environment (larger DJGPP / Watcom programs,
+   file I/O, keyboard, graphics).
+4. Per-client ownership of hooks, descriptors and memory (parked; the
+   tables are still shared and scanned linearly).
