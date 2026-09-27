@@ -37,6 +37,7 @@ CREATE_ALIAS		equ	778ch
 ALLOC_SPEC_SELECTOR	equ	778dh
 CODE_SELECTOR		equ	778eh	; code alias for a real-mode segment
 FREE_CLIENT_SEL		equ	778fh	; release this task's client descriptors
+CLIENT_PSP		equ	7793h	; PSP and environment selectors (UPDATE 63)
 ;
 ; below are equates use to access memory manger functions
 ;

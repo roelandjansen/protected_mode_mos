@@ -218,7 +218,16 @@ GoProtect       proc    far
                 mov     ah,62h
                 int     21h
                 pop     dx
-                mov     es,bx
+                push    bx                      ; PSP segment
+                push    dx
+                mov     ax,CLIENT_PSP           ; PSP selector, environment
+                int     6fh                     ;  selector in PSP:2Ch (DPMI 0.9
+                                                ;  5.2; UPDATE 63)
+                pop     dx
+                pop     ax                      ; ax = PSP segment
+                jc      gp_nopsp
+                push    bx                      ; PSP selector: ES after the switch
+                mov     es,ax
                 mov     cx,NCATOTAL		; total nca area, see NCABUF
 
                 call    HookUnreg               ; cover termination for a client that
@@ -234,6 +243,10 @@ GoProtect       proc    far
 ; the client, per DPMI 0.9, rather than letting it believe it
 ; switched.
 ;
+                add     sp,2                    ; drop the PSP selector
+                mov     ax,FREE_CLIENT_SEL      ; free the selectors and put
+                int     6fh                     ;  PSP:2Ch back (UPDATE 63)
+gp_nopsp:
                 .386
                 mov     ax,fs
                 .286
@@ -264,6 +277,9 @@ gp_switched:
 ; built by int 6fh CODE_SELECTOR above.
 ;
                 .386
+                db      66h
+                pop     ax                      ; the PSP selector, pushed as 2 bytes
+                mov     es,ax                   ; ES = PSP selector (UPDATE 63)
                 db      66h
                 add     sp,2                    ; drop the saved real-mode fs
                                                 ;  (push fs in 16-bit mode pushed 2,

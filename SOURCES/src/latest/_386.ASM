@@ -7739,6 +7739,9 @@ raw_ptr	dd	0			; -> e6frawpm: filled by e6f8e, as cbr_ptr
 
 c32tab	db	128 dup(0)		; per task id: DPMI client type, 0 none,
 					;  1 16-bit, 2 32-bit (e6f8e; UPDATE 62)
+envtab	dd	128 dup(0)		; per task id: environment segment << 16 |
+					;  PSP segment, 0 = nothing to put back
+					;  (e6f93, envr16, envrest; UPDATE 63)
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
 DCBSZ	equ	96
@@ -8060,6 +8063,46 @@ c32eax:
 	call	c32edx
 	mov	ax,dx			; mov eax,edx
 	pop	dx
+	db	66h
+	ret
+
+;
+; envr16: put this task's environment segment back into PSP:2Ch
+; (e6f93 replaced it with a selector); DOS frees the environment
+; through that word once the 4Ch is reflected. ds is flat (einative
+; context). Preserves all registers but flags. (UPDATE 63)
+;
+envr16:
+	push	ax			; push eax
+	push	dx
+	push	si
+	push	di
+	push	bx
+	db	66h
+	call	e31tid			; dl = task id (clobbers esi, ebx)
+	pop	bx			; ebx -> nca again
+	xor	ax,ax			; xor eax,eax
+	mov	al,dl
+	and	al,7fh
+	shl	ax,2			; shl eax,2
+	mov	si,ax			; mov esi,eax
+	db	67h
+	mov	ax,word ptr ss:[si+envtab]	; mov eax,dword: env<<16 | PSP
+	db	0a9h			; test eax,0ffff0000h
+	dw	0,0ffffh
+	jz	envr16x
+	xor	di,di			; xor edi,edi
+	db	67h
+	mov	word ptr ss:[si+envtab],di	; mov dword: entry used up
+	db	0fh,0b7h,0f8h		; movzx edi,ax: PSP segment
+	db	0c1h,0e7h,04h		; shl edi,4
+	db	0c1h,0e8h,10h		; shr eax,16: environment segment
+	db	66h,89h,47h,2ch		; mov [edi+2Ch],ax
+envr16x:
+	pop	di
+	pop	si
+	pop	dx
+	pop	ax
 	db	66h
 	ret
 
@@ -8972,9 +9015,12 @@ e310201:
 	NLDW	ncavcx
 	shl	ax,16
 	NLDW	ncavdx			; eax = segment:offset
+	pushf				; pushfd: keep the caller's IF -- a bare sti
+					;  here let IRQ 0 into the monitor at cpl 0
+					;  and killed DJGPP's 0201h (UPDATE 63)
 	cli				; no interrupt may see half a vector
 	db	89h,06h 		; mov [esi],eax
-	sti
+	popf				; popfd
 	db	66h
 	jmp	e31dok
 
@@ -10531,6 +10577,9 @@ e0306b:
 einfun4c:
 	db	66h
 	call	freeclsel		; descriptors; preserves ebx (nca)
+	db	66h
+	call	envr16			; PSP:2Ch back to a segment before DOS
+					;  frees the environment (UPDATE 63)
 
 ; and this task's DPMI memory blocks (UPDATE 43). Inline, not a
 ; subroutine: the memory device call goes through dovmint. Loop state
@@ -11597,6 +11646,7 @@ i6f_dpmi_tbl label dword
 	dd	offset mmgrp:e6f90	; 90h SET_DPMI_RESERVE
 	dd	offset mmgrp:e6f91	; 91h CALLBACK (real-mode stub fired)
 	dd	offset mmgrp:e6f92	; 92h RAW real -> protected
+	dd	offset mmgrp:e6f93	; 93h CLIENT_PSP (UPDATE 63)
 ;
 i6f_dpmi_entries equ	($-i6f_dpmi_tbl)/4
 
@@ -12576,6 +12626,7 @@ e6f8f:
 ; critical-error abort, int 20h (UPDATE 57).
 ;
 dpmiclr:
+	call	envrest			; PSP:2Ch back to a segment (UPDATE 63)
 	;
 	; No client type recorded until the next session's e6f8e (UPDATE 62)
 	;
@@ -12753,6 +12804,160 @@ e6f8ex:
 	pop	edx
 	pop	eax
 	jmp	cgrm7
+
+;==== dpmi func 93 - CLIENT_PSP: PSP and environment selectors (UPDATE 63)
+;
+; DPMI 0.9 5.2: after the mode switch ES is a selector for the PSP
+; with a 100h limit, and the environment segment in PSP:2Ch has been
+; replaced by a selector. GoProtect calls this before the switch.
+;
+; Both descriptors are data r/w dpl 3, byte-granular, 16-bit, tagged
+; 80h|taskid (freed at the client's 4Ch like every client selector).
+; The environment limit comes from its MCB ('M'/'Z', size at +3);
+; FFFFh if that does not look like an MCB. The original segment is
+; kept in envtab and put back by envr16 (int 21h 4Ch, einfun4c) or
+; envrest (dpmiclr): DOS frees the environment through PSP:2Ch.
+;
+; in:	caller's bx = PSP segment
+; out:	caller's bx = PSP selector, caller's cx = environment selector
+;	(0 if PSP:2Ch was 0), cf clear
+;	cf set if the table is full; PSP:2Ch is then unchanged
+;
+e6f93:
+	push	eax
+	push	edx
+	push	esi
+	push	edi
+	push	fs
+	mov	ax,gdtzero-gdt		; flat
+	mov	fs,ax
+	db	66h
+	db	67h
+	mov	ax,[bp-16]		; caller's bx = PSP segment
+	movzx	edi,ax			; edi = PSP segment, kept
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	mov	dh,[esi+tcbid]
+	or	dh,80h			; dh = client tag, kept (makegdte reads it)
+	mov	eax,edi
+	mov	ecx,0ffh		; DPMI 0.9: 100h bytes
+	call	e93sel
+	or	ax,ax
+	jz	e6f93f
+	db	66h
+	db	67h
+	mov	[bp-16],ax		; caller's bx = PSP selector
+	mov	ebx,edi
+	shl	ebx,4			; ebx = PSP, linear
+	movzx	eax,word ptr fs:[ebx+2ch]	; environment segment
+	xor	esi,esi			; environment selector: none yet
+	or	eax,eax
+	jz	e6f93n
+	mov	ecx,0ffffh		; limit if there is no usable MCB
+	push	eax
+	dec	eax
+	shl	eax,4			; its MCB, linear
+	mov	dl,fs:[eax]
+	cmp	dl,'M'
+	je	e6f93m
+	cmp	dl,'Z'
+	jne	e6f93d
+e6f93m:
+	movzx	esi,word ptr fs:[eax+3]	; size in paragraphs
+	or	esi,esi
+	jz	e6f93d
+	cmp	esi,1000h
+	jae	e6f93d
+	shl	esi,4
+	dec	esi
+	mov	ecx,esi
+e6f93d:
+	pop	eax			; environment segment
+	push	eax
+	call	e93sel
+	movzx	esi,ax			; environment selector
+	pop	eax
+	or	esi,esi
+	jz	e6f93f			; table full: PSP:2Ch untouched
+	mov	word ptr fs:[ebx+2ch],si	; PSP:2Ch = selector
+	shl	eax,16
+	or	eax,edi			; env<<16 | PSP
+	push	esi
+	push	eax
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	eax,byte ptr [esi+tcbid]
+	and	eax,7fh
+	pop	dword ptr ss:[eax*4+envtab]
+	pop	esi
+e6f93n:
+	mov	eax,esi
+	db	66h
+	db	67h
+	mov	[bp-12],ax		; caller's cx = environment selector
+	and	byte ptr ss:[s0flags],0feh   ; cf clear = success
+	jmp	short e6f93x
+e6f93f:
+	or	byte ptr ss:[s0flags],1      ; cf set = failure
+e6f93x:
+	pop	fs
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	eax
+	jmp	cgrm7
+
+;
+; e93sel: data selector for segment eax, byte limit ecx, tag dh.
+; out: ax = selector, 0 if the table is full. Keeps ecx, edx, esi, edi.
+;
+e93sel:
+	push	ecx
+	push	esi
+	push	edi
+	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001 data r/w
+	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector, 0 = table full
+	pop	edi
+	pop	esi
+	pop	ecx
+	or	ax,ax
+	jz	e93sx
+	push	ebx
+	movzx	ebx,ax
+	and	ebx,0fff8h
+	mov	word ptr ss:[ebx+gdt],cx	; limit 15:0
+	mov	byte ptr ss:[ebx+gdt+6],0	; g=0,d=0, limit 19:16 = 0
+	pop	ebx
+e93sx:
+	ret
+
+;
+; envrest: put this task's environment segment back into PSP:2Ch if
+; e6f93 replaced it and no 4Ch has done so yet (UPDATE 63). Called by
+; dpmiclr. Preserves all registers.
+;
+envrest:
+	push	eax
+	push	ebx
+	push	esi
+	push	fs
+	mov	ax,gdtzero-gdt		; flat
+	mov	fs,ax
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	eax,byte ptr [esi+tcbid]
+	and	eax,7fh
+	mov	ebx,dword ptr ss:[eax*4+envtab]
+	test	ebx,0ffff0000h
+	jz	envrx
+	mov	dword ptr ss:[eax*4+envtab],0
+	movzx	esi,bx			; PSP segment
+	shl	esi,4
+	shr	ebx,16			; environment segment
+	mov	word ptr fs:[esi+2ch],bx
+envrx:
+	pop	fs
+	pop	esi
+	pop	ebx
+	pop	eax
+	ret
 
 
 e6f86:

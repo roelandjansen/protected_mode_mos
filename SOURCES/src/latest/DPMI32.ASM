@@ -35,6 +35,9 @@ start:
         mov     [rSI],si
         mov     [rDI],di
         mov     [rES],es
+        mov     [rPSP],cs		; a .COM: cs = PSP
+        mov     ax,ds:[2ch]
+        mov     [rENV],ax		; environment segment, real mode
 
         mov     dx,offset msghdr
         call    puts
@@ -127,6 +130,65 @@ p16:
         mov     ax,[rAX]
         call    puthex
         mov     ax,[rBX]
+        call    puthex
+        call    crlf
+        .286
+
+;
+; PSP and environment (UPDATE 63). DPMI 0.9 5.2: ES is a selector for
+; the PSP with a 100h limit, and PSP:2Ch holds a selector for the
+; environment instead of its segment.
+;
+        .386
+        mov     dx,offset msg32e
+        call    puts
+        mov     bx,es			; es base (0006h), expect PSP*16
+        mov     ax,0006h
+        int     31h
+        push    dx			; puthex prints through dl
+        mov     ax,cx
+        call    puthex
+        pop     ax			; the base, low word
+        call    puthex
+        mov     dx,offset msgpsp
+        call    puts
+        mov     ax,[rPSP]
+        call    puthex
+        mov     dl,'0'
+        call    putc
+        mov     dx,offset msglim
+        call    puts
+        mov     ax,es
+        movzx   eax,ax
+        db      66h,0fh,03h,0c0h	; lsl eax,eax
+        call    puthex
+        call    crlf
+
+        mov     dx,offset msg32v
+        call    puts
+        mov     ax,es:[2ch]		; environment selector
+        mov     [rESel],ax
+        call    puthex
+        mov     dx,offset msgbase
+        call    puts
+        mov     bx,[rESel]
+        mov     ax,0006h
+        int     31h
+        pushf
+        push    dx			; puthex prints through dl
+        mov     ax,cx
+        call    puthex
+        pop     ax			; the base, low word
+        call    puthex
+        mov     dx,offset msgwas
+        call    puts
+        mov     ax,[rENV]
+        call    puthex
+        mov     dl,'0'
+        call    putc
+        mov     dx,offset msgfl
+        call    puts
+        pop     ax
         call    puthex
         call    crlf
         .286
@@ -361,6 +423,9 @@ rAX     dw      0
 rBX     dw      0
 rSI     dw      0
 rBlk    dw      0
+rPSP    dw      0
+rENV    dw      0
+rESel   dw      0
 
 msghdr     db 13,10,'DPMI32 - DPMI 0.9 32-bit client test',13,10,'$'
 msgnohost  db '  no DPMI host installed',13,10,'$'
@@ -383,6 +448,13 @@ msgexp     db ' exp:','$'
 msgcs      db ' cs:','$'
 msgrcs     db ' hostcs:','$'
 msgfrf     db '  32f: FAIL fl/ax: ','$'
+msg32e     db '  32e es base:','$'
+msgpsp     db ' psp:','$'
+msglim     db ' lim:','$'
+msg32v     db '  32v env sel:','$'
+msgbase    db ' base:','$'
+msgwas     db ' was:','$'
+msgfl      db ' fl:','$'
 msgdone    db '  32: done',13,10,'$'
 
 code    ends
