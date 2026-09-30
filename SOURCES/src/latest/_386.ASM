@@ -409,6 +409,7 @@ regdisp equ     false			; if display registers at boot.
 scbtcbpc equ   19			; scb offset to current tcb address
 tcbid	equ   16			; tcb offset to task id
 tcbncadr equ   18			; tcb offset to nca address
+tcbpsp	equ   2deh			; tcb offset to the current PSP (UPDATE 67)
 
 	page
 ;--------------------------------------------------------------------
@@ -7380,9 +7381,8 @@ einfun48:
 	push	ax			; 32-bit cs: pushes eax
 	db	66h
 	call	addrnca 		; esi -> tcb, ebx -> nca
-	db	8ah,01110110b		; mov dh,[esi+tcbid]
-	;	  01...110		; disp=byte,base=esi
-	db	tcbid
+	db	66h
+	call	cidh			; dh = client id (UPDATE 67)
 	or	dh,80h			; the client-descriptor tag
 	pop	ax			; segment again
 	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001 data r/w
@@ -7724,7 +7724,9 @@ DBLKN	equ	128			; 128 blocks system-wide (1 KB)
 dblktab db	DBLKN*8 dup(0)
 
 ; DPMI protected-mode interrupt hooks and default stubs (UPDATE 50)
-DPHKN	equ	320			; UPDATE 64: was 32, shared by 0203h and 0205h
+DPHKN	equ	1024			; UPDATE 67: nested clients (a DOS/4GW child
+					;  under a DOS/4GW parent needs 2 x 288).
+					;  UPDATE 64: was 32, shared by 0203h and 0205h
 					;  across all tasks. One DOS/4GW client hooks all
 					;  256 vectors and 32 exceptions (288); its 33rd
 					;  hook failed, cf=1, and it aborted.
@@ -7747,6 +7749,14 @@ c32tab	db	128 dup(0)		; per task id: DPMI client type, 0 none,
 envtab	dd	128 dup(0)		; per task id: environment segment << 16 |
 					;  PSP segment, 0 = nothing to put back
 					;  (e6f93, envr16, envrest; UPDATE 63)
+curcid	db	128 dup(0)		; per task id: current DPMI client id,
+					;  0 none (UPDATE 67)
+cidtask	db	128 dup(0)		; per client id: owner task id + 1, 0 free
+parcid	db	128 dup(0)		; per client id: parent client id, 0 none
+savnca	dw	128 dup(0)		; per client id: the parent's tcbncadr
+cidpsp	dw	128 dup(0)		; per client id: its PSP
+pendsw	db	128 dup(0)		; per task id: client id of a pending DPMI
+					;  switch, for nmswitch (UPDATE 67)
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
 DCBSZ	equ	96
@@ -8033,8 +8043,108 @@ e31d3:
 e31tid:					; dl = caller's task id
 	db	66h
 	call	addrnca 		; esi -> tcb, ebx -> nca
-	db	8ah,01010110b		; mov dl,[esi+tcbid]
-	db	tcbid
+	db	66h
+	call	cidl			; dl = client id (UPDATE 67)
+	db	66h
+	ret
+;
+; cidl / cidh: dl (dh) = the client id of the task whose tcb esi points
+; to: curcid[task id], 0 = no DPMI client. Keeps everything else.
+; (UPDATE 67: per-client ownership -- every table that e31tid keyed by
+; task id is keyed by client id now.)
+;
+cidl:
+	push	ax			; push eax
+	push	si			; push esi
+	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	and	al,7fh
+	db	0fh,0b6h,0f0h		; movzx esi,al
+	db	67h
+	mov	dl,ss:[si+curcid]
+	pop	si
+	pop	ax
+	db	66h
+	ret
+cidh:
+	push	ax			; push eax
+	push	si			; push esi
+	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	and	al,7fh
+	db	0fh,0b6h,0f0h		; movzx esi,al
+	db	67h
+	mov	dh,ss:[si+curcid]
+	pop	si
+	pop	ax
+	db	66h
+	ret
+;
+; cidpop: the calling client exits (its 4Ch, einfun4c after its
+; resources are released): its id is freed, the task's current client
+; is its parent again and, if there is one, the task's nca the
+; parent's -- DOS returns into the parent's pending exec and the host
+; finds its context through tcbncadr. Preserves all registers.
+; (UPDATE 67)
+;
+cidpop:
+	push	ax			; push eax
+	push	cx
+	push	si
+	push	di
+	push	bx
+	db	66h
+	call	addrnca			; esi -> tcb, ebx -> nca
+	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	and	al,7fh
+	db	0fh,0b6h,0f8h		; movzx edi,al: task id
+	db	67h
+	mov	al,ss:[di+curcid]
+	or	al,al
+	jz	cidpx
+	db	0fh,0b6h,0d8h		; movzx ebx,al: client id
+	db	67h
+	mov	byte ptr ss:[bx+cidtask],0
+	db	67h
+	mov	al,ss:[bx+parcid]
+	db	67h
+	mov	ss:[di+curcid],al
+	or	al,al
+	jz	cidpx			; no parent: the task leaves DPMI
+	shl	bx,1			; shl ebx,1
+	db	67h
+	mov	ax,ss:[bx+savnca]	; mov eax,dword (low word used)
+	db	66h,89h,46h,tcbncadr	; mov [esi+tcbncadr],ax: the parent's nca
+cidpx:
+	pop	bx
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	db	66h
+	ret
+;
+; cidtagsw: in nmswitch, after cleardti: if a DPMI session switch is
+; pending for the task (cidstart), dh = 80h | its client id, so the
+; session's initial selectors belong to the client -- a nested child's
+; cleardti leaves them alone, the client's freeclsel frees them.
+; esi -> tcb. Preserves all but dh. (UPDATE 67)
+;
+cidtagsw:
+	push	ax			; push eax
+	push	si			; push esi
+	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	and	al,7fh
+	db	0fh,0b6h,0f0h		; movzx esi,al
+	db	67h
+	mov	al,ss:[si+pendsw]
+	or	al,al
+	jz	ctsx
+	db	67h
+	mov	byte ptr ss:[si+pendsw],0
+	or	al,80h
+	mov	dh,al
+ctsx:
+	pop	si
+	pop	ax
 	db	66h
 	ret
 
@@ -8466,8 +8576,8 @@ e03grow:
 e31desc:
 	db	66h
 	call	addrnca 		; esi -> tcb, ebx -> nca
-	db	8ah,01110110b		; mov dh,[esi+tcbid]
-	db	tcbid
+	db	66h
+	call	cidh			; dh = client id (UPDATE 67)
 	or	dh,80h			; the client-descriptor tag
 	NLDW	ncavax
 	or	ax,ax
@@ -8641,8 +8751,14 @@ e31sel:
 	cmp	ss:[si+dtitable],dh	; owned by this task?
 	je	e31selok		; the client's own (80h|taskid)
 	push	ax			; UPDATE 64: or one the kernel made for this
-	mov	al,dh			;  task at the switch (taskid): the client's
-	and	al,7fh			;  initial cs/ds/ss. DOS/32A sets its ds limit
+	push	si			;  task at the switch (taskid): the client's
+	push	bx			;  initial cs/ds/ss. UPDATE 67: compare with
+	db	66h			;  the TASK id -- dh holds the client id now
+	call	addrnca			; esi -> tcb (ebx -> nca, as before)
+	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	and	al,7fh
+	pop	bx
+	pop	si
 	db	67h			;  to 4 GB (0008h); 0006h asks their bases.
 	cmp	ss:[si+dtitable],al	;  They live for the session: cleardti runs
 	pop	ax			;  only at the switch itself.
@@ -10747,6 +10863,8 @@ e4cdone:
 	xor	dx,dx			; xor edx,edx
 	mov	dl,21h			; int 21h, as einative found it
 	db	66h
+	call	cidpop			; the parent is current again (UPDATE 67)
+	db	66h
 	jmp	einstand
 
 	page
@@ -10772,8 +10890,8 @@ freeclsel proc	near
 	push	bx
 	db	66h
 	call	addrnca			; esi -> tcb, ebx -> nca
-	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
-	db	tcbid
+	db	66h
+	call	cidh			; dh = client id (UPDATE 67)
 	or	dh,80h			; the client-descriptor tag
 	xor	si,si
 fcsloop:
@@ -11243,6 +11361,8 @@ nmswitch:
 	db	tcbid
 	db	66h
 	call	cleardti		; clear dti entries for this task
+	db	66h
+	call	cidtagsw		; a DPMI switch: dh = 80h|client id (UPDATE 67)
 	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001,a=0
 	db	66h
 	db	67h
@@ -12480,7 +12600,10 @@ e6f91s:
 	push	ecx
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb, ebx -> NCA1
 	pop	ecx
-	mov	dh,[esi+tcbid]
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	dh,al
+	pop	eax
 	or	dh,80h
 	mov	dl,11110010b
 	movzx	eax,word ptr ss:[ecx+dcbtab+32]	; real-mode ss
@@ -12592,7 +12715,10 @@ e6f91x:					; not a live callback: ignore it
 ;
 e6fcbret:
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb
-	mov	dl,[esi+tcbid]
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	dl,al
+	pop	eax
 	xor	ecx,ecx
 e6fcbf:
 	cmp	byte ptr ss:[ecx+dcbtab],1
@@ -12785,6 +12911,7 @@ e6f92x:					; refused: CF, back to the caller
 
 e6f8f:
 	call	dpmiclr
+	call	cidend			; the task's client id is free (UPDATE 67)
 	and	byte ptr ss:[s0flags],0feh   ; cf clear
 	jmp	cgrm7
 
@@ -12808,7 +12935,7 @@ dpmiclr:
 	push	ebx
 	push	esi
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	movzx	eax,byte ptr [esi+tcbid]
+	call	cidof32			; eax = client id (UPDATE 67)
 	and	eax,7fh
 	mov	byte ptr ss:[eax+c32tab],0
 	pop	esi
@@ -12835,8 +12962,10 @@ dpmiclr:
 	push	ds
 	push	es
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	db	8ah,01010110b		; mov dl,[esi+tcbid]
-	db	tcbid
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	dl,al
+	pop	eax
 	xor	edi,edi
 e6f8flp:
 	cmp	byte ptr ss:[edi+dblktab],1
@@ -12907,7 +13036,8 @@ e6f8fcn:
 e6f8e:
 	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret	; use16 -> use32 targets:
 	mov	dword ptr ss:[raw_ptr],offset mmgrp:e6frawpm	;  set before any client runs
-	call	dpmiclr			; a new session: drop a dead predecessor's leftovers
+	call	cidstart		; a new session: nest under a live parent,
+					;  or drop a dead predecessor (UPDATE 67)
 	push	eax
 	push	edx
 	push	esi
@@ -12917,8 +13047,10 @@ e6f8e:
 	mov	ax,[bp-16]		; caller's bx = segment to translate
 	push	eax
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	db	8ah,01110110b		; mov dh,[esi+tcbid] get task id in dh
-	db	tcbid
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	dh,al
+	pop	eax
 	;
 	; Tag client descriptors 80h|taskid. cleardti matches the plain
 	; task id, so tagged entries survive the per-switch sweep: a
@@ -12953,7 +13085,10 @@ e6f8e:
 	;
 	push	eax
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	movzx	edi,byte ptr [esi+tcbid]
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	edi,eax
+	pop	eax
 	and	edi,7fh
 	db	66h
 	db	67h
@@ -13010,7 +13145,10 @@ e6f93:
 	mov	ax,[bp-16]		; caller's bx = PSP segment
 	movzx	edi,ax			; edi = PSP segment, kept
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	mov	dh,[esi+tcbid]
+	push	eax
+	call	cidof32			; client id (UPDATE 67)
+	mov	dh,al
+	pop	eax
 	or	dh,80h			; dh = client tag, kept (makegdte reads it)
 	mov	eax,edi
 	mov	ecx,0ffh		; DPMI 0.9: 100h bytes
@@ -13058,7 +13196,7 @@ e6f93d:
 	push	esi
 	push	eax
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	movzx	eax,byte ptr [esi+tcbid]
+	call	cidof32			; eax = client id (UPDATE 67)
 	and	eax,7fh
 	pop	dword ptr ss:[eax*4+envtab]
 	pop	esi
@@ -13116,7 +13254,7 @@ envrest:
 	mov	ax,gdtzero-gdt		; flat
 	mov	fs,ax
 	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
-	movzx	eax,byte ptr [esi+tcbid]
+	call	cidof32			; eax = client id (UPDATE 67)
 	and	eax,7fh
 	mov	ebx,dword ptr ss:[eax*4+envtab]
 	test	ebx,0ffff0000h
@@ -13133,6 +13271,176 @@ envrx:
 	pop	eax
 	ret
 
+
+;
+; UPDATE 67: client ids. A DPMI session gets its own id (1..127) at
+; the switch (cidnew, from e6f8e); descriptors, memory blocks, hooks,
+; callbacks, c32tab and envtab are owned by it, not by the task.
+; curcid[task id] = the task's current client id (0: none);
+; cidtask[client id] = owner task id + 1 (0: free).
+;
+; cidof32: eax = client id of the task whose tcb esi points to.
+;
+cidof32:
+	movzx	eax,byte ptr [esi+tcbid]
+	and	eax,7fh
+	movzx	eax,byte ptr ss:[eax+curcid]
+	ret
+;
+; cidnew: the calling task gets a fresh client id. Its previous one
+; (a dead predecessor: dpmiclr has just released its resources) is
+; freed. Step 1 keeps one client per task. Preserves all registers.
+; No free id: curcid = 0 (the session runs untagged, as a task
+; without DPMI).
+;
+cidnew:
+	push	eax
+	push	ebx
+	push	ecx
+	push	edx
+	push	esi
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	edx,byte ptr [esi+tcbid]
+	and	edx,7fh			; task id
+	movzx	eax,byte ptr ss:[edx+curcid]
+	mov	byte ptr ss:[eax+cidtask],0	; the old id is free (0: harmless)
+	mov	ecx,1
+cidnlp:
+	cmp	byte ptr ss:[ecx+cidtask],0
+	je	cidngot
+	inc	ecx
+	cmp	ecx,128
+	jb	cidnlp
+	xor	ecx,ecx			; none free
+	jmp	short cidnset
+cidngot:
+	mov	eax,edx
+	inc	eax
+	mov	byte ptr ss:[ecx+cidtask],al	; owner task + 1
+cidnset:
+	mov	byte ptr ss:[edx+curcid],cl
+	mov	byte ptr ss:[cidtask],0		; id 0 is never in use
+	pop	esi
+	pop	edx
+	pop	ecx
+	pop	ebx
+	pop	eax
+	ret
+;
+; cidend: the calling task's client id is released and it has none.
+; Preserves all registers.
+;
+cidend:
+	push	eax
+	push	ebx
+	push	ecx
+	push	edx
+	push	esi
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	edx,byte ptr [esi+tcbid]
+	and	edx,7fh
+	mov	byte ptr ss:[edx+curcid],0
+	mov	byte ptr ss:[edx+pendsw],0
+	mov	eax,edx
+	inc	eax			; owner tag: task id + 1
+	mov	ecx,1
+celp:
+	cmp	byte ptr ss:[ecx+cidtask],al	; every client id of the task
+	jne	cenx
+	mov	byte ptr ss:[ecx+cidtask],0
+cenx:
+	inc	ecx
+	cmp	ecx,128
+	jb	celp
+	mov	byte ptr ss:[cidtask],0
+	pop	esi
+	pop	edx
+	pop	ecx
+	pop	ebx
+	pop	eax
+	ret
+
+;
+; cidstart: the calling task starts a DPMI session (e6f8e, before the
+; switch). If its current client is an ancestor of the new client (its
+; PSP is on the new PSP's parent chain, PSP:16h, up to 8 levels --
+; system() puts COMMAND.COM in between), the new client NESTS: parent =
+; that client, savnca = the task's nca now (nmswitch replaces it).
+; Otherwise the current client is dead (no 4Ch): dpmiclr releases its
+; resources and the new client inherits its parent. The new client id
+; is current, and pendsw tells nmswitch to tag the session's initial
+; selectors with it. Preserves all registers. (UPDATE 67)
+;
+cidstart:
+	push	eax
+	push	ebx
+	push	ecx
+	push	edx
+	push	esi
+	push	edi
+	push	fs
+	mov	ax,gdtzero-gdt		; flat
+	mov	fs,ax
+	call	dword ptr mmgrp:[nca_ptr]	; esi -> tcb (clobbers ebx, si)
+	movzx	edx,byte ptr [esi+tcbid]
+	and	edx,7fh			; task id
+	movzx	edi,word ptr [esi+tcbpsp]	; the new client's PSP
+	movzx	eax,byte ptr ss:[edx+curcid]	; the task's current client
+	xor	ebx,ebx			; parent of the new one
+	xor	ecx,ecx			; its savnca
+	or	eax,eax
+	jz	csalloc
+	push	edi
+	mov	ecx,8
+cswalk:
+	shl	edi,4
+	movzx	edi,word ptr fs:[edi+16h]	; parent PSP
+	or	edi,edi
+	jz	csdead
+	cmp	di,word ptr ss:[eax*2+cidpsp]
+	je	cslive
+	loop	cswalk
+csdead:
+	pop	edi
+	call	dpmiclr			; the dead client's resources
+	movzx	ebx,byte ptr ss:[eax+parcid]	; inherit its parent
+	movzx	ecx,word ptr ss:[eax*2+savnca]
+	mov	byte ptr ss:[eax+cidtask],0
+	jmp	short csalloc
+cslive:
+	pop	edi
+	mov	ebx,eax			; nest under it
+	movzx	ecx,word ptr [esi+tcbncadr]	; its nca, still current
+csalloc:
+	mov	esi,ecx			; savnca (the tcb is not needed now)
+	mov	ecx,1
+cslp:
+	cmp	byte ptr ss:[ecx+cidtask],0
+	je	csgot
+	inc	ecx
+	cmp	ecx,128
+	jb	cslp
+	xor	ecx,ecx			; none free: untagged session
+	jmp	short csset
+csgot:
+	mov	eax,edx
+	inc	eax
+	mov	byte ptr ss:[ecx+cidtask],al	; owner task + 1
+	mov	byte ptr ss:[ecx+parcid],bl
+	mov	word ptr ss:[ecx*2+savnca],si
+	mov	word ptr ss:[ecx*2+cidpsp],di
+csset:
+	mov	byte ptr ss:[edx+curcid],cl
+	mov	byte ptr ss:[edx+pendsw],cl
+	mov	byte ptr ss:[cidtask],0
+	pop	fs
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	ecx
+	pop	ebx
+	pop	eax
+	ret
 
 e6f86:
 	push	eax
