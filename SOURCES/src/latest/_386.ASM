@@ -9272,6 +9272,26 @@ e0204t:
 	NSTW	ncavcx
 	xor	ax,ax
 	mov	al,cl
+;
+; UPDATE 66: hardware IRQ vectors keep the iret stub (N*4). The retf-n
+; stubs return the host's result flags -- right for int 21h/31h (cf),
+; wrong for an IRQ: DOS/4GW chains its timer handler to the default,
+; and the interrupted code resumed with the v-86 handler's flags. A
+; `cmp` just before the tick lost its result (FDIAG: IRQ between
+; `cmp al,[esp+1Ch]` and `je`, ZF=1 in, the je not taken after).
+;
+	cmp	cl,08h
+	jb	e0204n
+	cmp	cl,0fh
+	jbe	e0204i
+	cmp	cl,70h
+	jb	e0204n
+	cmp	cl,77h
+	ja	e0204n
+e0204i:
+	shl	ax,2			; shl eax,2: N*4, the iret stub
+	jmp	short e0204u
+e0204n:
 	db	0bah			; mov edx,6 -- UPDATE 64: retf-n stubs,
 	dw	6,0
 	mul	dx			;  6 bytes each (dx:ax; ax < 600h)
@@ -9378,6 +9398,46 @@ einvst:
 	db	offset nca:ncanip
 	xor	dx,dx
 	mov	dl,al
+;
+; UPDATE 66: the stub ends in retf 2 / retf 4 (UPDATE 64: so the host's
+; cf reaches the caller), which skips the frame's flags -- the caller
+; then got the CHAINING handler's IF. DOS/4GW's int 31h hook runs with
+; IF=0: every int 31h of the application left it with interrupts off
+; (W4TTEST: clock() hung). Take IF and TF from that frame (flags at
+; [sp+4], 16-bit stub, or [esp+8], 32-bit) into ncavflag and ncanflag;
+; the return merge (einback) and dovmcont carry them to the caller.
+;
+	push	dx			; push edx: N
+	push	cx			; push ecx -- e31sslin and this code use
+	push	si			;  ecx, esi, edi; eindisp must get them
+	push	di			;  as they were
+	push	ax			; push eax
+	db	66h
+	call	e31sslin		; eax = linear of the client's ss:(e)sp
+	mov	si,ax			; mov esi,eax
+	NLDW	ncancs
+	db	66h,67h
+	cmp	ax,ss:[stubsel32]
+	db	8ah,46h,05h		; mov al,[esi+5]: 16-bit frame
+	jne	einvsf
+	db	8ah,46h,09h		; mov al,[esi+9]: 32-bit frame
+einvsf:
+	and	al,02h			; the frame's IF only
+	db	80h,01100011b		; and byte [ebx+ncavflag+1],0fch
+	db	offset nca:ncavflag+1
+	db	0fdh
+	db	08h,01000011b		; or [ebx+ncavflag+1],al
+	db	offset nca:ncavflag+1
+	db	80h,01100011b		; and byte [ebx+ncanflag+1],0fch
+	db	offset nca:ncanflag+1
+	db	0fdh
+	db	08h,01000011b		; or [ebx+ncanflag+1],al
+	db	offset nca:ncanflag+1
+	pop	ax			; pop eax
+	pop	di			; pop edi
+	pop	si			; pop esi
+	pop	cx			; pop ecx
+	pop	dx
 	db	66h
 	jmp	eindisp 		; as if the client raised int N
 einvh0:					; E7/E8 from an exception stub, else faults
@@ -10741,7 +10801,6 @@ einstand:
 	call	dovmint 		; uses/modifies ncairegs
 
 ; restore registers to p0stack
-
 einback:
 	cld				; set up movsw
 	mov	ax,ss
@@ -11119,6 +11178,28 @@ dovmcont:				; ss:sp addresses ncastack
 	add	bx,256/16		; 8-bit operand
 	shl	bx,4
 
+;
+; UPDATE 66: the client's IF and TF back into ncavflag. dovmcont just
+; saved the v-86 registers into ncairegs -- flags included, so ncavflag
+; now holds the v-86 service's flags. The callers need its CF (and the
+; arithmetic flags) from there, but the int 31h/21h return (einback)
+; builds the client's EFLAGS from ncavflag & 0FD7h, IF included: the
+; memory device and DOS run with IF=0, so a client whose call went
+; through dovmint (0501h..0503h, 0100h..0102h, DOS translations) got
+; IF=0 back and ran on with interrupts off for good -- no timer, no
+; keyboard (DJGPP and DOS/4GW clock() hung). ncanflag still holds the
+; client's EFLAGS from its entry (einative); dovmint never writes it.
+;
+	push	ax			; push eax
+	db	8ah,01000011b		; mov al,[ebx+ncanflag+1]
+	db	offset nca:ncanflag+1
+	and	al,03h			; the client's IF, TF
+	db	80h,01100011b		; and byte [ebx+ncavflag+1],0fch
+	db	offset nca:ncavflag+1
+	db	0fch
+	db	08h,01000011b		; or [ebx+ncavflag+1],al
+	db	offset nca:ncavflag+1
+	pop	ax
 ; return to caller
 
 	db	66h

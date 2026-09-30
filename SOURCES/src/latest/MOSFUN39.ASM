@@ -1652,6 +1652,8 @@ lproc	mosfun40
 	push	ds
 	mov	ds,[tfbgfb]		; get tfb address.
 	assume	ds:gfb
+	cmp	[gfbdev],0		; a character device: nothing to
+	jne	mosf40d			;  flush (UPDATE 66, as mosfun68)
 	mov	ds,[gfbbdb]		; finally, get the bdb for the file.
 	assume	ds:bdb
 	call	mediachk		; anyone remove the disk?
@@ -1659,6 +1661,7 @@ lproc	mosfun40
 	jc	mosf40a
 	call	flushdata		; flush the file to disk.
 	jc	mosf40a
+mosf40d:
 	xor	ax,ax			; mimic retval from writeguts
 mosf40a:				; for non-error case
 	pop	ds
@@ -3980,6 +3983,8 @@ f68_flush_file:
 	mov	es,[tfbgfb]		; setup for call to upd_dir
 	mov	ds,[tfbgfb]		; get tfb address.
 	assume	ds:gfb
+	cmp	[gfbdev],0		; a character device (console, printer):
+	jne	f68_device		;  nothing to flush -- as DOS
 	mov	ds,[gfbbdb]		; finally, get the bdb for the file.
 	assume	ds:bdb
 	call	mediachk		; anyone remove the disk?
@@ -3997,6 +4002,16 @@ f68_flush_file:
 
 ; the file flush completed successfully.
 
+	and	[tflag],not carry
+	ret
+
+; commit on a character device (gfbdev != 0): gfbbdb is no real bdb
+; (console: 2E1E), mediachk read a segment of 0 from it and
+; called through a "bdb" at segment 0 -- a far call through 0000:070B
+; ('$MEM', part of a device name) into free memory: any int 21h 68h on
+; the console hung the system (DOS/32A's C runtime commits stdout at
+; exit). DOS returns success. (UPDATE 66)
+f68_device:
 	and	[tflag],not carry
 	ret
 f68_error:
