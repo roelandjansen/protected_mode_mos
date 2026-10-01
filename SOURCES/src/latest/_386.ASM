@@ -8126,12 +8126,13 @@ cidpx:
 ; pending for the task (cidstart), dh = 80h | its client id, so the
 ; session's initial selectors belong to the client -- a nested child's
 ; cleardti leaves them alone, the client's freeclsel frees them.
-; esi -> tcb. Preserves all but dh. (UPDATE 67)
+; dh = task id (as nmswitch loaded it). Preserves all but dh. (UPDATE 67)
 ;
 cidtagsw:
 	push	ax			; push eax
 	push	si			; push esi
-	db	8ah,46h,tcbid		; mov al,[esi+tcbid]
+	mov	al,dh			; task id: dh, as nmswitch loaded it -- esi
+					;  no longer points to the tcb after cleardti
 	and	al,7fh
 	db	0fh,0b6h,0f0h		; movzx esi,al
 	db	67h
