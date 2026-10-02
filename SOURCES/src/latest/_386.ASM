@@ -3033,6 +3033,10 @@ nparspace	equ	440h		; offset within page table of allocation list
 ntrash1 dd	0			; used with int6f
 ntrash2 dd	0			; used with int6f
 ntrash3 dd	0			; used with int6f
+nhint	dd	0			; UPDATE 70: nalloc starts here -- every
+					;  parspace entry below it is in use
+nfirst	dd	0			; UPDATE 70: first free entry nalloc saw
+nhintbad dd	0			; UPDATE 70: nverify mismatches (test phase)
 m17wrap db	'N'			; set to 'Y' if 1000000 wraps to 0
 nmi_slctr	dw	?		; data selector for nmi handler
 nmi_vector	dd	?		; fword pointer to nmi handler
@@ -8319,10 +8323,35 @@ e01ok:
 ; common allocation: probe the largest block, keep the head
 
 e31alc:
-	db	66h,0c7h,01000011b	; mov word [ebx+ncavcx],0ffffh
-	db	offset nca:ncavcx
-	dw	0ffffh
-	MEMDEV	01h			; valloc everything
+;
+; UPDATE 70: no more "valloc everything". The old probe (cx = FFFFh)
+; made nalloc walk all free memory and mark it, and the tail release
+; walk it again: ~3,600 iterations per 0501h. The reserve (dpmirsv)
+; is checked against the free page count instead -- parsize/4 pages,
+; parmused in use -- and exactly the request is allocated (first
+; fit; no contiguous block that large: given back, fail, as before).
+; Meaning: the reserve now stays free IN TOTAL, not in one block.
+;
+	NLD	ncauregs+12
+	EAXI	25h,0ffffh,0		; and eax,0ffffh: requested pages
+	push	dx			; push edx
+	db	67h
+	add	ax,ss:[dpmirsv]		; add eax,dword ss:[dpmirsv]
+	mov	dx,ax			; mov edx,eax: request + reserve
+	db	67h
+	mov	ax,word ptr ss:[parsize]	; mov eax,dword: page map bytes
+	shr	ax,2			; shr eax,2: pages
+	db	67h
+	sub	ax,ss:[parmused]	; sub eax,dword: free pages
+	cmp	ax,dx			; cmp eax,edx
+	pop	dx
+	jae	e31alr
+	db	66h
+	jmp	e31fail			; would cut into the reserve
+e31alr:
+	NLD	ncauregs+12
+	NSTW	ncavcx			; exactly the request
+	MEMDEV	01h			; valloc
 	xor	ax,ax
 	NLDW	ncavcx
 	NST	ncabufer+00		; L = pages obtained
@@ -8332,8 +8361,7 @@ e31alc:
 	NLD	ncauregs+12
 	EAXI	25h,0ffffh,0		; and eax,0ffffh: requested pages
 	NST	ncabufer+12
-	db	67h
-	add	ax,ss:[dpmirsv]		; add eax,dword ss:[dpmirsv]
+					; UPDATE 70: reserve checked above
 	NCMP	ncabufer+00		; request + reserve <= L ?
 	jbe	e31fit
 	NLD	ncabufer+00		; no: give back whatever was obtained
@@ -13672,7 +13700,8 @@ adrpage:
 	assume	ds:mmgrp,es:nothing
 nalloc:
 	push	esi
-	xor	ebx,ebx 		; init parspace index
+	mov	ebx,mmgrp:[nhint]	; UPDATE 70: start at the hint, not 0
+	mov	dword ptr mmgrp:[nfirst],-1
 	xor	eax,eax
 	mov	mmgrp:[ntrash1],eax	; tracks position of biggest block
 	mov	mmgrp:[ntrash2],eax	; tracks size of biggest block
@@ -13688,6 +13717,10 @@ nal3:
 	add	ebx,4
 	jmp	short nal1
 nal4:
+	cmp	dword ptr mmgrp:[nfirst],-1	; UPDATE 70: note the first
+	jne	nal4a			;  free entry seen
+	mov	mmgrp:[nfirst],ebx
+nal4a:
 	xor	eax,eax 		; ax counts pages found
 	mov	esi,ebx 		; si saves starting index
 nal5:
@@ -13702,6 +13735,7 @@ nal6:
 	mov	mmgrp:[ntrash1],esi
 	jmp	nal1
 nal2:
+	call	nverify			; UPDATE 70, test phase: hint vs full scan
 	mov	ecx,eax 		; number of banks
 	mov	ebx,esi 		; starting bank number
 	shr	ebx,2			; convert parspace offset to handle
@@ -13712,6 +13746,17 @@ nal8:
 	add	esi,4
 	dec	eax
 	jnz	short nal8
+	push	edx			; UPDATE 70: advance the hint. esi = end of
+	lea	edx,[ebx*4]		;  the run just marked, edx = its start.
+	cmp	edx,mmgrp:[nfirst]	; started at the first free entry:
+	jne	nalh1			;  everything below its end is in use
+	mov	mmgrp:[nhint],esi
+	jmp	short nalh2
+nalh1:
+	mov	edx,mmgrp:[nfirst]	; else the first free entry is still
+	mov	mmgrp:[nhint],edx	;  free: the hint goes there
+nalh2:
+	pop	edx
 nal7:
 	add	dword ptr [parmused],ecx; keep running tally
 	mov	eax,mmgrp:[ntrash3]
@@ -13733,6 +13778,60 @@ nal7:
 ;	ebx,ecx destroyed
 ;
 ;,fe
+;
+; nverify (UPDATE 70, test phase): repeat nalloc's original scan from
+; page 0, without marking anything, and compare its result with the
+; hinted one (esi = start offset, eax = count; ecx = banks wanted).
+; A difference counts in nhintbad. Preserves all registers.
+;
+nverify:
+	pushad
+	push	eax			; [esp+4]: hinted count
+	push	esi			; [esp]:   hinted start
+	xor	ebx,ebx
+	xor	ebp,ebp			; biggest run so far
+	xor	edi,edi			;  and where it starts
+nv1:
+	cmp	ebx,[parsize]
+	jb	nv3
+	mov	eax,ebp			; limit: the biggest has to do
+	mov	esi,edi
+	jmp	short nv2
+nv3:
+	test	byte ptr es:[nparspace+1+ebx],08h
+	jnz	nv4			; free
+	add	ebx,4
+	jmp	short nv1
+nv4:
+	xor	eax,eax
+	mov	esi,ebx
+nv5:
+	test	byte ptr es:[nparspace+1+ebx],08h
+	jz	nv6			; in use: end of the run
+	inc	eax
+	add	ebx,4
+	cmp	eax,ecx
+	jae	nv2
+	cmp	ebx,[parsize]
+	jb	nv5
+nv6:
+	cmp	eax,ebp
+	jna	nv1
+	mov	ebp,eax
+	mov	edi,esi
+	jmp	short nv1
+nv2:
+	cmp	esi,[esp]
+	jne	nvbad
+	cmp	eax,[esp+4]
+	je	nvok
+nvbad:
+	inc	dword ptr mmgrp:[nhintbad]
+nvok:
+	add	esp,8
+	popad
+	ret
+
 ;======================================================================
 	assume	ds:mmgrp,es:nothing
 nrelease:
@@ -13740,6 +13839,10 @@ nrelease:
 	or	ecx,ecx
 	jz	short nrl1
 	shl	ebx,2
+	cmp	ebx,mmgrp:[nhint]	; UPDATE 70: freed below the hint:
+	jae	nrl0			;  lower it
+	mov	mmgrp:[nhint],ebx
+nrl0:
 nrl2:
 	xif <byte ptr es:[nparspace+1+ebx]> test1 08h then nrl1
 	or	byte ptr es:[nparspace+1+ebx],08h
