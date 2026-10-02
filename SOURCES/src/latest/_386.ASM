@@ -7731,6 +7731,9 @@ DPHKN	equ	1024			; UPDATE 67: nested clients (a DOS/4GW child
 					;  256 vectors and 32 exceptions (288); its 33rd
 					;  hook failed, cf=1, and it aborted.
 phooktab db	DPHKN*12 dup(0)
+hookhwm	dw	0			; UPDATE 69: offset just past the highest
+					;  phooktab entry ever used; the lookups stop
+					;  here (never lowered, so nothing is missed)
 stubsel16 dw	0
 stubsel32 dw	0
 cbeax	dd	0			; callback entry scratch (e6f91)
@@ -9218,8 +9221,8 @@ e31hclp:
 	mov	byte ptr ss:[si+phooktab],0
 e31hcnx:
 	add	si,12
-	db	66h
-	cmp	si,DPHKN*12
+	db	66h,67h
+	cmp	si,ss:[hookhwm]		; UPDATE 69: not DPHKN*12
 	jb	e31hclp
 	xor	si,si			; and its real-mode callbacks
 e31hcc:
@@ -9260,8 +9263,8 @@ e31hflp:
 	ret
 e31hfnx:
 	add	si,12
-	db	66h
-	cmp	si,DPHKN*12
+	db	66h,67h
+	cmp	si,ss:[hookhwm]		; UPDATE 69: not DPHKN*12
 	jb	e31hflp
 	stc
 	db	66h
@@ -9281,6 +9284,16 @@ e31hnlp:
 	db	66h
 	ret
 e31hnok:
+	push	ax			; push eax: UPDATE 69, raise hookhwm
+	mov	ax,si			; mov eax,esi
+	db	83h,0c0h,0ch		; add eax,12
+	db	66h,67h
+	cmp	ax,ss:[hookhwm]
+	jbe	e31hnk2
+	db	66h,67h
+	mov	ss:[hookhwm],ax
+e31hnk2:
+	pop	ax
 	clc
 	db	66h
 	ret
@@ -10256,8 +10269,8 @@ e31xflp:
 	ret
 e31xfnx:
 	add	si,12
-	db	66h
-	cmp	si,DPHKN*12
+	db	66h,67h
+	cmp	si,ss:[hookhwm]		; UPDATE 69: not DPHKN*12
 	jb	e31xflp
 	stc
 	db	66h
