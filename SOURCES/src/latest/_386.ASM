@@ -3190,6 +3190,16 @@ gdtpage  label byte
 	db	11001111b		; g=1,d=1,00,limit bits 16-19
 	db	0			; base bits 24-31
 
+
+phooktab equ	0			; UPDATE 73: offset 0 in gdthook (gs) --
+					;  defined before any use: no phase error
+gdthook  label byte			; UPDATE 73: the pm hook table (phooktab),
+	dw	DPHKN*12-1,0		;  12 KB of extended memory; base set by
+	db	0			;  hookinit at the first session start
+	db	10010010b		; p=1,dpl=0,s=1,e=0,ed=0,w=1,a=0
+	db	0			; g=0,d=0
+	db	0			; base bits 24-31
+
 gdtspace label byte
 	dw	dtilen dup(0,0,0,0)	; space for user selectors
 gdtlen	equ	$-gdt
@@ -7114,6 +7124,9 @@ einative:				; bp,ds,es,cx,bx already pushed
 	stosw
 	db	8ch,11101000b		; mov ax,gs
 	stosw
+	db	0b8h			; mov eax,imm32 (UPDATE 73; EAXI is defined
+	dw	gdthook-gdt,0		;  further down -- a phase error): gs ->
+	db	8eh,0e8h		;  mov gs,ax: the hook table, from here on
 	db	66h			; 16-bit operand
 	mov	si,offset mmgrp:p0stack-20  ; move eip,cs,flags,esp,ss
 	mov	cl,5
@@ -7733,7 +7746,7 @@ DPHKN	equ	1024			; UPDATE 67: nested clients (a DOS/4GW child
 					;  across all tasks. One DOS/4GW client hooks all
 					;  256 vectors and 32 exceptions (288); its 33rd
 					;  hook failed, cf=1, and it aborted.
-phooktab db	DPHKN*12 dup(0)
+hookok	db	0			; UPDATE 73: 1 once hookinit made the table
 hookhwm	dw	0			; UPDATE 69: offset just past the highest
 					;  phooktab entry ever used; the lookups stop
 					;  here (never lowered, so nothing is missed)
@@ -9197,13 +9210,16 @@ e31hclr:				; free every hook of task dl
 	xor	si,si			;  (no dovmint: a subroutine is safe)
 e31hclp:
 	db	67h
-	cmp	byte ptr ss:[si+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab],1
 	jne	e31hcnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+1],dl
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+1],dl
 	jne	e31hcnx
 	db	67h
-	mov	byte ptr ss:[si+phooktab],0
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab],0
 e31hcnx:
 	add	si,12
 	db	66h,67h
@@ -9232,16 +9248,20 @@ e31hfind:				; cl = vector, ch = task: si = entry
 	xor	si,si			;  CF set if not hooked
 e31hflp:
 	db	67h
-	cmp	byte ptr ss:[si+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab],1
 	jne	e31hfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+1],ch
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+1],ch
 	jne	e31hfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+2],cl
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+2],cl
 	jne	e31hfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+3],0	; kind: interrupt
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+3],0	; kind: interrupt
 	jne	e31hfnx
 	clc
 	db	66h
@@ -9259,7 +9279,8 @@ e31hnew:				; si = free entry, CF set if full
 	xor	si,si
 e31hnlp:
 	db	67h
-	cmp	byte ptr ss:[si+phooktab],0
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab],0
 	je	e31hnok
 	add	si,12
 	db	66h
@@ -9460,10 +9481,12 @@ e310204:
 	call	e31hfind
 	jc	e0204d
 	db	66h,67h
-	mov	ax,word ptr ss:[si+phooktab+8]
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+8]
 	NSTW	ncavcx
 	db	67h
-	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax,dword
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+4]	; mov eax,dword
 	NST	ncavdx
 	db	66h
 	jmp	e31dok
@@ -9559,16 +9582,21 @@ e0205x:
 	jmp	e31bad
 e0205s:					; si = entry for (task, vector)
 	db	67h
-	mov	byte ptr ss:[si+phooktab+3],0	; kind: interrupt
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+3],0	; kind: interrupt
 	db	67h
-	mov	byte ptr ss:[si+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab],1
 	db	67h
-	mov	byte ptr ss:[si+phooktab+1],ch
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+1],ch
 	db	67h
-	mov	byte ptr ss:[si+phooktab+2],cl
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+2],cl
 	NLDW	ncavcx
 	db	66h,67h
-	mov	word ptr ss:[si+phooktab+8],ax
+	db	65h			; gs: (UPDATE 73)
+	mov	word ptr [si+phooktab+8],ax
 	NLD	ncavdx			; offset; 16-bit client: dx only
 	db	66h
 	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
@@ -9578,7 +9606,8 @@ e0205s:					; si = entry for (task, vector)
 	EAXI	25h,0ffffh,0
 e0205o:
 	db	67h
-	mov	word ptr ss:[si+phooktab+4],ax	; mov dword
+	db	65h			; gs: (UPDATE 73)
+	mov	word ptr [si+phooktab+4],ax	; mov dword
 	db	66h
 	jmp	e31dok
 e0205u:					; the default again: unhook
@@ -9586,7 +9615,8 @@ e0205u:					; the default again: unhook
 	call	e31hfind
 	jc	e0205v
 	db	67h
-	mov	byte ptr ss:[si+phooktab],0
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab],0
 e0205v:
 	db	66h
 	jmp	e31dok
@@ -9730,11 +9760,13 @@ einvh1:
 	jmp	eindisp
 einvdl:
 	db	67h
-	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax: handler offset
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+4]	; mov eax: handler offset
 	NST	ncabufer+00
 	xor	ax,ax
 	db	66h,67h
-	mov	ax,word ptr ss:[si+phooktab+8]
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+8]
 	NST	ncabufer+04		; handler selector
 	db	66h
 	call	c32eax		; client type (UPDATE 62)
@@ -10348,16 +10380,20 @@ e31xfind:				; as e31hfind, kind 1 (exception)
 	xor	si,si
 e31xflp:
 	db	67h
-	cmp	byte ptr ss:[si+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab],1
 	jne	e31xfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+1],ch
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+1],ch
 	jne	e31xfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+2],cl
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+2],cl
 	jne	e31xfnx
 	db	67h
-	cmp	byte ptr ss:[si+phooktab+3],1
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [si+phooktab+3],1
 	jne	e31xfnx
 	clc
 	db	66h
@@ -10385,10 +10421,12 @@ e0202a:
 	call	e31xfind
 	jc	e0202d
 	db	66h,67h
-	mov	ax,word ptr ss:[si+phooktab+8]
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+8]
 	NSTW	ncavcx
 	db	67h
-	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+4]	; mov eax
 	NST	ncavdx
 	db	66h
 	jmp	e31dok
@@ -10459,16 +10497,21 @@ e0203x:
 	jmp	e31bad
 e0203s:
 	db	67h
-	mov	byte ptr ss:[si+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab],1
 	db	67h
-	mov	byte ptr ss:[si+phooktab+1],ch
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+1],ch
 	db	67h
-	mov	byte ptr ss:[si+phooktab+2],cl
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+2],cl
 	db	67h
-	mov	byte ptr ss:[si+phooktab+3],1	; kind: exception
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab+3],1	; kind: exception
 	NLDW	ncavcx
 	db	66h,67h
-	mov	word ptr ss:[si+phooktab+8],ax
+	db	65h			; gs: (UPDATE 73)
+	mov	word ptr [si+phooktab+8],ax
 	NLD	ncavdx
 	db	66h
 	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
@@ -10478,7 +10521,8 @@ e0203s:
 	EAXI	25h,0ffffh,0
 e0203o:
 	db	67h
-	mov	word ptr ss:[si+phooktab+4],ax	; mov dword
+	db	65h			; gs: (UPDATE 73)
+	mov	word ptr [si+phooktab+4],ax	; mov dword
 	db	66h
 	jmp	e31dok
 e0203u:
@@ -10486,7 +10530,8 @@ e0203u:
 	call	e31xfind
 	jc	e0203v
 	db	67h
-	mov	byte ptr ss:[si+phooktab],0
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [si+phooktab],0
 e0203v:
 	db	66h
 	jmp	e31dok
@@ -10527,11 +10572,13 @@ einxno:
 
 einxdl:					; si = hook entry
 	db	67h
-	mov	ax,word ptr ss:[si+phooktab+4]	; mov eax: handler offset
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+4]	; mov eax: handler offset
 	NST	ncabufer+00
 	xor	ax,ax
 	db	66h,67h
-	mov	ax,word ptr ss:[si+phooktab+8]
+	db	65h			; gs: (UPDATE 73)
+	mov	ax,word ptr [si+phooktab+8]
 	NST	ncabufer+04		; handler selector
 	db	66h
 	call	e31stubs		; the E7 return stub must exist
@@ -13098,17 +13145,29 @@ e6f8fnx:
 	add	edi,8
 	cmp	edi,DBLKN*8
 	jb	e6f8flp
+	cmp	byte ptr ss:[hookok],0	; UPDATE 73: no table yet, no hooks
+	je	e6f8fhx
+	push	gs
+	push	eax
+	mov	ax,gdthook-gdt
+	mov	gs,ax
+	pop	eax
 	xor	edi,edi			; and the task's pm interrupt hooks
 e6f8fh:
-	cmp	byte ptr ss:[edi+phooktab],1
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [edi+phooktab],1
 	jne	e6f8fhn
-	cmp	byte ptr ss:[edi+phooktab+1],dl
+	db	65h			; gs: (UPDATE 73)
+	cmp	byte ptr [edi+phooktab+1],dl
 	jne	e6f8fhn
-	mov	byte ptr ss:[edi+phooktab],0
+	db	65h			; gs: (UPDATE 73)
+	mov	byte ptr [edi+phooktab],0
 e6f8fhn:
 	add	edi,12
 	cmp	edi,DPHKN*12
 	jb	e6f8fh
+	pop	gs
+e6f8fhx:
 	xor	edi,edi			; and the task's real-mode callbacks
 e6f8fc:
 	cmp	byte ptr ss:[edi+dcbtab],1
@@ -13147,6 +13206,7 @@ e6f8fcn:
 e6f8e:
 	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret	; use16 -> use32 targets:
 	mov	dword ptr ss:[raw_ptr],offset mmgrp:e6frawpm	;  set before any client runs
+	call	hookinit		; UPDATE 73: the hook table, once
 	mov	dword ptr ss:[stbptr],offset mmgrp:stbget	; UPDATE 71: group offset
 	mov	dword ptr ss:[nlgptr],offset mmgrp:nlargest	; UPDATE 72: for 0500h
 	call	cidstart		; a new session: nest under a live parent,
@@ -13817,6 +13877,59 @@ nlgx:
 	pop	ebx
 	pop	es
 	pop	ds
+	ret
+
+;
+; hookinit (UPDATE 73): the pm hook table lives in extended memory, not
+; in res16 -- 12 KB more for every task. Three pages from nalloc (as
+; stbget), zeroed (a free entry is 0), base into gdthook. Once; e6f8e
+; calls it before every session start. gs = gdthook is loaded by
+; einative after it saved the client's segments, and by dpmiclr around
+; its scan. Until hookok is set nothing may touch the table.
+; Preserves all registers.
+;
+hookinit:
+	cmp	byte ptr ss:[hookok],0
+	jne	hix
+	push	eax
+	push	ebx
+	push	ecx
+	push	edi
+	push	es
+	push	ds
+	call	adrpage			; ds -> driver data, es -> page table
+	mov	ecx,3
+	call	nalloc			; eax = 0 ok, ebx = start, ecx = count
+	or	eax,eax
+	jz	hi1
+	jecxz	hiout
+	call	nrelease		; a partial block back
+	jmp	short hiout
+hi1:
+	lea	eax,[ebx+110h]
+	shl	eax,12			; linear
+	push	eax
+	mov	edi,eax
+	mov	ax,gdtzero-gdt		; flat
+	mov	es,ax
+	xor	eax,eax
+	mov	ecx,DPHKN*12/4
+	cld
+	rep	stosd			; every entry free
+	pop	eax
+	mov	word ptr ss:[gdthook+2],ax
+	shr	eax,16
+	mov	byte ptr ss:[gdthook+4],al
+	mov	byte ptr ss:[gdthook+7],ah
+	mov	byte ptr ss:[hookok],1
+hiout:
+	pop	ds
+	pop	es
+	pop	edi
+	pop	ecx
+	pop	ebx
+	pop	eax
+hix:
 	ret
 
 stbget:
