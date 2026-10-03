@@ -7742,6 +7742,7 @@ stubsel32 dw	0
 stublin	dd	0			; UPDATE 71: linear address of the stubs
 stbptr	dw	0,0			; UPDATE 71: offset of stbget (res32), set
 					;  by e6f8e -- a use16 segment cannot hold it
+nlgptr	dw	0,0			; UPDATE 72: offset of nlargest (res32), set by e6f8e
 cbeax	dd	0			; callback entry scratch (e6f91)
 cbedx	dd	0
 cbesi	dd	0
@@ -7821,44 +7822,25 @@ e310500:
 	db	89h,01000011b		; mov [ebx+ncauregs+12],eax
 	db	offset nca:ncauregs+12
 
-; ask the memory device for everything: cx = largest it could give
-
-	db	66h			; 16-bit data
-	db	0c7h,01000011b		; mov [ebx+ncavcx],0ffffh
-	db	offset nca:ncavcx
-	dw	0ffffh			; immediate data
-	db	66h
-	mov	dx,offset mmgrp:rhentry ; nonzero dh: memory device call
-	db	0c6h,01000011b		; mov [ebx+ncavax+1],01h (valloc)
-	db	offset nca:ncavax+1
-	db	01h
-	db	66h
-	call	dovmint
-	xor	ax,ax			; xor eax,eax
-	db	66h			; 16-bit data
-	db	8bh,01000011b		; mov ax,[ebx+ncavcx] (pages obtained)
-	db	offset nca:ncavcx
-
-; leave the task reserve out of what DPMI reports (never below 0)
+; UPDATE 72: the largest block a 0501h could get, without allocating
+; anything: min(the longest free run, free pages - reserve), never
+; below 0 -- 0501h's own conditions (UPDATE 70). Was: valloc
+; everything and vrelease, two v-86 round trips and two passes
+; over all free memory.
 
 	db	67h
-	sub	ax,ss:[dpmirsv]		; sub eax,dword ss:[dpmirsv]
-	jns	e05rsvok
-	xor	ax,ax			; xor eax,eax
-e05rsvok:
+	call	word ptr ss:[nlgptr]	; call dword: nlargest -> eax, ecx
+	db	67h
+	sub	cx,word ptr ss:[dpmirsv]	; sub ecx,dword: leave the reserve
+	jns	e05rsva
+	xor	cx,cx			; xor ecx,ecx
+e05rsva:
+	cmp	ax,cx			; cmp eax,ecx
+	jbe	e05rsvb
+	mov	ax,cx			; mov eax,ecx
+e05rsvb:
 	db	89h,01000011b		; mov [ebx+ncabufer],eax
 	db	offset nca:ncabufer
-
-; and give it straight back (bx = start, cx = count, as returned)
-
-	db	66h
-	mov	dx,offset mmgrp:rhentry
-	db	0c6h,01000011b		; mov [ebx+ncavax+1],02h (vrelease)
-	db	offset nca:ncavax+1
-	db	02h
-	db	66h
-	call	dovmint
-
 ; client buffer offset, zero-extended for a 16-bit client
 
 	db	8bh,01111011b		; mov edi,[ebx+ncauregs+00]
@@ -8582,6 +8564,8 @@ e31desc:
 	db	66h
 	call	cidh			; dh = client id (UPDATE 67)
 	or	dh,80h			; the client-descriptor tag
+	xor	ax,ax			; xor eax,eax (UPDATE 72): NLDW loads 16 bits,
+					;  the code after it uses all of eax
 	NLDW	ncavax
 	or	ax,ax
 	jz	e3100
@@ -8654,6 +8638,8 @@ e31dbad:
 
 e3100:
 	xor	cx,cx			; xor ecx,ecx
+	xor	ax,ax			; xor eax,eax (UPDATE 72): NLDW loads 16 bits,
+					;  the code after it uses all of eax
 	NLDW	ncavcx			; ax = count
 	mov	cx,ax			; mov ecx,eax
 	or	cx,cx
@@ -9831,6 +9817,8 @@ einvdgo:				; return into the handler
 ;---- 0301h/0302h call real-mode far procedure (retf / iret frame):
 ;     0300h with the structure's CS:IP as target (see dovmfar)
 e310301:
+	xor	ax,ax			; xor eax,eax (UPDATE 72): NLDW loads 16 bits,
+					;  the code after it uses all of eax
 	NLDW	ncavcx
 	or	ax,ax
 	jz	e0301a
@@ -9843,6 +9831,8 @@ e0301a:
 	jmp	e0300s
 
 e310300:
+	xor	ax,ax			; xor eax,eax (UPDATE 72): NLDW loads 16 bits,
+					;  the code after it uses all of eax
 	NLDW	ncavcx
 	or	ax,ax
 	jz	e0300a
@@ -10866,6 +10856,8 @@ e310304:
 	db	66h
 	call	e31tid
 	mov	ch,dl
+	xor	ax,ax			; xor eax,eax (UPDATE 72): NLDW loads 16 bits,
+					;  the code after it uses all of eax
 	NLDW	ncavdx
 	mov	dx,ax
 	db	66h
@@ -13156,6 +13148,7 @@ e6f8e:
 	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret	; use16 -> use32 targets:
 	mov	dword ptr ss:[raw_ptr],offset mmgrp:e6frawpm	;  set before any client runs
 	mov	dword ptr ss:[stbptr],offset mmgrp:stbget	; UPDATE 71: group offset
+	mov	dword ptr ss:[nlgptr],offset mmgrp:nlargest	; UPDATE 72: for 0500h
 	call	cidstart		; a new session: nest under a live parent,
 					;  or drop a dead predecessor (UPDATE 67)
 	push	eax
@@ -13784,6 +13777,48 @@ adrpage:
 ; (bank + 110h) << 12. Out: eax = linear, cf = 1 if none.
 ; Preserves all but eax. Reached from res16 through stbptr.
 ;
+;
+; nlargest (UPDATE 72, for 0500h): a read-only pass over the page map
+; from nhint (everything below it is in use). Out: eax = the longest
+; run of free pages, ecx = free pages in total (parsize/4 - parmused).
+; Nothing is allocated or marked -- the old "valloc everything" probe
+; walked and marked all free memory twice. Preserves all but eax, ecx.
+; Reached from res16 through nlgptr.
+;
+nlargest:
+	push	ds
+	push	es
+	push	ebx
+	push	edx
+	call	adrpage			; ds -> driver data, es -> page table
+	mov	ebx,[nhint]
+	xor	eax,eax			; longest run so far
+	xor	edx,edx			; current run
+nlg1:
+	cmp	ebx,[parsize]
+	jae	nlgx
+	test	byte ptr es:[nparspace+1+ebx],08h
+	jz	nlg2			; in use: the run ends
+	inc	edx
+	cmp	edx,eax
+	jbe	nlg3
+	mov	eax,edx
+	jmp	short nlg3
+nlg2:
+	xor	edx,edx
+nlg3:
+	add	ebx,4
+	jmp	short nlg1
+nlgx:
+	mov	ecx,[parsize]
+	shr	ecx,2
+	sub	ecx,dword ptr [parmused]
+	pop	edx
+	pop	ebx
+	pop	es
+	pop	ds
+	ret
+
 stbget:
 	push	ds
 	push	es
