@@ -3036,7 +3036,6 @@ ntrash3 dd	0			; used with int6f
 nhint	dd	0			; UPDATE 70: nalloc starts here -- every
 					;  parspace entry below it is in use
 nfirst	dd	0			; UPDATE 70: first free entry nalloc saw
-nhintbad dd	0			; UPDATE 70: nverify mismatches (test phase)
 m17wrap db	'N'			; set to 'Y' if 1000000 wraps to 0
 nmi_slctr	dw	?		; data selector for nmi handler
 nmi_vector	dd	?		; fword pointer to nmi handler
@@ -7740,6 +7739,9 @@ hookhwm	dw	0			; UPDATE 69: offset just past the highest
 					;  here (never lowered, so nothing is missed)
 stubsel16 dw	0
 stubsel32 dw	0
+stublin	dd	0			; UPDATE 71: linear address of the stubs
+stbptr	dw	0,0			; UPDATE 71: offset of stbget (res32), set
+					;  by e6f8e -- a use16 segment cannot hold it
 cbeax	dd	0			; callback entry scratch (e6f91)
 cbedx	dd	0
 cbesi	dd	0
@@ -7775,39 +7777,8 @@ DCBI	=	0
 DCBI	=	DCBI+1
 	endm
 rawstub	db	50h,0b8h,92h,77h,0cdh,6fh	; push ax / mov ax,7792h / int 6fh
-dpmistub label	byte			; int 0E6h / N / iret, N = 0..255
-DSTUBN	=	0
-	rept	256
-	db	0cdh,0e6h,DSTUBN,0cfh
-DSTUBN	=	DSTUBN+1
-	endm
-	db	0cbh			; +400h: retf, the 0305h protected-mode routine
-	db	0cdh,0e7h,90h		; +401h: int 0E7h, exception-handler return
-DXSTBN	=	0			; +404h: default exception stubs
-	rept	32
-	db	0cdh,0e8h,DXSTBN,90h
-DXSTBN	=	DXSTBN+1
-	endm
-	db	0cdh,0e9h,90h,90h	; +484h: int 0E9h, callback return
-	db	0cdh,0eah,90h,90h	; +488h: int 0EAh, raw switch to real mode
-;
-; UPDATE 64: default handlers that RETURN THE HOST'S FLAGS. The table
-; above ends in iret, which restores the flags the caller pushed: a
-; client that hooks int 31h/21h and chains to the default (DOS/4GW)
-; never saw cf. These end in retf 2 / retf 4, like a real-mode handler
-; that returns status in the flags. 0204h hands out these; einvhook
-; reads N after int 0E6h as before, so they need no other support.
-;
-DS16N	=	0			; +48Ch: 16-bit, int 0E6h / N / retf 2
-	rept	256
-	db	0cdh,0e6h,DS16N,0cah,02h,00h
-DS16N	=	DS16N+1
-	endm
-DS32N	=	0			; +A8Ch: 32-bit, int 0E6h / N / retf 4
-	rept	256
-	db	0cdh,0e6h,DS32N,0cah,04h,00h
-DS32N	=	DS32N+1
-	endm
+; UPDATE 71: the default stubs (4.2 KB) are generated at run time
+; into extended memory by e31stubs -- see there for the layout.
 
 	page
 ;--------------------------------------------------------------------
@@ -9329,11 +9300,108 @@ e31hnk2:
 e31stubs:				; make the two stub selectors once
 	db	66h,67h
 	cmp	word ptr ss:[stubsel16],0
-	je	e31stb1
+	je	e31stb0
 	clc
 	db	66h
 	ret
-e31stb1:
+;
+; UPDATE 71: the stubs no longer live in res16 (4.2 KB of every task's
+; conventional memory). Two pages from the memory device, at linear
+; (start + 110h) << 12 like any 0501h block -- global, never freed,
+; owned by no client -- are filled here on first use. Layout as before:
+;	+000h	256 x int 0E6h / N / iret
+;	+400h	retf (0305h pm routine); +401h int 0E7h / nop
+;	+404h	32 x int 0E8h / N / nop (default exception stubs)
+;	+484h	int 0E9h / nop / nop; +488h int 0EAh / nop / nop
+;	+48Ch	256 x int 0E6h / N / retf 2
+;	+A8Ch	256 x int 0E6h / N / retf 4
+;
+e31stb0:
+	db	67h
+	call	word ptr ss:[stbptr]	; call dword: stbget, eax = linear
+	jnc	e31stbm
+	db	66h
+	ret
+e31stbm:
+	db	67h
+	mov	word ptr ss:[stublin],ax	; mov dword
+	push	es
+	push	di
+	push	cx
+	mov	di,ax			; mov edi,eax
+	EAXI	0b8h,gdtzero-gdt,0	; mov eax,imm32: flat (no 16-bit immediates here)
+	mov	es,ax
+	cld
+	xor	cx,cx			; xor ecx,ecx
+e31sg1:
+	mov	al,0cdh			; int 0E6h / N / iret
+	stosb
+	mov	al,0e6h
+	stosb
+	mov	al,cl
+	stosb
+	mov	al,0cfh
+	stosb
+	inc	cl
+	jnz	e31sg1
+	mov	al,0cbh			; +400h retf
+	stosb
+	mov	al,0cdh			; +401h int 0E7h / nop
+	stosb
+	mov	al,0e7h
+	stosb
+	mov	al,90h
+	stosb
+e31sg2:
+	mov	al,0cdh			; +404h int 0E8h / N / nop
+	stosb
+	mov	al,0e8h
+	stosb
+	mov	al,cl
+	stosb
+	mov	al,90h
+	stosb
+	inc	cl
+	cmp	cl,32
+	jb	e31sg2
+	mov	al,0cdh			; +484h int 0E9h / nop / nop
+	stosb
+	mov	al,0e9h
+	stosb
+	mov	al,90h
+	stosb
+	stosb
+	mov	al,0cdh			; +488h int 0EAh / nop / nop
+	stosb
+	mov	al,0eah
+	stosb
+	mov	al,90h
+	stosb
+	stosb
+	mov	ch,2			; +48Ch retf 2, then +A8Ch retf 4
+e31sg3:
+	xor	cl,cl
+e31sg4:
+	mov	al,0cdh			; int 0E6h / N / retf ch
+	stosb
+	mov	al,0e6h
+	stosb
+	mov	al,cl
+	stosb
+	mov	al,0cah
+	stosb
+	mov	al,ch
+	stosb
+	xor	al,al
+	stosb
+	inc	cl
+	jnz	e31sg4
+	add	ch,2
+	cmp	ch,4
+	jbe	e31sg3
+	pop	cx
+	pop	di
+	pop	es
 	mov	dl,0			; 16-bit first, then 32-bit (40h)
 e31stb2:
 	xor	si,si
@@ -9358,16 +9426,21 @@ e31stb4:
 	db	66h,67h
 	mov	word ptr ss:[di+gdt],108bh	; limit: stubs, retf, E7, E8s, E9, EA,
 					;  retf-n stubs (UPDATE 64)
-	db	66h,67h
-	mov	word ptr ss:[di+gdt+2],offset mmgrp:dpmistub+700h
+	push	ax
 	db	67h
-	mov	byte ptr ss:[di+gdt+4],0
+	mov	ax,word ptr ss:[stublin]		; mov eax,dword: base (UPDATE 71)
+	db	66h,67h
+	mov	ss:[di+gdt+2],ax
+	shr	ax,16			; shr eax,16
+	db	67h
+	mov	byte ptr ss:[di+gdt+4],al
+	db	67h
+	mov	byte ptr ss:[di+gdt+7],ah
+	pop	ax
 	db	67h
 	mov	byte ptr ss:[di+gdt+5],0fah	; p=1,dpl=3,s=1,code r/x
 	db	67h
 	mov	byte ptr ss:[di+gdt+6],dl	; d=0 or d=1
-	db	67h
-	mov	byte ptr ss:[di+gdt+7],0
 	mov	ax,di
 	or	al,3
 	or	dl,dl
@@ -9549,8 +9622,12 @@ einvhook:
 	jmp	eindisp 		; a plain int 0E6h: normal handling
 einvst:
 	NLD	ncanip			; (was ss:[p0stack-20])
-	EAXI	05h,<offset mmgrp:dpmistub+700h>,0
+	db	67h
+	add	ax,word ptr ss:[stublin]		; add eax,dword: the stubs' linear (UPDATE 71)
 	mov	si,ax			; mov esi,eax: linear, via flat ds
+	xor	ax,ax			; xor eax,eax (UPDATE 71): the high word of
+					;  the stubs' linear (now >= 10000h) must not
+					;  ride along -- NLDW callers (e31desc) test eax
 	db	8ah,06h 		; mov al,[esi]: N
 	db	0ffh,01000011b		; inc dword [ebx+ncanip]: onto the iret
 	db	offset nca:ncanip
@@ -13078,6 +13155,7 @@ e6f8fcn:
 e6f8e:
 	mov	dword ptr ss:[cbr_ptr],offset mmgrp:e6fcbret	; use16 -> use32 targets:
 	mov	dword ptr ss:[raw_ptr],offset mmgrp:e6frawpm	;  set before any client runs
+	mov	dword ptr ss:[stbptr],offset mmgrp:stbget	; UPDATE 71: group offset
 	call	cidstart		; a new session: nest under a live parent,
 					;  or drop a dead predecessor (UPDATE 67)
 	push	eax
@@ -13698,6 +13776,40 @@ adrpage:
 ;,fe
 ;======================================================================
 	assume	ds:mmgrp,es:nothing
+;
+; stbget (UPDATE 71): two pages of extended memory for the default
+; stubs, straight from the memory manager (nalloc, as int 6Fh 7705h
+; does) -- no MEMDEV: e31stubs is a nested call and dovmint would
+; reset the monitor stack under it. Banks are mapped at linear
+; (bank + 110h) << 12. Out: eax = linear, cf = 1 if none.
+; Preserves all but eax. Reached from res16 through stbptr.
+;
+stbget:
+	push	ds
+	push	es
+	push	ebx
+	push	ecx
+	call	adrpage			; ds -> driver data, es -> page table
+	mov	ecx,2
+	call	nalloc			; eax = 0 ok, ebx = start, ecx = count
+	or	eax,eax
+	jz	stbg1
+	jecxz	stbg2			; nothing allocated
+	call	nrelease		; a partial block back
+stbg2:
+	stc
+	jmp	short stbgx
+stbg1:
+	lea	eax,[ebx+110h]
+	shl	eax,12
+	clc
+stbgx:
+	pop	ecx
+	pop	ebx
+	pop	es
+	pop	ds
+	ret
+
 nalloc:
 	push	esi
 	mov	ebx,mmgrp:[nhint]	; UPDATE 70: start at the hint, not 0
@@ -13735,7 +13847,6 @@ nal6:
 	mov	mmgrp:[ntrash1],esi
 	jmp	nal1
 nal2:
-	call	nverify			; UPDATE 70, test phase: hint vs full scan
 	mov	ecx,eax 		; number of banks
 	mov	ebx,esi 		; starting bank number
 	shr	ebx,2			; convert parspace offset to handle
@@ -13779,59 +13890,6 @@ nal7:
 ;
 ;,fe
 ;
-; nverify (UPDATE 70, test phase): repeat nalloc's original scan from
-; page 0, without marking anything, and compare its result with the
-; hinted one (esi = start offset, eax = count; ecx = banks wanted).
-; A difference counts in nhintbad. Preserves all registers.
-;
-nverify:
-	pushad
-	push	eax			; [esp+4]: hinted count
-	push	esi			; [esp]:   hinted start
-	xor	ebx,ebx
-	xor	ebp,ebp			; biggest run so far
-	xor	edi,edi			;  and where it starts
-nv1:
-	cmp	ebx,[parsize]
-	jb	nv3
-	mov	eax,ebp			; limit: the biggest has to do
-	mov	esi,edi
-	jmp	short nv2
-nv3:
-	test	byte ptr es:[nparspace+1+ebx],08h
-	jnz	nv4			; free
-	add	ebx,4
-	jmp	short nv1
-nv4:
-	xor	eax,eax
-	mov	esi,ebx
-nv5:
-	test	byte ptr es:[nparspace+1+ebx],08h
-	jz	nv6			; in use: end of the run
-	inc	eax
-	add	ebx,4
-	cmp	eax,ecx
-	jae	nv2
-	cmp	ebx,[parsize]
-	jb	nv5
-nv6:
-	cmp	eax,ebp
-	jna	nv1
-	mov	ebp,eax
-	mov	edi,esi
-	jmp	short nv1
-nv2:
-	cmp	esi,[esp]
-	jne	nvbad
-	cmp	eax,[esp+4]
-	je	nvok
-nvbad:
-	inc	dword ptr mmgrp:[nhintbad]
-nvok:
-	add	esp,8
-	popad
-	ret
-
 ;======================================================================
 	assume	ds:mmgrp,es:nothing
 nrelease:
