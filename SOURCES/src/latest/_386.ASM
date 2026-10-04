@@ -3194,7 +3194,7 @@ gdtpage  label byte
 phooktab equ	0			; UPDATE 73: offset 0 in gdthook (gs) --
 					;  defined before any use: no phase error
 gdthook  label byte			; UPDATE 73: the pm hook table (phooktab),
-	dw	DPHKN*12-1,0		;  12 KB of extended memory; base set by
+	dw	DPHKN*12+1000h-1,0	;  12 KB + the 4 KB hook bitmap (UPDATE 74);
 	db	0			;  hookinit at the first session start
 	db	10010010b		; p=1,dpl=0,s=1,e=0,ed=0,w=1,a=0
 	db	0			; g=0,d=0
@@ -7747,6 +7747,7 @@ DPHKN	equ	1024			; UPDATE 67: nested clients (a DOS/4GW child
 					;  256 vectors and 32 exceptions (288); its 33rd
 					;  hook failed, cf=1, and it aborted.
 hookok	db	0			; UPDATE 73: 1 once hookinit made the table
+hooklin	dd	0			; UPDATE 74: linear of the hook table
 hookhwm	dw	0			; UPDATE 69: offset just past the highest
 					;  phooktab entry ever used; the lookups stop
 					;  here (never lowered, so nothing is missed)
@@ -9245,6 +9246,33 @@ e31hcn:
 	ret
 
 e31hfind:				; cl = vector, ch = task: si = entry
+	db	67h			; UPDATE 74: no table yet -- nothing
+	cmp	byte ptr ss:[hookok],0	;  is hooked (do not read gs:0, the IVT)
+	jne	e31hfg1
+	stc
+	db	66h
+	ret
+e31hfg1:
+	push	ax			; push eax: UPDATE 74, the client's
+	push	cx			;  "maybe hooked" bit at gs:[3000h +
+	db	0fh,0b6h,0f5h		;  movzx esi,ch -- client * 32 +
+	shl	si,5			;  shl esi,5     vector / 8]
+	mov	al,cl
+	shr	al,3
+	db	0fh,0b6h,0c0h		; movzx eax,al
+	add	si,ax			; add esi,eax
+	and	cl,7
+	mov	ah,1
+	shl	ah,cl			; the vector's bit
+	pop	cx
+	db	67h,65h			; gs:, 16-bit addressing
+	test	byte ptr [si+3000h],ah
+	pop	ax
+	jnz	e31hfsc			; maybe: scan
+	stc				; never hooked by this client
+	db	66h
+	ret
+e31hfsc:
 	xor	si,si			;  CF set if not hooked
 e31hflp:
 	db	67h
@@ -9557,10 +9585,16 @@ e310205:
 	NLDW	ncavcx			; the handler selector
 	db	66h,67h
 	cmp	ax,ss:[stubsel16]
-	je	e0205u
+	jne	e0205j1		; UPDATE 74: e0205u is out of short range
+	db	66h
+	jmp	e0205u
+e0205j1:
 	db	66h,67h
 	cmp	ax,ss:[stubsel32]
-	je	e0205u
+	jne	e0205j2		; UPDATE 74: e0205u is out of short range
+	db	66h
+	jmp	e0205u
+e0205j2:
 	EAXI	25h,0fff8h,0		; must be a present dpl-3 code descriptor
 	db	66h			;  inside the gdt
 	cmp	ax,gdtlen
@@ -9581,6 +9615,23 @@ e0205x:
 	db	66h
 	jmp	e31bad
 e0205s:					; si = entry for (task, vector)
+	push	si			; push esi: UPDATE 74, set the client's
+	push	ax			;  bit for this vector (only ever set;
+	push	cx			;  cidstart clears a client id's bits)
+	db	0fh,0b6h,0f5h		; movzx esi,ch
+	shl	si,5			; shl esi,5
+	mov	al,cl
+	shr	al,3
+	db	0fh,0b6h,0c0h		; movzx eax,al
+	add	si,ax			; add esi,eax
+	and	cl,7
+	mov	ah,1
+	shl	ah,cl
+	db	67h,65h
+	or	byte ptr [si+3000h],ah
+	pop	cx
+	pop	ax
+	pop	si
 	db	67h
 	db	65h			; gs: (UPDATE 73)
 	mov	byte ptr [si+phooktab+3],0	; kind: interrupt
@@ -10377,6 +10428,13 @@ e31sslin:				; eax = linear of client ss:(e)sp
 	ret
 
 e31xfind:				; as e31hfind, kind 1 (exception)
+	db	67h			; UPDATE 74: no table yet, no handler
+	cmp	byte ptr ss:[hookok],0
+	jne	e31xfg1
+	stc
+	db	66h
+	ret
+e31xfg1:
 	xor	si,si
 e31xflp:
 	db	67h
@@ -13602,6 +13660,27 @@ csgot:
 	mov	byte ptr ss:[ecx+parcid],bl
 	mov	word ptr ss:[ecx*2+savnca],si
 	mov	word ptr ss:[ecx*2+cidpsp],di
+	cmp	byte ptr ss:[hookok],0	; UPDATE 74: a fresh hook bitmap
+	je	csnobm			;  for this client id
+	push	es
+	push	edi
+	push	eax
+	push	ecx
+	mov	edi,ecx
+	shl	edi,5
+	add	edi,dword ptr ss:[hooklin]
+	add	edi,DPHKN*12
+	mov	ax,gdtzero-gdt
+	mov	es,ax
+	xor	eax,eax
+	mov	ecx,8			; 32 bytes
+	cld
+	rep	stosd
+	pop	ecx
+	pop	eax
+	pop	edi
+	pop	es
+csnobm:
 csset:
 	mov	byte ptr ss:[edx+curcid],cl
 	mov	byte ptr ss:[edx+pendsw],cl
@@ -13898,7 +13977,7 @@ hookinit:
 	push	es
 	push	ds
 	call	adrpage			; ds -> driver data, es -> page table
-	mov	ecx,3
+	mov	ecx,4			; UPDATE 74: + the hook bitmap
 	call	nalloc			; eax = 0 ok, ebx = start, ecx = count
 	or	eax,eax
 	jz	hi1
@@ -13913,10 +13992,11 @@ hi1:
 	mov	ax,gdtzero-gdt		; flat
 	mov	es,ax
 	xor	eax,eax
-	mov	ecx,DPHKN*12/4
+	mov	ecx,(DPHKN*12+1000h)/4
 	cld
 	rep	stosd			; every entry free
 	pop	eax
+	mov	dword ptr ss:[hooklin],eax	; UPDATE 74: for cidstart
 	mov	word ptr ss:[gdthook+2],ax
 	shr	eax,16
 	mov	byte ptr ss:[gdthook+4],al
