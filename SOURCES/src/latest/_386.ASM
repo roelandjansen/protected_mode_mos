@@ -9724,6 +9724,13 @@ e0205v:
 ;     ebx = nca. Falls back to eindisp with edx = the vector.
 
 einvhook:
+	cmp	dl,08h			; UPDATE 77: 08h-0E5h is a plain vector --
+	jb	einvhk0			;  not a stub re-entry (E6h-EAh), not an
+	cmp	dl,0e6h			;  exception einxcpt handles (0-7): the
+	jae	einvhk0			;  chain below always ends at einvh1
+	db	66h
+	jmp	einvh1
+einvhk0:
 	cmp	dl,0e6h 		; default-stub re-entry?
 	jne	einvh0
 	NLDW	ncancs			; (was ss:[p0stack-16])
@@ -13516,6 +13523,12 @@ e93sel:
 	and	ebx,0fff8h
 	mov	word ptr ss:[ebx+gdt],cx	; limit 15:0
 	mov	byte ptr ss:[ebx+gdt+6],0	; g=0,d=0, limit 19:16 = 0
+	mov	byte ptr ss:[ebx+gdt+5],11110011b ; UPDATE 78: accessed bit set:
+					;  makegdte matches on access F2h, so a
+					;  PSP/environment entry (limit 0FFh / MCB
+					;  size) is never handed out again as a
+					;  .COM client's ds/ss at the switch, and
+					;  e93sel never re-limits an existing entry
 	pop	ebx
 e93sx:
 	ret
