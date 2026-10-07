@@ -72,8 +72,6 @@ state changed) and runs 0300h, 0501h, 0502h in the same client.
 
 - DOS/4GW, DOS/32A, the original `GO.BAT`, the 19 kit images (no Open
   Watcom, kit images not uploaded).
-- Four-task GD.BAT: not rerun for 76. On 74 and 75 task 0 fails with
-  `A:\DJXTEST.EXE: can't open` (setup, identical on both drivers).
 
 ## Rig note
 
@@ -85,3 +83,31 @@ line with what it typed, and only then presses Return.
 
 - `_386.ASM` -- UPDATE 75 + this change, CRLF.
 - `q900.c` -- 0900h-0902h test client (DJGPP).
+
+## Four tasks (added after the first run)
+
+`gdsep/GD.BAT` + `T1..T3.BAT`: same work as `GD.BAT`, but every task
+runs its own copy of the client EXEs (`DJXTSTn.EXE`, `DJHELOn.EXE`,
+`n` = task; copies of `DJXTEST.EXE` / `DJHELLO.EXE`) and DJMTEST
+instead of DJSTEST.
+
+| task | result |
+| --- | --- |
+| 0 | `DJXTST0 DJXTST0 DJHELO0`: three deep, all rc 0, `T0 DONE` |
+| 1-3 | `DJXTSTn DJHELOn` rc 0; MTEST 7-8 MB in 1 MB blocks, 0 bad; `Tn DONE` |
+
+**The earlier failures came from tasks sharing one EXE file.**
+With all tasks on `DJXTEST.EXE`, task 0's nested start gave
+`A:\DJXTEST.EXE: can't open` -- on UPDATE 74 and 75 alike. With only
+`DJXTEST` separated, task 2's second `DJHELLO` start returned rc 255
+without printing (all four tasks on `DJHELLO.EXE`). With both
+separated, everything passes.
+
+So when several tasks start the same DJGPP program at the same moment,
+an open of the EXE can fail. This is pre-existing (UPDATE 74 shows it)
+and outside the DPMI host: the DJGPP stub opens its own EXE to load the
+protected-mode image, and that open collides with another task's.
+Your `GO.BAT` puts at most two tasks on the same EXE, which is why it
+passes. Worth a look on the kernel side (open/sharing mode used by the
+stub vs. what `$$MOS.SYS` allows across tasks), separately from the
+DPMI work.
