@@ -7096,6 +7096,10 @@ einative:				; bp,ds,es,cx,bx already pushed
 
 	db	66h
 	call	addrnca 		; get nca address in ebx
+	db	66h
+	call	cidl			; dl = this task's client id: cached for
+	db	67h			;  einvh1 and e0300s, which run before
+	mov	ss:[entcid],dl		;  any v-86 or task switch (UPDATE 75)
 
 ; save user registers into nca
 
@@ -7781,6 +7785,8 @@ savnca	dw	128 dup(0)		; per client id: the parent's tcbncadr
 cidpsp	dw	128 dup(0)		; per client id: its PSP
 pendsw	db	128 dup(0)		; per task id: client id of a pending DPMI
 					;  switch, for nmswitch (UPDATE 67)
+entcid	db	0			; UPDATE 75: client id of the task that
+					;  last entered einative (see c32edc)
 ; DPMI real-mode callbacks (UPDATE 59): records and real-mode stubs
 DCBN	equ	8
 DCBSZ	equ	96
@@ -8131,12 +8137,20 @@ ctsx:
 ; callers' 'test edx,00400000h'. Preserves everything but edx.
 ; (UPDATE 62)
 ;
+c32edc:					; UPDATE 75: c32edx with the id einative
+	push	ax			;  cached -- only on a path from einative
+	push	si			;  with no v-86 run in between (e0300s)
+	push	bx
+	db	67h
+	mov	dl,ss:[entcid]
+	jmp	short c32edj
 c32edx:
 	push	ax			; push eax
 	push	si
 	push	bx
 	db	66h
 	call	e31tid		; dl = task id (clobbers esi, ebx)
+c32edj:
 	xor	ax,ax			; xor eax,eax
 	mov	al,dl
 	and	al,7fh
@@ -9799,8 +9813,8 @@ einvx8s:
 	jmp	einxdef
 einvh1:
 	mov	cl,dl
-	db	66h
-	call	e31tid
+	db	67h			; UPDATE 75: the id einative cached (was
+	mov	dl,ss:[entcid]		;  call e31tid: addrnca + cidl again)
 	mov	ch,dl
 	db	66h
 	call	e31hfind
@@ -9944,7 +9958,7 @@ e0300s:					; 0301h/0302h join here
 	mov	cx,ax			; mov ecx,eax: es base
 	NLD	ncavdi
 	db	66h
-	call	c32edx		; edx bit 22 = 32-bit client (UPDATE 62)
+	call	c32edc		; edx bit 22 = 32-bit client (UPDATE 62, 75)
 	db	0f7h,0c2h		; test edx,00400000h
 	dw	0,0040h
 	jnz	e0300b
