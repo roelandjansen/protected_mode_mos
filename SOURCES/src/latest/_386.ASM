@@ -7549,9 +7549,43 @@ einint31:
 	db	offset nca:ncavax
 	db	66h
 	cmp	ax,0010h		; 0000h-000Fh: descriptor functions
-	jae	e31n00
+	jae	e31nf0		; UPDATE 76: hot functions first
 	db	66h
 	jmp	e31desc
+e31nf0:					; UPDATE 76: fast path for the calls
+	db	66h			;  extenders make all the time; the
+	cmp	ax,0300h		;  chain below is unchanged and still
+	jne	e31nf1		;  handles everything else
+	db	66h
+	jmp	e310300
+e31nf1:
+	db	66h
+	cmp	ax,0301h
+	je	e31nfj
+	db	66h
+	cmp	ax,0302h
+	jne	e31nf2
+e31nfj:
+	db	66h
+	jmp	e310301
+e31nf2:
+	db	66h
+	cmp	ax,0501h		; 0501h-0503h: memory blocks
+	jb	e31n00
+	db	66h
+	cmp	ax,0503h
+	ja	e31nf3
+	db	66h
+	jmp	e31save
+e31nf3:
+	db	66h
+	cmp	ax,0900h		; 0900h-0902h: virtual IF
+	jb	e31n00
+	db	66h
+	cmp	ax,0902h
+	ja	e31n00
+	db	66h
+	jmp	e3190x
 e31n00:
 	db	66h
 	cmp	ax,0100h
