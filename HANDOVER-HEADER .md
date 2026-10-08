@@ -1,7 +1,7 @@
-# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 79, 2026-10-07)
+# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 83, 2026-10-08)
 
 Put this at the top of `HANDOVER.md`. It is the state to start from; the
-UPDATE sections below it are the history and the reasons. UPDATE 62-79
+UPDATE sections below it are the history and the reasons. UPDATE 62-83
 are summarised here.
 
 ## What works
@@ -14,7 +14,7 @@ are summarised here.
   three extenders.
 - **Several tasks** (UPDATE 68/69): the original `GO.BAT` -- four tasks,
   all three extenders, nested -- passes (UPDATE 79 build, dynamic core).
-- **Maximum task size 596 KB** (UPDATE 71/73).
+- **Maximum task size 596 KB** (UPDATE 71/73; measured again on 80, 81, 82).
 - **int 31h cost** (UPDATE 75-77): one 0300h call 479 -> 401 monitor
   instructions.
 - **DOS/4GW's clock** (UPDATE 79): int 21h 2Ch / `time()` correct.
@@ -24,13 +24,13 @@ are summarised here.
 
 | file | built | size | md5 (first 12) |
 | --- | --- | --- | --- |
-| `_386.ASM` | `$386.SYS` -- memory manager + the DPMI host | 36,816 | `9dc2b362946b` |
+| `_386.ASM` | `$386.SYS` -- memory manager + the DPMI host | 37,584 | `22081d7ac5ca` |
 | `_DPMI.ASM`, `_DPMI.INC` | `$DPMI.SYS` -- front end (int 2Fh 1687h, `GoProtect`) | 5,149 | `f84240795eaa` |
-| `MOSFUN39.ASM` | in `$$MOS.SYS` -- commit on a character device (UPDATE 66) | | |
+| `MOSFUN39.ASM`, `MOSFUTIL.ASM` | `$$MOS.SYS` -- commit on a character device (UPDATE 66); compat read vs deny-write sharing (UPDATE 83) | 130,017 | `2ec22df3de51` (66 alone: `16fc9d34ac6c`) |
 | `ADDTASK.ASM` | `ADDTASK.COM` | 2,854 | |
 | `DPMI32.ASM` | `DPMI32.COM` -- the kit's 32-bit client | | |
 
-Only `_386.ASM` changed in UPDATE 75-79. The build is reproducible: two
+`_386.ASM` changed in UPDATE 75-82, the kernel (`MOSFUTIL.ASM`) in 83. The tarball's `latest/$$MOS.SYS` (129,249 bytes) is an older build: boot the documented one. The build is reproducible: two
 builds in two containers gave the same md5.
 
 ## How the host is built (orientation)
@@ -61,9 +61,18 @@ builds in two containers gave the same md5.
   access byte `F2h` and base. Func 93's PSP/environment descriptors are
   written with access **`F3h`** (UPDATE 78) so they can never be handed
   out as a client's DS/SS.
+- **Int 21h translation** (UPDATE 80): DOS conventions, as Windows/HDPMI.
+  Per-client DTA at `gs:[4000h + id*8]` (dd offset, dw selector, db set),
+  cleared by `cidstart`; default PSP:80h. 42h is plain reflection.
+- **16-bit clients** (UPDATE 82): the int 21h dispatch clears the high
+  words of the CX/DX/SI/DI slots before any translator. 5Ch is a plain
+  reflection. 0B00h-0B03h refused (no watchpoints).
+- **0800h** (UPDATE 81): identity mapping above `pt_pages`; page tables
+  from `nalloc`, entered in the global page directory (`gdtpage` base -
+  1000h); `phytab`/`phylin` (16) let later mappings reuse them.
 - **Selector 0040h** (`gdtzero3`, dpl 3) has **base 400h** = BIOS data
   area (UPDATE 79); DOS/4GW reads the tick count through it.
-  `einfun82` (MOS int 21h 82h) returns `es:ebx` with ES = 0043h and EBX
+  `einfun82` (int 38h/D4h 02h SCB, 04h TCB) returns `es:ebx` with ES = 0043h and EBX
   = linear - 400h.
 - **Memory**: 0501h checks the reserve (`dpmirsv`, 2 MB) against the
   free page count and allocates exactly the request; 0500h from
@@ -85,7 +94,9 @@ with an echo check (`kt.sh`: xdotool `type` drops characters).
    0 bad, all DONE, task 2's STEST with a real start time.
 4. **Change-specific**: `W4XTEST W4HELLO`, `DOS32A WAXTEST DOS32A
    WAHELLO`, DPMI32 **after** another client (UPDATE 78), `W4TIME`
-   (UPDATE 79), `Q300` / `Q900` (0300h, 0900h-0902h), `MAXTASK`,
+   (UPDATE 79), `Q300` / `Q900` (0300h, 0900h-0902h), `PM21` / `PMFN` /
+   `PMDEF` (UPDATE 80; on a floppy with room), `PMPHYS` (UPDATE 81),
+   `HI16` / `PM38` / `PMWATCH` (UPDATE 82), `MAXTASK` (596 KB),
    `DJBENCH n`.
 
 A DOS/32A child started through `system()` must be `dos32a NAME`: bare,
@@ -108,11 +119,9 @@ The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
 
 | what | where | notes |
 | --- | --- | --- |
-| Tasks starting the **same EXE** at once: `can't open`, rc 255 | kernel: `openfile` / `chkacc` | EXEC opens 3D20h (deny-write) and is switched to compat only if the *first* open in `gfbtfb` is compat; the DJGPP stub opens 3D00h (compat). Ideas: (A) `openfile` walks the whole chain while `tcbexec3d` is set; (B) `chkacc` `ch13` lets a compat read-only open coexist with deny-write/deny-none |
+| One `GO.BAT` run in six on UPDATE 83: task 2 (DOS/4GW W4STEST) stuck after the banner | not attributed | 0 in 5 on the unchanged kernel; see UPDATE 83 |
 | Shell keeps its **reloaded transient** low: 13.6 KB less program space after the first big program | `$$SHELL.SYS` | not a leak (watchpoint-proven); reload high like COMMAND.COM would keep it |
 | DOS/32A warning 9003, INT 22h modified after a nested EXEC | kernel EXEC/terminate | same on UPDATE 74; compare with plain DOS + HDPMI32 |
-| `e93sel` can still reuse a plain `F2h` entry of the same tag and base | `_386.ASM` | should not occur (tags freed at 4Ch) |
-| `einfun82` takes the segment from `ncavds`, comment says ES | `_386.ASM` | pre-existing; no pm caller in the test set |
 
 ## Open ideas
 
@@ -157,3 +166,7 @@ The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
 | 77 | `einvhook`: vectors 08h-E5h straight to the hook lookup |
 | 78 | PSP/environment descriptors access `F3h`: a .COM client no longer gets its PSP as DS |
 | 79 | selector 0040h = BIOS data area (base 400h): DOS/4GW's int 21h 2Ch |
+| 80 | host int 21h translation: DTA (1Ah/2Fh/4Eh/4Fh) and 42h by DOS conventions; per-client DTA in hook page 5 |
+| 81 | int 31h 0800h physical address mapping (identity, above RAM's linear space) |
+| 82 | 16-bit clients: int 21h high words cleared (was a host crash); 5Ch DOS conventions; int 38h 02h/04h ES; tidy-up |
+| 83 | kernel `chkacc`: compat read opens coexist with deny-write / deny-none (DJGPP "can't open") |

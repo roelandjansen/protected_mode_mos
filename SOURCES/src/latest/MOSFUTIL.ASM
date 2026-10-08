@@ -226,6 +226,11 @@ mjs 08/18/92	clean up segment declarations
 mjs 09/17/92	rewrote chkacc function (actually did on 07/22/92)
 		parallel: updat501.sys version 1.04
 
+UPDATE 83	(2026) a compatibility-mode open that only reads now
+		coexists with deny-write / deny-none opens, both ways
+		(chkacc). DJGPP stubs reopen their own EXE in compat
+		mode while EXEC holds it deny-write: "can't open".
+
 ======================================================================^
 
 .xlist
@@ -605,8 +610,11 @@ ch4:
 
 ; special case test for read-only files
 
-	or	di,di
-	jz	ch20
+	or	di,di			; read-only file: as before
+	jnz	ch20a
+	cmp	bl,access_r		; UPDATE 83: a new compat open that only
+	jne	ch20			;  reads coexists with deny-write and
+ch20a:					;  deny-none opens
 	cmp	ah,share_dn_w
 	je	ch3
 	cmp	ah,share_dn_no
@@ -652,7 +660,7 @@ chkacx1:
 	pop	di
 	pop	ds
 	ljc	chkacy			; fail chosen
-	jnz	chkacy			; ignore chosen
+	ljnz	chkacy			; ignore chosen (UPDATE 83: out of short range)
 	jmp	ch13
 ch3:
 	assume	es:tfb
@@ -683,8 +691,13 @@ ch7:
 
 ; special case test for read-only files
 
-	or	di,di
-	jz	ch21
+	or	di,di			; read-only file: as before
+	jnz	ch21a
+	cmp	[tfbacc],access_r	; UPDATE 83: the compat open only reads
+	jne	ch21
+	cmp	bl,access_r		;  and so does the new (deny-write or
+	jne	ch21			;  deny-none) open
+ch21a:
 	cmp	bh,share_dn_w
 	je	ch8
 	cmp	bh,share_dn_no

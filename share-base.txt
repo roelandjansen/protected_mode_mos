@@ -1,0 +1,16 @@
+BAD deny-write holder, compat read                 hold 20h: 6, open 00h: -5 (want ok)
+BAD deny-none holder, compat read                  hold 40h: 6, open 00h: -5 (want ok)
+BAD compat read holder, deny-write read            hold 00h: 6, open 20h: -32 (want ok)
+BAD compat read holder, deny-none read             hold 00h: 6, open 40h: -32 (want ok)
+OK  deny-write holder, compat WRITE                hold 20h: 6, open 01h: -5 (want refused)
+OK  deny-write holder, compat read/write           hold 20h: 6, open 02h: -5 (want refused)
+OK  deny-read/write holder, compat read            hold 10h: 6, open 00h: -5 (want refused)
+OK  deny-read holder, compat read                  hold 30h: 6, open 00h: -5 (want refused)
+OK  compat WRITE holder, deny-write read           hold 01h: 6, open 20h: -32 (want refused)
+OK  compat read holder, deny-read/write            hold 00h: 6, open 10h: -32 (want refused)
+    DJHELLO.EXE held deny-write: 6; starting it ...
+DJHELLO.exe: can't open
+BAD start a program held deny-write: rc 102 (want 0)
+SHARE: 5 bad
+[A:\]share > share.txt
+[A:\]
