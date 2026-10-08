@@ -5703,75 +5703,6 @@ e40end:
 
 	page
 ;--------------------------------------------------------------------
-;		      42 - position file pointer
-;--------------------------------------------------------------------
-
-; save ecx,edx to nca
-
-einfun42:
-	db	8bh,01010011b		; mov edx,[ebx+ncavcx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavcx
-	db	89h,01010011b		; mov [ebx+ncauregs+00],dx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+00
-	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-	db	89h,01000011b		; mov [ebx+ncauregs+04],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+04
-
-; translate ecx to cx:dx
-
-	xor	ax,ax
-	db	66h
-	mov	ax,dx			; dx will represent v86 cx
-	shr	dx,16
-	db	89h,01010011b		; mov [ebx+ncavcx],dx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavcx
-	db	89h,01000011b		; mov [ebx+ncavdx],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-
-; execute vm handler
-
-	xor	dx,dx			; edx is vector number
-	mov	dl,21h
-	db	66h
-	call	dovmint 		; edx contains vector number
-	db	0f6h,01000011b		; test [ebx+ncavflag],01h
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavflag
-	db	01h			; immediate data
-	jnz	e42end			; jump if carry was set
-
-; translate dx:ax to eax
-
-	db	8bh,01010011b		; mov edx,[ebx+ncavdx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-	xor	ax,ax
-	db	66h
-	db	8bh,01000011b		; mov eax,[ebx+ncavax]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavax
-	shl	dx,16
-	or	ax,dx
-	db	89h,01000011b		; mov [ebx+ncavax],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavax
-
-; recover ecx,edx from ncauregs
-
-e42end:
-	db	66h
-;>>>>> change this
-	jmp	e3fend
-;>>>>>> change this
-	page
-;--------------------------------------------------------------------
 ;		47 - get current directory with ds:esi
 ;--------------------------------------------------------------------
 
@@ -6207,95 +6138,6 @@ einfun5a:
 
 	page
 ;--------------------------------------------------------------------
-;		      5c - lock or unlock
-;--------------------------------------------------------------------
-
-; save ecx,edx,esi,edi to nca
-
-einfun5c:
-	db	8bh,01010011b		; mov edx,[ebx+ncavcx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavcx
-	db	89h,01010011b		; mov [ebx+ncauregs+00],dx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+00
-	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-	db	89h,01000011b		; mov [ebx+ncauregs+04],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+04
-	db	8bh,01001011b		; mov ecx,[ebx+ncavsi]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavsi
-	db	89h,01001011b		; mov [ebx+ncauregs+08],ecx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+08
-	db	8bh,01001011b		; mov ecx,[ebx+ncavdi]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdi
-	db	89h,01001011b		; mov [ebx+ncauregs+12],ecx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+12
-	mov	si,ax
-
-; translate ecx to cx:dx
-
-	xor	ax,ax
-	db	66h
-	mov	ax,dx			; dx will represent v86 cx
-	shr	dx,16
-	db	89h,01010011b		; mov [ebx+ncavcx],dx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavcx
-	db	89h,01000011b		; mov [ebx+ncavdx],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-
-; translate edx to si:di
-
-	xor	ax,ax
-	db	66h
-	mov	ax,si			; si will represent v86 si
-	shr	si,16
-	db	89h,01110011b		; mov [ebx+ncavsi],si
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavsi
-	db	89h,01000011b		; mov [ebx+ncavdi],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdi
-
-; execute vm handler
-
-	xor	dx,dx			; edx is vector number
-	mov	dl,21h
-	db	66h
-	call	dovmint 		; edx contains vector number
-
-; recover esi,edi from ncauregs
-
-	db	8bh,01001011b		; mov ecx,[ebx+ncauregs+08]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+08
-	db	89h,01001011b		; mov [ebx+ncavsi],ecx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavsi
-	db	8bh,01001011b		; mov ecx,[ebx+ncauregs+12]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+12
-	db	89h,01001011b		; mov [ebx+ncavdi],ecx
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdi
-
-; recover ecx,edx from ncauregs
-
-;#####	db	66h
-;>>>>>>> change this
-	jmp	short e3fend
-;>>>>>>> change this
-
-	page
-;--------------------------------------------------------------------
 ;			3f - read file data
 ;--------------------------------------------------------------------
 einfun3f:
@@ -6482,35 +6324,53 @@ e3f40pre endp
 ; execute vm handler
 
 einfun82:
+;
+; UPDATE 82: the kernel returns the SCB (02h) in es:bx and the TCB (04h)
+; in es only -- bx is 04h's input, the task id. Was: the segment taken
+; from ncavds (the caller's ds) and es*16 + bx for both. Now es; offset
+; bx for 02h, 0 for 04h; registers as the kernel left them on an error.
+;
+	xor	ax,ax			; xor eax,eax
+	db	8ah,01000011b		; mov al,[ebx+ncavax+1]: the function
+	db	offset nca:ncavax+1
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	db	offset nca:ncauregs+00
 	db	66h
 	call	dovmint 		; edx contains vector number
+	db	0f6h,01000011b		; test [ebx+ncavflag],01h
+	db	offset nca:ncavflag
+	db	01h
+	jnz	e82x			; error: nothing to translate
 
-; translate es:bx to es:ebx
+; translate es:bx (02h) or es:0 (04h) to es:ebx, es = 0043h
 
-	xor	dx,dx
+	xor	dx,dx			; xor edx,edx
 	db	66h			; 16-bit data
 	db	8bh,01010011b		; mov dx,[ebx+ncaves]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavds
-	shl	dx,4			; got v86 segment portion of address
-	xor	ax,ax
+	db	offset nca:ncaves
+	shl	dx,4			; shl edx,4: linear of the segment
+	xor	ax,ax			; xor eax,eax: offset 0 for 04h
+	db	80h,01111011b		; cmp byte ptr [ebx+ncauregs+00],04h
+	db	offset nca:ncauregs+00
+	db	04h
+	je	e82t
 	db	66h			; 16-bit data
 	db	8bh,01000011b		; mov ax,[ebx+ncavbx]
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavbx
-	add	ax,dx			; add in v86 offset
+e82t:
+	add	ax,dx			; add eax,edx
 	db	2dh			; sub eax,400h (UPDATE 79): es = 0043h
-	dw	0400h,0			;  now has base 400h, see gdtzero3
-	db	89h,01000011b		; mov [ebx+ncavbx],ax
-	;	  01...011		; disp=byte,base=ebx
+	dw	0400h,0			;  has base 400h, see gdtzero3
+	db	89h,01000011b		; mov [ebx+ncavbx],eax
 	db	offset nca:ncavbx
 	db	66h			; 16-bit data
 	db	0c7h,01000011b		; mov [ebx+ncanes],gdtzero3-gdt+3
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncanes
-	dw	gdtzero3-gdt+3		; immediate data
+	dw	gdtzero3-gdt+3
+e82x:
 	db	66h
 	jmp	einback
+
 
 	page
 ;--------------------------------------------------------------------
@@ -7250,6 +7110,38 @@ eindisp:
 e31skip:
 	cmp	dl,21h
 	jne	einstd0
+;
+; UPDATE 82: a 16-bit client's int 21h. The translators take pointers
+; and counts from the 32-bit slots (3Fh/40h: ecx bytes at ds:edx; 39h-
+; 3Dh, 41h, 43h, 4Eh, 56h, 5Ah: ds:edx, es:edi; 47h: ds:esi). For a
+; 16-bit client the high words are junk: clear them in cx, dx, si, di
+; before any translator runs. (A reflected call already returns these
+; slots with whatever the v-86 side left in the high words.)
+;
+	push	dx			; push edx: the vector (21h)
+	db	66h
+	call	c32edc			; edx bit 22 = 32-bit client
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	pop	dx			; pop edx (flags kept)
+	jnz	e21w32
+	db	66h
+	db	0c7h,01000011b		; mov word ptr [ebx+ncavcx+2],0
+	db	offset nca:ncavcx+2
+	dw	0
+	db	66h
+	db	0c7h,01000011b		; mov word ptr [ebx+ncavdx+2],0
+	db	offset nca:ncavdx+2
+	dw	0
+	db	66h
+	db	0c7h,01000011b		; mov word ptr [ebx+ncavsi+2],0
+	db	offset nca:ncavsi+2
+	dw	0
+	db	66h
+	db	0c7h,01000011b		; mov word ptr [ebx+ncavdi+2],0
+	db	offset nca:ncavdi+2
+	dw	0
+e21w32:
 	xor	ax,ax
 	db	8ah,01000011b		; mov al,[ebx+ncavax+1]
 	;	  01...011		; disp=byte,base=ebx
@@ -11432,7 +11324,7 @@ eintable label word
 	dw	offset mmgrp:einstand	; 59
 	dw	offset mmgrp:einfun5a	; 5a - create temp file
 	dw	offset mmgrp:einfun39	; 5b - create new file
-	dw	offset mmgrp:einfun5c	; 5c - lock/unlock
+	dw	offset mmgrp:einstand	; 5c - lock/unlock: DOS cx:dx, si:di (UPDATE 82)
 
 	page
 ;--------------------------------------------------------------------
@@ -13660,7 +13552,9 @@ e93sel:
 	push	ecx
 	push	esi
 	push	edi
-	mov	dl,11110010b		; p=1,dpl=3,s=1,type=001 data r/w
+	mov	dl,11110011b		; p=1,dpl=3,s=1,data r/w, accessed (UPDATE 82:
+					;  makegdte reuses only F3h entries now; was
+					;  F2h, patched to F3h afterwards, UPDATE 78)
 	call	dword ptr mmgrp:[mgd_ptr]	; ax = selector, 0 = table full
 	pop	edi
 	pop	esi
@@ -13672,12 +13566,6 @@ e93sel:
 	and	ebx,0fff8h
 	mov	word ptr ss:[ebx+gdt],cx	; limit 15:0
 	mov	byte ptr ss:[ebx+gdt+6],0	; g=0,d=0, limit 19:16 = 0
-	mov	byte ptr ss:[ebx+gdt+5],11110011b ; UPDATE 78: accessed bit set:
-					;  makegdte matches on access F2h, so a
-					;  PSP/environment entry (limit 0FFh / MCB
-					;  size) is never handed out again as a
-					;  .COM client's ds/ss at the switch, and
-					;  e93sel never re-limits an existing entry
 	pop	ebx
 e93sx:
 	ret
