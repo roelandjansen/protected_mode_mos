@@ -3166,8 +3166,10 @@ gdtzero  label byte			; segment at absolute zero
 	db	10010010b		; p=1,dpl=0,s=1,e=0,ed=0,w=1,a=0
 	db	11001111b		; g=1,d=1,00,limit bits 16-19
 	db	0			; base bits 24-31
-gdtzero3 label byte			; segment at absolute zero
-	dw	0ffffh,0		; limit, base
+gdtzero3 label byte			; UPDATE 79: selector 0040h = BIOS data area
+	dw	0ffffh,0400h		; limit, base 400h: DOS/4GW (and DPMI
+					;  convention) reads the tick count at
+					;  0040h:006Ch for int 21h 2Ch
 	db	0			; base bits 16-23
 	db	11110010b		; p=1,dpl=3,s=1,e=0,ed=0,w=1,a=0
 	db	01001111b		; g=0,d=1,00,limit bits 16-19
@@ -3194,7 +3196,8 @@ gdtpage  label byte
 phooktab equ	0			; UPDATE 73: offset 0 in gdthook (gs) --
 					;  defined before any use: no phase error
 gdthook  label byte			; UPDATE 73: the pm hook table (phooktab),
-	dw	DPHKN*12+1000h-1,0	;  12 KB + the 4 KB hook bitmap (UPDATE 74);
+	dw	DPHKN*12+2000h-1,0	;  12 KB + the 4 KB hook bitmap (UPDATE 74)
+					;  + the DTA page (UPDATE 80);
 	db	0			;  hookinit at the first session start
 	db	10010010b		; p=1,dpl=0,s=1,e=0,ed=0,w=1,a=0
 	db	0			; g=0,d=0
@@ -5822,177 +5825,264 @@ einfun47:
 	jmp	einback
 
 	page
+	page
 ;--------------------------------------------------------------------
-;		4e - find first directory entry
+;	DTA functions, DOS conventions (UPDATE 80)
 ;--------------------------------------------------------------------
+;
+; TSL's native-mode API took the DTA in es:ebx at every 4Eh/4Fh and did
+; not translate 1Ah/2Fh. Translating DPMI hosts (Windows, HDPMI) keep a
+; protected-mode DTA set by 1Ah instead; this host now does the same.
+; There are no native-mode programs left to keep the old API for.
+;
+; The DTA pointer is kept per client id in the hook segment (gs, page
+; 5): gs:[4000h + id*8] = dd offset, dw selector, db set. cidstart
+; clears an id's entry when it hands the id out. Without a 1Ah the DTA
+; is DOS's default, PSP:80h, reached flat (linear PSP*16 + 80h).
+;
+; The real-mode side uses ncabufer as the DTA: 44 bytes (43 used),
+; the ASCIIZ name for 4Eh at ncabufer+44. ncauregs: +00 destination
+; offset, +04 destination selector, +08 the client's edx.
+;
+; entcid is read before the first dovmint only.
+;
 
-; save edx to ncauregs
+;---- 1a - set DTA: ds:(e)dx
+
+einfun1a:
+	xor	ax,ax			; xor eax,eax
+	db	67h
+	mov	al,ss:[entcid]
+	mov	si,ax			; mov esi,eax
+	shl	si,3			; shl esi,3: id*8
+	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
+	db	offset nca:ncavdx
+	db	66h
+	call	c32edc			; edx bit 22 = 32-bit client
+	db	0f7h,0c2h		; test edx,00400000h
+	dw	0,0040h
+	jnz	e1ais32
+	db	0fh,0b7h,0c0h		; movzx eax,ax: 16-bit client
+e1ais32:
+	db	67h,65h			; gs:, 16-bit addressing
+	mov	word ptr [si+4000h],ax	; mov [si+4000h],eax: offset
+	db	66h			; 16-bit data
+	db	8bh,01000011b		; mov ax,[ebx+ncands]
+	db	offset nca:ncands
+	db	66h,67h,65h
+	mov	word ptr [si+4004h],ax	; selector
+	db	67h,65h
+	mov	byte ptr [si+4006h],1	; set
+	db	66h
+	jmp	einback
+
+;---- 2f - get DTA: es:ebx (reflected if the client never set one)
+
+einfun2f:
+	xor	ax,ax
+	db	67h
+	mov	al,ss:[entcid]
+	mov	si,ax
+	shl	si,3
+	db	67h,65h
+	cmp	byte ptr [si+4006h],0
+	je	e2fpass
+	db	67h,65h
+	mov	ax,word ptr [si+4000h]	; mov eax,[si+4000h]
+	db	89h,01000011b		; mov [ebx+ncavbx],eax
+	db	offset nca:ncavbx
+	db	66h,67h,65h
+	mov	ax,word ptr [si+4004h]
+	db	66h
+	db	89h,01000011b		; mov [ebx+ncanes],ax: es on return
+	db	offset nca:ncanes
+	db	66h
+	jmp	einback
+e2fpass:
+	db	66h
+	jmp	einstand
+
+;---- destination of the DTA copy into ncauregs+00/+04, edx into +08.
+;     Near subroutine, no dovmint. Uses eax, esi, edi.
+
+e4dst:
+	xor	ax,ax
+	db	67h
+	mov	al,ss:[entcid]
+	mov	si,ax
+	shl	si,3
+	db	67h,65h
+	cmp	byte ptr [si+4006h],0
+	je	e4dpsp
+	db	67h,65h
+	mov	ax,word ptr [si+4000h]	; offset
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	db	offset nca:ncauregs+00
+	db	66h,67h,65h
+	mov	ax,word ptr [si+4004h]	; selector
+	jmp	short e4dsel
+e4dpsp:
+	mov	di,si			; mov edi,esi
+	shr	di,2			; id*2: cidpsp index
+	xor	ax,ax
+	db	66h,67h
+	mov	ax,ss:[di+cidpsp]	; the client's PSP segment
+	shl	ax,4			; shl eax,4
+	db	05h			; add eax,80h
+	dw	80h,0
+	db	89h,01000011b		; mov [ebx+ncauregs+00],eax
+	db	offset nca:ncauregs+00
+	mov	ax,ds			; flat
+e4dsel:
+	db	66h
+	db	89h,01000011b		; mov [ebx+ncauregs+04],ax
+	db	offset nca:ncauregs+04
+	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
+	db	offset nca:ncavdx
+	db	89h,01000011b		; mov [ebx+ncauregs+08],eax
+	db	offset nca:ncauregs+08
+	db	66h
+	ret
+
+;---- 4e - find first: name at ds:(e)dx, result to the DTA
 
 einfun4e:
-	db	8bh,01000011b		; mov eax,[ebx+ncavdx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavdx
-	db	89h,01000011b		; mov [ebx+ncauregs+00],ax
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+00
+	db	66h
+	call	e4dst
 
-; move data area to ncabufer
+; move the ASCIIZ name to ncabufer+44
 
+	cld
 	mov	ax,ds
 	mov	es,ax
-	db	8bh,01000011b		; mov eax,[ebx+ncanes]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncanes
-	db	8bh,01110011b		; mov esi,[ebx+ncavbx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavbx
-	mov	ds,ax
-	mov	di,bx
-	db	83h,11000111b		; add edi,offset nca:ncabufer
-	;	  11...111		; reg=edi
-	db	offset nca:ncabufer
-	xor	cx,cx
-	mov	cl,44/4
-	rep	movsw
-	mov	ax,es			; fix ds back to normal
-	mov	ds,ax
-
-; move asciiz string to ncabufer
-
 	db	8bh,01000011b		; mov eax,[ebx+ncands]
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncands
 	db	8bh,01110011b		; mov esi,[ebx+ncavdx]
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavdx
+	mov	di,bx
+	db	83h,11000111b		; add edi,offset nca:ncabufer
+	db	offset nca:ncabufer
+	db	83h,11000111b		; add edi,44
+	db	44
 	mov	ds,ax
 	xor	cx,cx
 	mov	cl,64/4
-	rep	movsw
-	mov	ax,es			; fix ds back to normal
+	rep	movsw			; rep movsd
+	mov	ax,es
 	mov	ds,ax
 
-; set dta address
+; real-mode DTA = ncabufer
 
 	mov	ax,bx
-	shr	ax,4			; segment portion
-	db	66h			; 16-bit data
+	shr	ax,4
+	db	66h
 	db	89h,01000011b		; mov [ebx+ncavds],ax
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavds
-	db	66h			; 16-bit data
+	db	66h
 	db	0c7h,01000011b		; mov [ebx+ncavdx],offset nca:ncabufer
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavdx
-	dw	offset nca:ncabufer	; immediate data
-	xor	dx,dx			; edx is vector number
+	dw	offset nca:ncabufer
+	xor	dx,dx
 	mov	dl,21h
 	db	0c6h,01000011b		; mov [ebx+ncavax+1],1ah
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavax+1
-	db	1ah			; function code moved to ah
+	db	1ah
 	db	66h
-	call	dovmint 		; edx contains vector number
+	call	dovmint
 
-; set v86 dx
+; find first, name at ncabufer+44
 
-	db	66h			; 16-bit data
+	db	66h
 	db	0c7h,01000011b		; mov [ebx+ncavdx],offset nca:ncabufer+44
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavdx
-	dw	offset nca:ncabufer+44	; immediate data
-
-; execute vm handler
-
-	xor	dx,dx			; edx is vector number
+	dw	offset nca:ncabufer+44
+	xor	dx,dx
 	mov	dl,21h
 	db	0c6h,01000011b		; mov [ebx+ncavax+1],4eh
-	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavax+1
-	db	4eh			; function code moved to ah
+	db	4eh
 	db	66h
-	call	dovmint 		; edx contains vector number
+	call	dovmint
+	db	66h
+	jmp	e4fback
 
-; move modified area to user
+;---- 4f - find next: search state from the DTA, result back to it
 
-	db	8bh,01000011b		; mov eax,[ebx+ncanes]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncanes
-	db	8bh,01111011b		; mov edi,[ebx+ncavbx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavbx
+einfun4f:
+	db	66h
+	call	e4dst
+
+; move the DTA (the search state) to ncabufer
+
+	cld
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncauregs+04]
+	db	offset nca:ncauregs+04
+	db	8bh,01110011b		; mov esi,[ebx+ncauregs+00]
+	db	offset nca:ncauregs+00
+	mov	cx,ds
+	mov	es,cx
+	mov	di,bx
+	db	83h,11000111b		; add edi,offset nca:ncabufer
+	db	offset nca:ncabufer
+	mov	ds,ax
+	xor	cx,cx
+	mov	cl,44/4
+	rep	movsw			; rep movsd
+	mov	ax,es
+	mov	ds,ax
+
+; real-mode DTA = ncabufer, then find next
+
+	mov	ax,bx
+	shr	ax,4
+	db	66h
+	db	89h,01000011b		; mov [ebx+ncavds],ax
+	db	offset nca:ncavds
+	db	66h
+	db	0c7h,01000011b		; mov [ebx+ncavdx],offset nca:ncabufer
+	db	offset nca:ncavdx
+	dw	offset nca:ncabufer
+	xor	dx,dx
+	mov	dl,21h
+	db	0c6h,01000011b		; mov [ebx+ncavax+1],1ah
+	db	offset nca:ncavax+1
+	db	1ah
+	db	66h
+	call	dovmint
+	xor	dx,dx
+	mov	dl,21h
+	db	0c6h,01000011b		; mov [ebx+ncavax+1],4fh
+	db	offset nca:ncavax+1
+	db	4fh
+	db	66h
+	call	dovmint
+
+; both: copy ncabufer back to the DTA, restore edx
+
+e4fback:
+	cld
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncauregs+04]
+	db	offset nca:ncauregs+04
+	db	8bh,01111011b		; mov edi,[ebx+ncauregs+00]
+	db	offset nca:ncauregs+00
 	mov	es,ax
 	mov	si,bx
 	db	83h,11000110b		; add esi,offset nca:ncabufer
-	;	  11...110		; reg=esi
 	db	offset nca:ncabufer
 	xor	cx,cx
 	mov	cl,44/4
-	cld
-	rep	movsw
-
-; recover edx from ncauregs
-
-	db	8bh,01000011b		; mov eax,[ebx+ncauregs+00] (edx)
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncauregs+00
-	db	89h,01000011b		; mov [ebx+ncavdx],ax
-	;	  01...011		; disp=byte,base=ebx
+	rep	movsw			; rep movsd
+	mov	ax,ds
+	mov	es,ax
+	db	8bh,01000011b		; mov eax,[ebx+ncauregs+08]
+	db	offset nca:ncauregs+08
+	db	89h,01000011b		; mov [ebx+ncavdx],eax
 	db	offset nca:ncavdx
 	db	66h
 	jmp	einback
 
-	page
-;--------------------------------------------------------------------
-;		4f - find next directory entry
-;--------------------------------------------------------------------
-
-; move data area to ncabufer
-
-einfun4f:
-	mov	ax,ds
-	mov	es,ax
-	db	8bh,01000011b		; mov eax,[ebx+ncanes]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncanes
-	db	8bh,01110011b		; mov esi,[ebx+ncavbx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavbx
-	mov	ds,ax
-	mov	di,bx
-	db	83h,11000111b		; add edi,offset nca:ncabufer
-	;	  11...111		; reg=edi
-	db	offset nca:ncabufer
-	xor	cx,cx
-	mov	cl,44/4
-	rep	movsw
-	mov	ax,es			; fix ds back to normal
-	mov	ds,ax
-
-; execute vm handler
-
-	db	66h
-	call	dovmint 		; edx contains vector number
-
-; move modified area to user
-
-	db	8bh,01000011b		; mov eax,[ebx+ncanes]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncanes
-	db	8bh,01111011b		; mov edi,[ebx+ncavbx]
-	;	  01...011		; disp=byte,base=ebx
-	db	offset nca:ncavbx
-	mov	es,ax
-	mov	si,bx
-	db	83h,11000110b		; add esi,offset nca:ncabufer
-	;	  11...110		; reg=esi
-	db	offset nca:ncabufer
-	xor	cx,cx
-	mov	cl,44/4
-	cld
-	rep	movsw
-	db	66h
-	jmp	einback
 
 	page
 ;--------------------------------------------------------------------
@@ -6409,6 +6499,8 @@ einfun82:
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavbx
 	add	ax,dx			; add in v86 offset
+	db	2dh			; sub eax,400h (UPDATE 79): es = 0043h
+	dw	0400h,0			;  now has base 400h, see gdtzero3
 	db	89h,01000011b		; mov [ebx+ncavbx],ax
 	;	  01...011		; disp=byte,base=ebx
 	db	offset nca:ncavbx
@@ -7191,6 +7283,16 @@ e0askip:
 	db	66h
 	jmp	einfun09
 einlt39b:
+	cmp	al,1ah			; UPDATE 80: set / get DTA
+	jne	e1askip
+	db	66h
+	jmp	einfun1a
+e1askip:
+	cmp	al,2fh
+	jne	e2fskip
+	db	66h
+	jmp	einfun2f
+e2fskip:
 	cmp	al,1ch
 	jne	einstd0
 ;######	db	66h
@@ -11258,7 +11360,7 @@ eintable label word
 	dw	offset mmgrp:einfun3f	; 3f - read
 	dw	offset mmgrp:einfun40	; 40 - write
 	dw	offset mmgrp:einfun39	; 41 - delete
-	dw	offset mmgrp:einfun42	; 42 - set position
+	dw	offset mmgrp:einstand	; 42 - set position: DOS cx:dx / dx:ax (UPDATE 80)
 	dw	offset mmgrp:einfun39	; 43 - get/set attr
 	dw	offset mmgrp:einstand	; 44
 	dw	offset mmgrp:einstand	; 45
@@ -13738,6 +13840,12 @@ csgot:
 	cld
 	rep	stosd
 	pop	ecx
+	mov	edi,ecx			; UPDATE 80: and no DTA for this id:
+	shl	edi,3			;  8 bytes at gs:[4000h + id*8]
+	add	edi,dword ptr ss:[hooklin]
+	add	edi,DPHKN*12+1000h
+	stosd				; eax is still 0
+	stosd
 	pop	eax
 	pop	edi
 	pop	es
@@ -14038,7 +14146,7 @@ hookinit:
 	push	es
 	push	ds
 	call	adrpage			; ds -> driver data, es -> page table
-	mov	ecx,4			; UPDATE 74: + the hook bitmap
+	mov	ecx,5			; UPDATE 74: + the hook bitmap, UPDATE 80: + DTAs
 	call	nalloc			; eax = 0 ok, ebx = start, ecx = count
 	or	eax,eax
 	jz	hi1
@@ -14053,7 +14161,7 @@ hi1:
 	mov	ax,gdtzero-gdt		; flat
 	mov	es,ax
 	xor	eax,eax
-	mov	ecx,(DPHKN*12+1000h)/4
+	mov	ecx,(DPHKN*12+2000h)/4
 	cld
 	rep	stosd			; every entry free
 	pop	eax

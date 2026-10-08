@@ -1,7 +1,7 @@
-# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 74, 2026-10-03)
+# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 80, 2026-10-08)
 
 Put this at the top of `HANDOVER.md`. It is the state to start from; the
-UPDATE sections below it are the history and the reasons. UPDATE 62-74
+UPDATE sections below it are the history and the reasons. UPDATE 62-80
 are summarised here.
 
 ## What works
@@ -10,157 +10,137 @@ are summarised here.
   9.1.2 run real programs -- file I/O (FTEST), memory (MTEST), time
   (TTEST), keyboard (KTEST), a long mixed load (STEST) -- with the same
   results as under HDPMI32 in plain DOSBox.
-- **Nested clients** (UPDATE 67): a DPMI program starting another one
-  via `system()`/exec, three levels deep, any mix of the three
-  extenders. A client that dies without 4Ch is cleaned up at the next
-  session start in its task.
-- **Several tasks** (UPDATE 68/69): four PC-MOS tasks running DPMI
-  clients at once, nested, under heavy allocation load.
-- **Maximum task size 596 KB** (UPDATE 71/73; 580 before, 600 with the
-  UPDATE 61 driver). `ADDTASK` reports the current maximum on its size
-  errors (UPDATE 70).
+- **Nested clients** (UPDATE 67): three levels deep, any mix of the
+  three extenders.
+- **Several tasks** (UPDATE 68/69): the original `GO.BAT` -- four tasks,
+  all three extenders, nested -- passes (UPDATE 79 build, dynamic core).
+- **Maximum task size 596 KB** (UPDATE 71/73).
+- **int 31h cost** (UPDATE 75-77): one 0300h call 479 -> 401 monitor
+  instructions.
+- **DOS/4GW's clock** (UPDATE 79): int 21h 2Ch / `time()` correct.
+- **.COM clients after another client** (UPDATE 78): full 64 KB DS.
 
 ## Files and builds
 
 | file | built | size | md5 (first 12) |
 | --- | --- | --- | --- |
-| `_386.ASM` | `$386.SYS` -- memory manager + the DPMI host | 36,720 | `6383f1809dc3` |
+| `_386.ASM` | `$386.SYS` -- memory manager + the DPMI host | 37,056 | `f186e2e8d52c` |
 | `_DPMI.ASM`, `_DPMI.INC` | `$DPMI.SYS` -- front end (int 2Fh 1687h, `GoProtect`) | 5,149 | `f84240795eaa` |
-| `MOSFUN39.ASM` | in `$$MOS.SYS` -- commit on a character device (UPDATE 66) | 130,017 | `16fc9d34ac6c` |
-| `ADDTASK.ASM` | `ADDTASK.COM` (`make -f MAKEUTIL.MAK ADDTASK.COM`) | 2,854 | |
+| `MOSFUN39.ASM` | in `$$MOS.SYS` -- commit on a character device (UPDATE 66) | | |
+| `ADDTASK.ASM` | `ADDTASK.COM` | 2,854 | |
 | `DPMI32.ASM` | `DPMI32.COM` -- the kit's 32-bit client | | |
-| `MAXTASK.ASM` (rig) | `MAXTASK.COM` (`combuild.sh MAXTASK`) | 70 | |
 
-`_386.ASM` md5 `486be34726702632e9977f4eb425e079` (UPDATE 74).
+Only `_386.ASM` changed in UPDATE 75-80. The build is reproducible: two
+builds in two containers gave the same md5.
 
 ## How the host is built (orientation)
 
 - **`$386.SYS` holds the host.** `res16` (assembled for the 286, runs in a
   32-bit segment!) and `res32` (use32), one group `mmgrp`, CS `0018`, SS
   `0020`, base `0x700`. Everything resident in `res16` costs every task
-  conventional memory. res32 starts at res16's length rounded to a
-  paragraph (`9510h`-ish: check the listing).
+  conventional memory.
 - **Entry**: `einative` (saves the client's es/ds/fs/gs into `ncap0stk`,
-  loads gs = `gdthook`) -> `eindisp` -> `einint31` -> the function
-  handlers; back through `einback`. v-86 services through `dovmint`
-  (which **resets the monitor stack** -- `MEMDEV` only at a handler's top
-  level, never inside a called routine).
+  loads gs = `gdthook`, and since UPDATE 75 stores the caller's client id
+  in **`entcid`**) -> `einvhook` -> `eindisp` -> `einint31` -> the
+  function handlers; back through `einback`. v-86 services through
+  `dovmint` (resets the monitor stack -- `MEMDEV` only at a handler's top
+  level).
+- **`entcid`** (UPDATE 75): valid from `einative` until the first v-86
+  run (`dovmint`) or task switch. Read it in `einvh1` and `e0300s`
+  (`c32edc`); everything after a v-86 round trip must keep using
+  `e31tid`/`c32edx`.
+- **Fast paths**: `einvhook` sends vectors 08h-E5h straight to `einvh1`
+  (UPDATE 77); `einint31` tests 0300h, 0301h/0302h, 0501h-0503h,
+  0900h-0902h before the compare chain (UPDATE 76).
 - **Client ids** (UPDATE 67): every DPMI session has an id 1..127;
-  everything owned (descriptors `80h|id`, memory blocks, hooks,
-  callbacks, `c32tab`, `envtab`) is tagged with it. `e31tid` returns
-  it. `curcid` (task -> current), `cidtask`, `parcid`, `savnca`,
-  `cidpsp`, `pendsw`. `cidstart` (nest under a live parent, found on
-  the PSP chain, or clean up a dead one), `cidpop` (at the client's
-  4Ch), `cidtagsw` (initial selectors per client, in `nmswitch`).
-- **Hook table** (UPDATE 73/74): 1,024 x 12 bytes plus a 4 KB per-client
-  "maybe hooked" bitmap at `gs:[3000h + id*32 + vector/8]`, in four
-  pages of extended memory behind GDT entry `gdthook`, set up by
-  `hookinit` at the first session start. `phooktab equ 0`. Lookups
-  (`e31hfind`, `e31xfind`) stop at `hookhwm`, return "not hooked" while
-  `hookok` = 0, and skip the scan when the client's bit is 0.
+  everything owned is tagged with it.
+- **Hook table** (UPDATE 73/74): 1,024 x 12 bytes plus a per-client
+  bitmap at `gs:[3000h + id*32 + vector/8]`, behind GDT entry `gdthook`.
   **gs inside the monitor belongs to the hook table.**
-- **Default stubs** (UPDATE 71): generated at first use into two pages
-  of extended memory (`stbget`, `stublin`); layout in UPDATE 71.
+- **Initial selectors**: `makegdte` reuses an entry with the same tag,
+  access byte `F2h` and base. Func 93's PSP/environment descriptors are
+  written with access **`F3h`** (UPDATE 78) so they can never be handed
+  out as a client's DS/SS.
+- **Int 21h translation** (UPDATE 80): DOS conventions, as Windows/HDPMI.
+  Per-client DTA at `gs:[4000h + id*8]` (dd offset, dw selector, db set),
+  cleared by `cidstart`; default PSP:80h. 42h is plain reflection.
+- **Selector 0040h** (`gdtzero3`, dpl 3) has **base 400h** = BIOS data
+  area (UPDATE 79); DOS/4GW reads the tick count through it.
+  `einfun82` (MOS int 21h 82h) returns `es:ebx` with ES = 0043h and EBX
+  = linear - 400h.
 - **Memory**: 0501h checks the reserve (`dpmirsv`, 2 MB) against the
-  free page count and allocates exactly the request, first fit;
-  `nalloc` starts at `nhint` (UPDATE 70). 0500h reports min(longest
-  free run, free - reserve) from a read-only scan, `nlargest` (UPDATE
-  72). Banks are mapped at linear `(bank + 110h) << 12`.
-- **res16 -> res32 calls** go through dword pointers filled by `e6f8e`
-  with `offset mmgrp:label` (`stbptr`, `nlgptr`).
+  free page count and allocates exactly the request; 0500h from
+  `nlargest`.
 
 ## Test procedure (before every hand-over)
 
-All with `CORE=dynamic ./boot.sh IMG.img` (the interpreter core is ~400x
-slower; pmtrace's hook/step modes need it). Type only at an idle prompt
-(`rig/waitp.sh`).
+Dynamic core unless a tracer mode needs the normal one
+(`CORE=dynamic ./rig.sh start ...`; `rig.sh` honours `CORE=` since
+UPDATE 79's session). Type only at an idle prompt, one key at a time
+with an echo check (`kt.sh`: xdotool `type` drops characters).
 
-1. **DPMI32 kit**, 19 images (`/tmp/runkit.sh`; background, ~25 min).
-   Reference values (UPDATE 74):
+1. **DPMI32 kit**, 19 images -- reference values as in UPDATE 74 (not
+   rerun for 75-79; DPMI32 itself is unchanged).
+2. **Extender tests**, all three extenders: FTEST sum `1BE00000`; MTEST
+   11 / 11 / 12 MB (DJGPP / DOS/4GW / DOS/32A); TTEST 3021 @ 1000/s
+   (Watcom); KTEST.
+3. **Four-task run**: original `GO.BAT`; every return rc 0, three STESTs
+   0 bad, all DONE, task 2's STEST with a real start time.
+4. **Change-specific**: `W4XTEST W4HELLO`, `DOS32A WAXTEST DOS32A
+   WAHELLO`, DPMI32 **after** another client (UPDATE 78), `W4TIME`
+   (UPDATE 79), `Q300` / `Q900` (0300h, 0900h-0902h), `PM21` / `PMFN` /
+   `PMDEF` (UPDATE 80; on a floppy with room), `MAXTASK`,
+   `DJBENCH n`.
 
-| client | value |
-| --- | --- |
-| qR | `[A:\]` |
-| s2 | `0503h grow lin:0020E000 ... 1234ABCD` |
-| s3 | `L:00CB2000 kept h:001000EE ... fl:32133247` |
-| s5 | `CB20CA20CB20` |
-| sB | `5A5AA5A5 ... 324700088203` |
-| sC | `1CFC 1D05 1D05 grow fl:3246` |
-| sD | `324732461CFC` |
-| sE | `324612345678` |
-| sF | `count now:0001` |
-| sH | `000500053246` |
-| sI | `fl/ax:32461234 ... fl/bx:32465234` |
-| sJ | `00010100` |
-| sK | `32460000 rm:0070051C pm:007B0400` |
-| sL | `count ... 0005xxxx` (loop count varies) |
-| sN | Div=2, `007B04040002` |
-| sQ | `32463247` |
-| sR | `324612340005` |
-| sS | `324600704A10007B0488` |
-| s32 | `#GP count:0000 bytes 1/2/3:A1A200A3` |
+A DOS/32A child started through `system()` must be `dos32a NAME`: bare,
+only its stub runs (prints the LE banner, rc 0).
 
-   Layout-dependent values (linear addresses, segments, sS's offset,
-   the stub selector `007B`) move whenever the driver's size or its
-   extended-memory use changes; check that the shift matches.
-2. **Extender tests**, all three extenders in one boot each:
-   FTEST sum `1BE00000`; TTEST 275 @ 91/s (DJGPP), 3021 @ 1000/s
-   (Watcom); KTEST echoes the line; MTEST 11 / 11 / 12 MB.
-3. **Four-task run**: `GO.BAT` (`ADDTASK 500,n,,Tn.BAT` for tasks 1-3,
-   task 0's chain into `T0.TXT`); read `T0..T3.TXT` with `mtype`. Every
-   return rc 0, three STESTs churn/sort 0 bad, all "DONE".
-4. Change-specific checks: `W4XTEST W4HELLO` (nested DOS/4GW, hooks),
-   `MAXTASK`, `DJMI500` (0500h), `DJBENCH n` (per-call cost).
+## Measurement
 
-## Rig
+`hookprof.sh MAP LOG FROM TO`: label-run profile of a pmtrace hook log.
+Needs a LINK map with every label public (`public p386.asm`, then
+`include _386.pub` after `include xifmacs.inc`, `link _386,_386,_386/map`).
+Gate the hook from gdb at an idle prompt: `set var pmt_hook_lo/hi/left`.
+The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
+`set var pmt_window=N` (works on the dynamic core).
 
-- `boot.sh` (`CORE=` override, needs an `.img` name), `key.sh`,
-  `screen.sh`, `regs.sh`, `mem.sh` (reads **physical** memory),
-  `waitp.sh`, `mcbwalk.sh`, `pair.sh`, `kbuild.sh` (900 s), `dosbuild.sh`
-  (600 s), `combuild.sh`.
-- **Tracer** (`~/dosbox-trace`, heavy debugger build; patches 64/66/70/71):
+| 0300h call | 74 | 75 | 76 | 77 |
+| --- | --- | --- | --- | --- |
+| monitor instructions | 479 | 440 | 423 | 401 |
 
-| variable | effect |
-| --- | --- |
-| `PMTRACE=file`, `PMTRACE_WIN=n` | log INT/IRET events (armed by v-86 int 6Fh) |
-| `PMTRACE_ALL=1` | log without arming (plain DOSBox, HDPMI32) |
-| `PMTRACE_HOOK_LO/HI/N` | log monitor instructions (`H`), offsets from `0x700` |
-| `PMTRACE_STEPS=n`, `PMTRACE_STEP_AX=hex` | log v-86 instructions (`S`) from an IRET into v-86 / a v-86 int 21h with that ax |
-| `PMTRACE_GATE_AX=hex`, `PMTRACE_GATE_N=n` | hook/step logging only from the n-th int 31h with that ax |
+## Known, not fixed
 
-- Methods that found every bug: **differential trace** (the same program
-  on a known-good build or HDPMI32, int 31h sequences compared until
-  they split), then a **gated monitor trace** of exactly that call,
-  addresses mapped to routines from the listing.
-- Test programs (`tests/`): ftest, mtest, ttest, ktest, fdiag2, stest,
-  xtest, dbench, mi500.c; built for DJGPP and Watcom (dos4g, dos32a).
-
-## Lessons (consolidated)
-
-- **res16 is a 286-assembled segment executing 32-bit code**: no 16-bit
-  immediates (`EAXI`), no fs/gs overrides (prefix bytes `64h`/`65h`), a
-  register op without `66h` is 32-bit -- clear eax before a 16-bit load
-  (`NLDW`) unless the high word is built on purpose; memory operands
-  need `67h` for `[si+disp]`.
-- MASM 5.1: a macro or `equ` used before its definition -> phase error;
-  use16 data cannot hold a use32 label's offset; a res32 label's group
-  offset is `offset mmgrp:label`; `jcc` reaches only +-127.
-- Moving data to high linear addresses exposes code that relied on a
-  low value (UPDATE 71). Size tables per client, and bound every scan.
-- Measure before designing (page map, per-call instruction counts).
-- Rig: dash `printf` has no `\x` (octal escapes, check with `od`); mawk
-  has no `strtonum` (gawk); `pkill -f PATTERN` can kill your own shell,
-  stop by PID; one emulator at a time; after a container restart remove
-  `/tmp/.X99-lock`; restore clean floppies; check free floppy space.
+| what | where | notes |
+| --- | --- | --- |
+| Tasks starting the **same EXE** at once: `can't open`, rc 255 | kernel: `openfile` / `chkacc` | EXEC opens 3D20h (deny-write) and is switched to compat only if the *first* open in `gfbtfb` is compat; the DJGPP stub opens 3D00h (compat). Ideas: (A) `openfile` walks the whole chain while `tcbexec3d` is set; (B) `chkacc` `ch13` lets a compat read-only open coexist with deny-write/deny-none |
+| Shell keeps its **reloaded transient** low: 13.6 KB less program space after the first big program | `$$SHELL.SYS` | not a leak (watchpoint-proven); reload high like COMMAND.COM would keep it |
+| DOS/32A warning 9003, INT 22h modified after a nested EXEC | kernel EXEC/terminate | same on UPDATE 74; compare with plain DOS + HDPMI32 |
+| `e93sel` can still reuse a plain `F2h` entry of the same tag and base | `_386.ASM` | should not occur (tags freed at 4Ch) |
+| `einfun82` takes the segment from `ncavds`, comment says ES | `_386.ASM` | pre-existing; no pm caller in the test set |
 
 ## Open ideas
 
-- A DOS/4GW child runs as its own nested client; under HDPMI32 it
-  attaches to the parent's DOS/4G. Works either way.
-- The per-call cost is now the v-86 round trip (0300h, 0501h/0502h each
-  ~ one round trip); a faster reflection path would help all of them.
-- Terminals other than the console (`ADDTASK ... termid,port`).
+- The per-call cost is now mostly the v-86 round trip itself.
 - Exception lookups (`e31xfind`) could use a bitmap like interrupts.
+- Terminals other than the console (`ADDTASK ... termid,port`).
+
+## Rig (container notes)
+
+- `rebuild.sh` restores everything after a container reset (no sudo):
+  tree, toolkit, user-local packages (`apt-get download` + `dpkg -x` into
+  `~/deps/root`), `libiir` built from berndporr/iir1 **tag 1.9.3**,
+  gawk, x11-utils, DJGPP 12.2 (andrewwutw/build-djgpp v3.4), test
+  clients. Re-extract `dosbox.gz` afterwards if the toolkit's
+  `restore.sh` deleted it. Open Watcom: `ow-snapshot.tar.xz` from the
+  open-watcom-v2 `Current-build` release (`binw` has `dos4gw.exe`,
+  `dos32a.exe`).
+- `~/rig/env.sh` sets `LD_LIBRARY_PATH`/`PATH`; run rig scripts under
+  bash. `rig.sh` keeps its pid in `/tmp/pmrig`, `common.sh` in
+  `rig/state`: link the pid file.
+- Guest memory under paging: read through `MEM_BlockRead` from gdb, not
+  `MemBase + linear`. GDT at linear `1FA0h`.
+- Background processes (the emulator) do not survive the end of a
+  working turn: boot and measure in one go.
 
 ## UPDATE index
 
@@ -176,3 +156,9 @@ slower; pmtrace's hook/step modes need it). Type only at an idle prompt
 | 72 | five `NLDW` sites fixed; 0500h via `nlargest` |
 | 73 | hook table into extended memory (+12 KB/task) |
 | 74 | lookup guard; per-client hook bitmap |
+| 75 | client id computed once per int 31h call (`entcid`) |
+| 76 | int 31h fast path for 0300h-0302h, 0501h-0503h, 0900h-0902h |
+| 77 | `einvhook`: vectors 08h-E5h straight to the hook lookup |
+| 78 | PSP/environment descriptors access `F3h`: a .COM client no longer gets its PSP as DS |
+| 79 | selector 0040h = BIOS data area (base 400h): DOS/4GW's int 21h 2Ch |
+| 80 | host int 21h translation: DTA (1Ah/2Fh/4Eh/4Fh) and 42h by DOS conventions; per-client DTA in hook page 5 |
