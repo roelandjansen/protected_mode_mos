@@ -7816,6 +7816,12 @@ e31n90:
 	db	66h
 	jmp	e3190x
 e31n99:
+	db	66h			; UPDATE 81: physical address mapping
+	cmp	ax,0800h
+	jne	e31n9a
+	db	66h
+	jmp	e310800
+e31n9a:
 	db	66h
 	cmp	ax,0400h
 	je	e310400
@@ -7868,6 +7874,45 @@ e31bad:
 	db	66h
 	jmp	einback
 
+;---- int 31h 0800h - physical address mapping (UPDATE 81)
+;
+; bx:cx = physical address, si:di = size. Out: bx:cx = linear address,
+; cf clear; cf set if refused. The work is e31phys (res32, phyptr).
+
+e310800:
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncavbx]
+	db	offset nca:ncavbx
+	shl	ax,16			; shl eax,16
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncavcx]
+	db	offset nca:ncavcx
+	push	ax			; push eax: physical address
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncavsi]
+	db	offset nca:ncavsi
+	shl	ax,16
+	db	66h
+	db	8bh,01000011b		; mov ax,[ebx+ncavdi]
+	db	offset nca:ncavdi
+	mov	cx,ax			; mov ecx,eax: size
+	pop	ax			; pop eax
+	db	67h
+	call	word ptr ss:[phyptr]	; call dword: e31phys
+	jc	e0800n
+	db	66h
+	db	89h,01000011b		; mov [ebx+ncavcx],ax
+	db	offset nca:ncavcx
+	shr	ax,16			; shr eax,16
+	db	66h
+	db	89h,01000011b		; mov [ebx+ncavbx],ax
+	db	offset nca:ncavbx
+	db	66h
+	jmp	e31dok
+e0800n:
+	db	66h
+	jmp	e31bad
+
 ; DPMI task reserve, pages -- set by int 6fh 7790h (e6f90), read by
 ; 0500h through ss. Kept HERE, after an unconditional jump, and NOT
 ; in the parmgran/parmtot/parmused block: that block is read by
@@ -7897,6 +7942,7 @@ stublin	dd	0			; UPDATE 71: linear address of the stubs
 stbptr	dw	0,0			; UPDATE 71: offset of stbget (res32), set
 					;  by e6f8e -- a use16 segment cannot hold it
 nlgptr	dw	0,0			; UPDATE 72: offset of nlargest (res32), set by e6f8e
+phyptr	dw	0,0			; UPDATE 81: offset of e31phys (res32), set by e6f8e
 cbeax	dd	0			; callback entry scratch (e6f91)
 cbedx	dd	0
 cbesi	dd	0
@@ -13424,6 +13470,7 @@ e6f8e:
 	call	hookinit		; UPDATE 73: the hook table, once
 	mov	dword ptr ss:[stbptr],offset mmgrp:stbget	; UPDATE 71: group offset
 	mov	dword ptr ss:[nlgptr],offset mmgrp:nlargest	; UPDATE 72: for 0500h
+	mov	dword ptr ss:[phyptr],offset mmgrp:e31phys	; UPDATE 81: for 0800h
 	call	cidstart		; a new session: nest under a live parent,
 					;  or drop a dead predecessor (UPDATE 67)
 	push	eax
@@ -14180,6 +14227,194 @@ hiout:
 	pop	eax
 hix:
 	ret
+
+
+;
+; e31phys (UPDATE 81): int 31h 0800h, physical address mapping.
+;
+; Maps a physical range at the SAME linear address (identity), above
+; everything this memory manager uses: the range's page-directory
+; entries must all lie at or above pt_pages, so RAM's linear space is
+; never touched. A frame buffer near E0000000h lands far above it.
+;
+; Page tables for the range come from nalloc (one bank each), are
+; zeroed, and entered in the page directory. The page directory is the
+; physical page below the page table, so it is reached at gdtpage's
+; base - 1000h (the parspace maps extended memory contiguously).
+; phytab/phylin remember the PDE indices made here and their page
+; tables' linear addresses (PHYN of them), so a second mapping in the
+; same 4 MB reuses its page table. A present PDE not in phytab is
+; uninitialised directory memory and is overwritten.
+;
+; PTEs: present, writable, user, cache disabled + write-through (PCD,
+; PWT), as for memory-mapped I/O. Mappings stay (0.9 has no 0801h).
+;
+; In:	eax = physical address, ecx = size in bytes
+; Out:	cf = 0: eax = linear address
+;	cf = 1: refused (below 1 MB, size 0, wraps, collides with RAM's
+;	linear space, phytab full, no memory for a page table)
+; Preserves all registers but eax. Reached from res16 through phyptr.
+;
+PHYN	equ	16
+
+ephn0:					; refusals from the entry checks: a jcc
+	jmp	ephno			;  reaches only +-127 (MASM 5.1)
+e31phys:
+	push	ebx
+	push	ecx
+	push	edx
+	push	esi
+	push	edi
+	push	ds
+	push	es
+	push	fs
+	call	adrpage			; ds -> driver data, es -> page table
+	mov	dx,gdtzero-gdt		; fs: flat, for the directory and
+	mov	fs,dx			;  the new page tables
+	cmp	eax,100000h		; nothing below 1 MB
+	jb	ephn0
+	jecxz	ephn0			; size 0
+	lea	edx,[eax+ecx-1]		; last byte
+	cmp	edx,eax
+	jb	ephn0			; wraps past 4 GB
+	mov	esi,eax			; esi = physical start (kept)
+	mov	edi,edx			; edi = last byte (kept)
+	shr	edx,22			; last PDE index
+	mov	ebx,eax
+	shr	ebx,22			; first PDE index
+	cmp	ebx,dword ptr ss:[pt_pages]	; inside RAM's linear space?
+	jb	ephn0
+
+; directory linear = gdtpage base - 1000h
+
+	movzx	ecx,word ptr ss:[gdtpage+2]
+	movzx	eax,byte ptr ss:[gdtpage+4]
+	shl	eax,16
+	or	ecx,eax
+	movzx	eax,byte ptr ss:[gdtpage+7]
+	shl	eax,24
+	or	ecx,eax
+	sub	ecx,1000h
+	mov	dword ptr ss:[phypd],ecx
+
+; one page table per PDE index ebx .. edx
+
+eph1:
+	cmp	ebx,edx
+	ja	eph4
+	call	ephown			; ours already: ecx = slot
+	jnc	eph3
+	cmp	dword ptr ss:[phyhwm],PHYN
+	jae	ephn0			; table full
+	push	edx
+	push	ebx
+	mov	ecx,1
+	call	nalloc			; eax = 0 ok, ebx = bank, ecx = count
+	or	eax,eax
+	jz	eph2
+	jecxz	eph2x
+	call	nrelease
+eph2x:
+	pop	ebx
+	pop	edx
+	jmp	ephno
+eph2:
+	lea	eax,[ebx+110h]		; the bank's linear page number
+	mov	ecx,es:[eax*4]		; its PTE: the physical frame
+	and	ecx,0fffff000h
+	shl	eax,12			; the bank's linear address
+	pop	ebx			; PDE index
+	pop	edx
+	push	ecx			; frame
+	push	edi
+	push	es
+	mov	edi,eax			; zero the new page table, flat
+	push	eax
+	push	fs
+	pop	es
+	xor	eax,eax
+	mov	ecx,1024
+	cld
+	rep	stosd
+	pop	eax			; its linear
+	pop	es
+	pop	edi
+	mov	ecx,dword ptr ss:[phyhwm]	; record index and linear
+	mov	dword ptr ss:[phytab+ecx*4],ebx
+	mov	dword ptr ss:[phylin+ecx*4],eax
+	inc	dword ptr ss:[phyhwm]
+	pop	ecx			; frame
+	or	ecx,7			; present, writable, user
+	mov	eax,dword ptr ss:[phypd]
+	mov	fs:[eax+ebx*4],ecx	; the PDE
+eph3:					; (already ours: nothing to make)
+	inc	ebx
+	jmp	eph1
+
+; the PTEs, page by page from the start
+
+eph4:
+	call	flushtlb		; the new PDEs
+	mov	eax,esi
+	and	eax,0fffff000h		; first frame
+eph5:
+	mov	ebx,eax
+	shr	ebx,22
+	call	ephown			; ecx = slot (always found here)
+	jc	ephno
+	mov	ecx,dword ptr ss:[phylin+ecx*4]	; the page table, linear
+	mov	ebx,eax
+	shr	ebx,12
+	and	ebx,3ffh
+	mov	edx,eax
+	or	edx,1fh			; present, rw, user, PWT, PCD
+	mov	fs:[ecx+ebx*4],edx
+	add	eax,1000h
+	jc	eph6			; wrapped past 4 GB: done
+	cmp	eax,edi
+	jbe	eph5
+eph6:
+	call	flushtlb
+	mov	eax,esi			; linear = physical
+	clc
+	jmp	short ephx
+ephno:
+	stc
+ephx:
+	pop	fs
+	pop	es
+	pop	ds
+	pop	edi
+	pop	esi
+	pop	edx
+	pop	ecx
+	pop	ebx
+	ret
+
+;
+; ephown: PDE index ebx in phytab? cf = 0 and ecx = its slot, else
+; cf = 1. Preserves all but ecx.
+;
+ephown:
+	xor	ecx,ecx
+epo1:
+	cmp	ecx,dword ptr ss:[phyhwm]
+	jae	epo2
+	cmp	dword ptr ss:[phytab+ecx*4],ebx
+	je	epo3
+	inc	ecx
+	jmp	short epo1
+epo2:
+	stc
+	ret
+epo3:
+	clc
+	ret
+
+phypd	dd	0			; linear of the page directory
+phyhwm	dd	0			; slots used in phytab / phylin
+phytab	dd	PHYN dup(0)		; PDE indices made by e31phys
+phylin	dd	PHYN dup(0)		; their page tables' linear addresses
 
 stbget:
 	push	ds
