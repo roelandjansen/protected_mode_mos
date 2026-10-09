@@ -387,6 +387,10 @@ mjs 08/18/92	clean up segment declarations
 
 mjs 09/18/92	removed security check in id4f03
 
+UPDATE 85 2026-10-09	mosext2d (max task size) without a memory manager:
+		the size of the caller's last mcb, which mositask carves
+		the new task from (was: calclim - scbfree, as with one).
+
 ======================================================================^
 
 .xlist
@@ -3048,25 +3052,25 @@ mosext0f endp
 ;
 ; this is a non-saver function
 ;
-;               ÚÄ                            Ä¿
-;               ³ ÚÄ                           ³
-; post_tcb   -->³ ³ es = post_tcb              ³ --> nc if complete
-; &post_func -->³ ³ÚÄ if(es:[0] != 'HT')       ³     cy if invalid tcb
-; &post_orig -->³ ³³ stc                       ³
-;               ³ ³³ ret                       ³
-;               ³ ³ÀÄ                          ³
-;               ³ ³ pushf                      ³
-;               ³ ³ cli                        ³
-;               ³ ³ *post_orig = es:[tcbpost]  ³
-;               ³ ³ es:[tcbpost] = post_func   ³
-;               ³ ³ popf                       ³
-;               ³ ³ÚÄ if(post_tcb == [scbpost] ³
-;               ³ ³³ call dopost               ³
-;               ³ ³ÀÄ                          ³
-;               ³ ³ clc                        ³
-;               ³ ³ ret                        ³
-;               ³ ÀÄ                           ³
-;               ÀÄ                            ÄÙ
+;               ï¿½ï¿½                            Ä¿
+;               ï¿½ ï¿½ï¿½                           ï¿½
+; post_tcb   -->ï¿½ ï¿½ es = post_tcb              ï¿½ --> nc if complete
+; &post_func -->ï¿½ ï¿½ï¿½ï¿½ if(es:[0] != 'HT')       ï¿½     cy if invalid tcb
+; &post_orig -->ï¿½ ï¿½ï¿½ stc                       ï¿½
+;               ï¿½ ï¿½ï¿½ ret                       ï¿½
+;               ï¿½ ï¿½ï¿½ï¿½                          ï¿½
+;               ï¿½ ï¿½ pushf                      ï¿½
+;               ï¿½ ï¿½ cli                        ï¿½
+;               ï¿½ ï¿½ *post_orig = es:[tcbpost]  ï¿½
+;               ï¿½ ï¿½ es:[tcbpost] = post_func   ï¿½
+;               ï¿½ ï¿½ popf                       ï¿½
+;               ï¿½ ï¿½ï¿½ï¿½ if(post_tcb == [scbpost] ï¿½
+;               ï¿½ ï¿½ï¿½ call dopost               ï¿½
+;               ï¿½ ï¿½ï¿½ï¿½                          ï¿½
+;               ï¿½ ï¿½ clc                        ï¿½
+;               ï¿½ ï¿½ ret                        ï¿½
+;               ï¿½ ï¿½ï¿½                           ï¿½
+;               ï¿½ï¿½                            ï¿½ï¿½
 ;
 ; this api function adds a post function to the tcbpost chain.
 ; then, if the post_tcb task happens to be the current task,
@@ -4719,11 +4723,33 @@ mosext2c endp
 ;======================================================================^
 	assume	ds:grp,ss:tcb,es:nothing
 mosext2d proc	near
+	 cmp	[scbmmfg],'Y'		; UPDATE 85: without a memory manager
+	 je	m2dmm			;  a new task is carved from the end
+	 push	es			;  of the caller's last mcb (mositask
+	 mov	ax,[tcbmbpf]		;  mit110): that block is the limit
+m2dlp:
+	 mov	es,ax
+	 assume	es:mbseg
+	 cmp	[mbtype],'Z'
+	 je	m2dz
+	 inc	ax
+	 add	ax,[mbsize]
+	 jmp	m2dlp
+m2dz:
+	 mov	cx,[mbsize]
+	 pop	es
+	 assume	es:nothing
+	 inc	ax
+	 mov	[tbx],ax		; start of the block
+	 mov	[tdx],cx		; its size
+	 jmp	short m2dok
+m2dmm:
 	 call	calclim 		; calcuated limit from mositask
 	 mov	bx,[scbfree]		; get base of task
 	 sub	ax,bx
 	 mov	[tdx],ax		; return max task size
 	 mov	[tbx],bx		; return start of task
+m2dok:
 	 xor	ax,ax
 	 callmos2 moserror
 	 ret

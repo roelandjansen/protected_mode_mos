@@ -99,6 +99,10 @@ SAH 04/06/92	Updated for max of 33 users
 mjs 09/17/92	removed shareticks and sharetry equates to prevent
 		conflict with recent change to mostcb.inc.
 
+UPDATE 85 2026-10-09	report the current maximum task size (services
+		2dh, as "addtask max") after a size error, an
+		insufficient memory error and the usage text.
+
 =======================================================================^
 
 	subttl	addtask macros, equates, data
@@ -1018,6 +1022,7 @@ err0c:
 	xor	bp,bp
 	jmp	showerror
 error1:
+	mov	[wantmax],1		; UPDATE 85
 	lea	dx,ermsg1
 	mov	bp,1
 	jmp	showerror
@@ -1030,6 +1035,7 @@ error2:
 ermsg2	db	'Invalid Command form error   ',13,10,'$'  ;@@xlat
 
 error3:
+	mov	[wantmax],1		; UPDATE 85
 	lea	dx,ermsg3
 	xor	bp,bp
 	jmp	showerror
@@ -1096,11 +1102,33 @@ showerror:
 	mov	ah,9
 	int	21h
 	or	bp,bp
-	jz	nohelp
+	jz	shmax
 	lea	dx,[helpmsg]
 	mov	ah,9
 	int	21h
+
+; UPDATE 85: after a size or memory error, the current maximum
+
+shmax:
+	cmp	[wantmax],0
+	lje	nohelp
+	mov	ah,2dh			; get max task size (dx = paragraphs)
+	int	services
+	mov	ax,dx
+	mov	cl,6
+	shr	ax,cl			; kilobytes
+	xor	dx,dx
+	lea	bx,[maxnum+2]
+	mov	cx,3
+	call	bin2dec
+	lea	dx,[maxmsg]
+	mov	ah,9
+	int	21h
 	jmp	nohelp
+
+wantmax db	0
+maxmsg	db	'Maximum task size now: '  ;@@xlat
+maxnum	db	'   K',13,10,'$'
 
 
 helpmsg db	'Correct form:      ',13,10  ;@@xlat

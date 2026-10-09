@@ -859,17 +859,17 @@ i13pass:
 ; and derives the new cylinder, head and sector values for advancing
 ; a certain number of sectors.
 ; 
-;             ÚÄ 			             Ä¿
-;  	      ³  q1/r1 = (cur_sect + add_sect) / spt  ³ 
-; cur_cyl  -> ³  ÚÄ if(r1 == 0)		              ³ -> new_cyl
-; cur_head -> ³  ³ r1 = spt			      ³ -> new_head
-; cur_sect -> ³  ³ q1--			              ³ -> new_sect
-; add_sect -> ³  ÀÄ 				      ³ 
-; heads	   -> ³  cur_sect = r1			      ³ 
-; spt	   -> ³  q2/r2 = (cur_head + q1) / heads      ³ 
-; 	      ³  cur_head = r2			      ³ 
-; 	      ³  cur_cyl += q2			      ³ 
-; 	      ÀÄ				     ÄÙ
+;             ï¿½ï¿½ 			             Ä¿
+;  	      ï¿½  q1/r1 = (cur_sect + add_sect) / spt  ï¿½ 
+; cur_cyl  -> ï¿½  ï¿½ï¿½ if(r1 == 0)		              ï¿½ -> new_cyl
+; cur_head -> ï¿½  ï¿½ r1 = spt			      ï¿½ -> new_head
+; cur_sect -> ï¿½  ï¿½ q1--			              ï¿½ -> new_sect
+; add_sect -> ï¿½  ï¿½ï¿½ 				      ï¿½ 
+; heads	   -> ï¿½  cur_sect = r1			      ï¿½ 
+; spt	   -> ï¿½  q2/r2 = (cur_head + q1) / heads      ï¿½ 
+; 	      ï¿½  cur_head = r2			      ï¿½ 
+; 	      ï¿½  cur_cyl += q2			      ï¿½ 
+; 	      ï¿½ï¿½				     ï¿½ï¿½
 ; 
 ; in:	al = # of sectors to advance (add_sect)
 ;	ch = cylinder # (high 2 bits in cl) (cur_cyl)
@@ -10509,6 +10509,13 @@ e0305b:
 ; the fault exactly as without DPMI -- MOS reports and terminates.
 ;
 ; Client stack linear address: ncanss base + ncansp.
+;
+; UPDATE 85: for a 32-bit client the frame sits 128 bytes BELOW the
+; fault esp, not right under it. DJGPP's handler copies its 64-byte
+; exception state to fault esp - 92 (a host-locked stack in every
+; other host); right under the fault esp that copy overwrote the
+; frame's return eip, the handler's retf went astray, and a DJGPP
+; program never saw SIGFPE/SIGSEGV (MOS's "Divide by zero error").
 
 e31sslin:				; eax = linear of client ss:(e)sp
 	NLD	ncanss
@@ -10530,6 +10537,26 @@ e31xfind:				; as e31hfind, kind 1 (exception)
 	db	66h
 	ret
 e31xfg1:
+	push	ax			; push eax: UPDATE 85, the client's
+	push	cx			;  "maybe hooked" exception bit at
+	db	0fh,0b6h,0f5h		;  gs:[4400h + client * 4 + exc / 8]
+	shl	si,2			;  shl esi,2 (movzx esi,ch above)
+	mov	al,cl
+	shr	al,3
+	db	0fh,0b6h,0c0h		; movzx eax,al
+	add	si,ax			; add esi,eax
+	and	cl,7
+	mov	ah,1
+	shl	ah,cl			; the exception's bit
+	pop	cx
+	db	67h,65h			; gs:, 16-bit addressing
+	test	byte ptr [si+4400h],ah
+	pop	ax
+	jnz	e31xfsc			; maybe: scan
+	stc				; never hooked by this client
+	db	66h
+	ret
+e31xfsc:
 	xor	si,si
 e31xflp:
 	db	67h
@@ -10621,14 +10648,17 @@ e310203:
 	jb	e0203a
 	db	66h
 	jmp	e31bad
+e0203ut:				; UPDATE 85: e0203u out of short range
+	db	66h
+	jmp	e0203u
 e0203a:
 	NLDW	ncavcx
 	db	66h,67h
 	cmp	ax,ss:[stubsel16]
-	je	e0203u
+	je	e0203ut
 	db	66h,67h
 	cmp	ax,ss:[stubsel32]
-	je	e0203u
+	je	e0203ut
 	EAXI	25h,0fff8h,0
 	db	66h
 	cmp	ax,gdtlen
@@ -10649,6 +10679,23 @@ e0203x:
 	db	66h
 	jmp	e31bad
 e0203s:
+	push	si			; push esi: UPDATE 85, set the client's
+	push	ax			;  bit for this exception (only ever
+	push	cx			;  set; cidstart clears an id's bits)
+	db	0fh,0b6h,0f5h		; movzx esi,ch
+	shl	si,2			; shl esi,2
+	mov	al,cl
+	shr	al,3
+	db	0fh,0b6h,0c0h		; movzx eax,al
+	add	si,ax			; add esi,eax
+	and	cl,7
+	mov	ah,1
+	shl	ah,cl
+	db	67h,65h
+	or	byte ptr [si+4400h],ah
+	pop	cx
+	pop	ax
+	pop	si
 	db	67h
 	db	65h			; gs: (UPDATE 73)
 	mov	byte ptr [si+phooktab],1
@@ -10747,10 +10794,12 @@ einxdl:					; si = hook entry
 	jz	einxd16
 
 	NLD	ncansp			; 32-bit: 8 dwords
-	db	83h,0e8h,20h		; sub eax,32
+	db	2dh			; sub eax,0A0h: UPDATE 85, the frame 128
+	dw	0a0h,0			;  bytes below the fault esp (see einxdl)
 	NST	ncansp
 	NLD	ncabufer+12
-	db	83h,0e8h,20h
+	db	2dh			; sub eax,0A0h
+	dw	0a0h,0
 	mov	di,ax			; mov edi,eax
 	db	0b8h			; mov eax,401h
 	dw	401h,0
@@ -10767,7 +10816,8 @@ einxdl:					; si = hook entry
 	NLD	ncanflag
 	db	89h,47h,14h
 	NLD	ncansp
-	db	83h,0c0h,20h		; add eax,32: sp at the fault
+	db	05h			; add eax,0A0h: sp at the fault
+	dw	0a0h,0
 	db	89h,47h,18h
 	NLD	ncanss
 	db	89h,47h,1ch
@@ -13750,7 +13800,7 @@ cslp:
 	cmp	ecx,128
 	jb	cslp
 	xor	ecx,ecx			; none free: untagged session
-	jmp	short csset
+	jmp	csset
 csgot:
 	mov	eax,edx
 	inc	eax
@@ -13780,6 +13830,11 @@ csgot:
 	add	edi,dword ptr ss:[hooklin]
 	add	edi,DPHKN*12+1000h
 	stosd				; eax is still 0
+	stosd
+	mov	edi,ecx			; UPDATE 85: and no exception hooked:
+	shl	edi,2			;  4 bytes at gs:[4400h + id*4]
+	add	edi,dword ptr ss:[hooklin]
+	add	edi,DPHKN*12+1400h
 	stosd
 	pop	eax
 	pop	edi
