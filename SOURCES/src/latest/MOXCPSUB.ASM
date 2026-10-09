@@ -98,6 +98,9 @@ mjs 08/12/92	corrected bug in signon where the wrong segment override
 
 mjs 09/17/92	modified getsetclass to supply targdrv to id4f31
 
+UPDATE 87 2026-10-09	hibin2dec: the remainder after the leading billions
+		digit keeps its leading zeros ("1,074,117,183").
+
 ======================================================================^
 
 include moxcpdat.inc			; data declarations
@@ -1505,8 +1508,26 @@ hiok3:
 	int	21h
 	pop	dx
 	pop	ax
-	pop	bp
+	push	bx			; (bin2dec moves bx)
+	push	cx
 	call	bin2dec
+	pop	cx
+	pop	bx
+	or	bp,bp			; UPDATE 87: after a leading digit the
+	jz	hiok5			;  remainder keeps its leading zeros
+	push	bx			;  ("1,074,117,183", was "1, 74,117,183")
+	push	cx
+hiok4:
+	cmp	byte ptr [bx],' '
+	jne	hiok4a
+	mov	byte ptr [bx],'0'
+hiok4a:
+	dec	bx
+	loop	hiok4
+	pop	cx
+	pop	bx
+hiok5:
+	pop	bp
 	ret
 hibin2dec endp
 

@@ -526,7 +526,10 @@ SAH 09/18/92    Change function 4ah so that it some one trys to resize
 		
 UPDATE 84 2026-10-08	exec, exepack pad: the block allocated so that the
 		program loads at 1000h was owned by the parent and never
-		freed; now owned by the new program.
+		freed; now owned by the new program.
+
+UPDATE 87 2026-10-09	exec writes the program name into bytes 8-15 of its
+		mcb, as DOS 4+ does (MEM /U, /C, /FULL showed garbage).
 
 =======================================================================^
 
@@ -4260,6 +4263,7 @@ ff_chk:
 ;======================================================================
 fun4bpsp proc near
 	assume	ds:nothing, es:nothing, ss:tcb
+	call	f4bname			; UPDATE 87: program name into the mcb
 	push	ds
 	lds	si,[prmblk]		; get pointer to passed parms
 	lds	si,[si+2]		; get pointer to command line
@@ -4375,6 +4379,82 @@ skipfcb2:
 	pop	dx
 	ret
 fun4bpsp endp
+
+;======================================================================
+;,fs
+; f4bname - program name into the program's memory block (UPDATE 87)
+;
+; As DOS 4+ does: bytes 8-15 of the mcb before the psp hold the file
+; name without path and extension, upper case, zero-padded. MEM and
+; similar tools show it. Was left as whatever was in memory.
+;
+; in:	[pathstr], [pgmseg] (exec locals)
+;
+; out:	all registers preserved
+;
+;,fe
+;======================================================================
+f4bname proc near
+	assume	ds:nothing, es:nothing, ss:tcb
+	push	ax
+	push	cx
+	push	si
+	push	di
+	push	ds
+	push	es
+	mov	ax,[pgmseg]
+	dec	ax
+	mov	es,ax			; the mcb
+	mov	ax,ss
+	mov	ds,ax
+	lea	si,[pathstr]
+	mov	di,si			; start of the name part
+f4bn1:
+	lodsb
+	or	al,al
+	jz	f4bn2
+	cmp	al,'\'
+	je	f4bn1a
+	cmp	al,'/'
+	je	f4bn1a
+	cmp	al,':'
+	jne	f4bn1
+f4bn1a:
+	mov	di,si			; after the separator
+	jmp	short f4bn1
+f4bn2:
+	mov	si,di
+	mov	di,8
+	mov	cx,8
+f4bn3:
+	lodsb
+	or	al,al
+	jz	f4bn4
+	cmp	al,'.'
+	je	f4bn4
+	cmp	al,'a'
+	jb	f4bn3a
+	cmp	al,'z'
+	ja	f4bn3a
+	sub	al,'a'-'A'
+f4bn3a:
+	mov	es:[di],al
+	inc	di
+	loop	f4bn3
+	jmp	short f4bn5
+f4bn4:
+	mov	byte ptr es:[di],0	; pad
+	inc	di
+	loop	f4bn4
+f4bn5:
+	pop	es
+	pop	ds
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	ret
+f4bname endp
 
 ;--------------------- error handler  ----------------------
 

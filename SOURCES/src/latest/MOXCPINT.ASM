@@ -191,6 +191,10 @@ rsr	05/04/92 added rmdir for roel jansen. (re badmouthing fax)
 mjs 09/17/92	added code to copy command to set targdrv.
 		cleaned up module.
 
+UPDATE 87 2026-10-09	dir: file sizes of 1,000,000,000 bytes and more are
+		shown in KB (bin2dec overflowed: "Divide by zero error"),
+		the bytes total uses hibin2dec like the free space.
+
 ======================================================================^
 
 include moxcpdat.inc			; data declarations
@@ -2725,6 +2729,23 @@ cdr42:
 	mov	bx,dtaaddr+36
 	mov	ax,[bx]			; convert file size value
 	mov	dx,[bx+2]
+	cmp	dx,3b9ah		; UPDATE 87: 1,000,000,000 or more does
+	jb	cdr42s			;  not fit bin2dec (divide overflow):
+	ja	cdr42k			;  show it in KB, "1945600K"
+	cmp	ax,0ca00h
+	jb	cdr42s
+cdr42k:
+	mov	cx,10			; bytes / 1024
+cdr42d:
+	shr	dx,1
+	rcr	ax,1
+	loop	cdr42d
+	lea	bx,[workbuf+21]
+	mov	cx,8
+	call	bin2dec
+	mov	byte ptr [workbuf+22],'K'
+	jmp	cdr43
+cdr42s:
 	lea	bx,[workbuf+22]
 	mov	cx,9
 	call	bin2dec
@@ -3595,7 +3616,17 @@ cdr52:
 	mov	cx,9
 	mov	ax,word ptr [dtotbytes]
 	mov	dx,word ptr [dtotbytes+2]
+	cmp	dx,3b9ah		; UPDATE 87: 1,000,000,000 or more:
+	jb	cdrtot1			;  hibin2dec (bin2dec would overflow);
+	ja	cdrtot2			;  less: bin2dec as before (same width)
+	cmp	ax,0ca00h
+	jb	cdrtot1
+cdrtot2:
+	call	hibin2dec
+	jmp	short cdrtot3
+cdrtot1:
 	call	bin2dec
+cdrtot3:
 	call	cdr43x
 	lea	dx,[workbuf]
 	call	dispstr

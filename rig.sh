@@ -189,9 +189,18 @@ sbtype=none
 gus=false
 EOF
 
+	# HDIMG=file: attach a hard disk image (CHS from HDGEOM, default
+	# 512,63,255,260) as BIOS disk 80h, then boot the floppy
+	local BOOTARG="$STATE_DIR/boot.img"
+	if [ -n "${HDIMG:-}" ]; then
+		printf '\n[autoexec]\nimgmount 2 %s -t hdd -fs none -size %s\nimgmount a %s -t floppy\nboot -l a\n' \
+			"$HDIMG" "${HDGEOM:-512,63,255,260}" "$STATE_DIR/boot.img" >>"$STATE_DIR/dosbox.conf"
+		BOOTARG=""
+	fi
+
 	DISPLAY="$DISPLAY_NUM" SDL_AUDIODRIVER=dummy setsid nohup \
 		"$DOSBOX" --noprimaryconf --nolocalconf -conf "$STATE_DIR/dosbox.conf" \
-		"$STATE_DIR/boot.img" >"$STATE_DIR/dosbox.log" 2>&1 &
+		${BOOTARG:+"$BOOTARG"} >"$STATE_DIR/dosbox.log" 2>&1 &
 	sleep 1
 	PID="$(pgrep -n -f "$STATE_DIR/dosbox.conf")"
 	printf '%s' "$PID" >"$STATE_DIR/dosbox.pid"
