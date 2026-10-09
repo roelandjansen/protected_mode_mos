@@ -524,6 +524,10 @@ SAH 09/18/92    Change function 4ah so that it some one trys to resize
 		a freed mcb...it will put the owner as current psp
 		(Corrected in UPDAT501.SYS Version 1.13)
 		
+UPDATE 84 2026-10-08	exec, exepack pad: the block allocated so that the
+		program loads at 1000h was owned by the parent and never
+		freed; now owned by the new program.
+
 =======================================================================^
 
 .xlist
@@ -3832,6 +3836,7 @@ f4bx3:
 	mov	ah,48h
 	call	sim21			; force enviroment to be bigger
 	jc	f4berr1
+	push	ax			; UPDATE 84: the pad block's segment
 
 ; allocate a new block for the psp.  this block will evenutally
 ; be enlarged to hold the program's code and data
@@ -3839,9 +3844,22 @@ f4bx3:
 	mov	bx,12h
 	mov	ah,48h
 	call	sim21
+	pop	bx			; UPDATE 84 (flags kept)
 	jc	f4berr1
 	or	[rsflags],rs_pgm	; program block allocated
 	mov	[pgmseg],ax
+
+; UPDATE 84: the pad block belongs to the new program, so it is freed
+; when the program ends; owned by the parent (the shell) it stayed
+; allocated, and every later program loaded at 1000h
+
+	push	es
+	dec	bx
+	mov	es,bx
+	assume	es:mbseg
+	mov	[mbowner],ax
+	assume	es:nothing
+	pop	es
 
 ; restore the psp data
 

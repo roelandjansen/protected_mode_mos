@@ -1,7 +1,7 @@
-# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 82, 2026-10-08)
+# PC-MOS/386 v5.01 — DPMI host: current state (after UPDATE 84, 2026-10-09)
 
 Put this at the top of `HANDOVER.md`. It is the state to start from; the
-UPDATE sections below it are the history and the reasons. UPDATE 62-82
+UPDATE sections below it are the history and the reasons. UPDATE 62-84
 are summarised here.
 
 ## What works
@@ -19,6 +19,13 @@ are summarised here.
   instructions.
 - **DOS/4GW's clock** (UPDATE 79): int 21h 2Ch / `time()` correct.
 - **.COM clients after another client** (UPDATE 78): full 64 KB DS.
+- **Program space** (UPDATE 84): the first EXEPACK-style EXE (e.g. a
+  DJGPP stub) no longer leaves a 13.6 KB block owned by the shell;
+  programs keep loading at the lowest address.
+- **Graphics** (`LFBDRAW`): VBE 640x480 LFB through 0800h, same pixels
+  through the banked A000h window.
+- **16-bit clients** (`HI16`, `P16`): int 21h plus ten int 31h service
+  groups, including a 16-bit exception frame.
 
 ## Files and builds
 
@@ -26,11 +33,11 @@ are summarised here.
 | --- | --- | --- | --- |
 | `_386.ASM` | `$386.SYS` -- memory manager + the DPMI host | 37,584 | `22081d7ac5ca` |
 | `_DPMI.ASM`, `_DPMI.INC` | `$DPMI.SYS` -- front end (int 2Fh 1687h, `GoProtect`) | 5,149 | `f84240795eaa` |
-| `MOSFUN39.ASM` | in `$$MOS.SYS` -- commit on a character device (UPDATE 66) | | |
+| `MOSFUN39.ASM`, `MOSFUTIL.ASM`, `MOSFUN00.ASM` | `$$MOS.SYS` -- commit on a character device (UPDATE 66); compat read vs deny-write sharing (UPDATE 83); EXEPACK pad owned by the program (UPDATE 84) | 130,033 | `fd17ceb5cbb7` (66 alone: `16fc9d34ac6c`, 83: `2ec22df3de51`) |
 | `ADDTASK.ASM` | `ADDTASK.COM` | 2,854 | |
 | `DPMI32.ASM` | `DPMI32.COM` -- the kit's 32-bit client | | |
 
-Only `_386.ASM` changed in UPDATE 75-82. The build is reproducible: two
+`_386.ASM` changed in UPDATE 75-82, the kernel in 83 (`MOSFUTIL.ASM`) and 84 (`MOSFUN00.ASM`). The tarball's `latest/$$MOS.SYS` (129,249 bytes) is an older build: boot the documented one. The build is reproducible: two
 builds in two containers gave the same md5.
 
 ## How the host is built (orientation)
@@ -96,7 +103,9 @@ with an echo check (`kt.sh`: xdotool `type` drops characters).
    WAHELLO`, DPMI32 **after** another client (UPDATE 78), `W4TIME`
    (UPDATE 79), `Q300` / `Q900` (0300h, 0900h-0902h), `PM21` / `PMFN` /
    `PMDEF` (UPDATE 80; on a floppy with room), `PMPHYS` (UPDATE 81),
-   `HI16` / `PM38` / `PMWATCH` (UPDATE 82), `MAXTASK` (596 KB),
+   `HI16` / `PM38` / `PMWATCH` (UPDATE 82), `SHARE` (UPDATE 83),
+   Q300 then DPMI32 = `es base:0000CAA0` (UPDATE 84), `LFBDRAW`, `P16`,
+   `MAXTASK` (596 KB),
    `DJBENCH n`.
 
 A DOS/32A child started through `system()` must be `dos32a NAME`: bare,
@@ -119,9 +128,12 @@ The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
 
 | what | where | notes |
 | --- | --- | --- |
-| Tasks starting the **same EXE** at once: `can't open`, rc 255 | kernel: `openfile` / `chkacc` | EXEC opens 3D20h (deny-write) and is switched to compat only if the *first* open in `gfbtfb` is compat; the DJGPP stub opens 3D00h (compat). Ideas: (A) `openfile` walks the whole chain while `tcbexec3d` is set; (B) `chkacc` `ch13` lets a compat read-only open coexist with deny-write/deny-none |
-| Shell keeps its **reloaded transient** low: 13.6 KB less program space after the first big program | `$$SHELL.SYS` | not a leak (watchpoint-proven); reload high like COMMAND.COM would keep it |
-| DOS/32A warning 9003, INT 22h modified after a nested EXEC | kernel EXEC/terminate | same on UPDATE 74; compare with plain DOS + HDPMI32 |
+| One `GO.BAT` run in twelve (UPDATE 83, first run): task 2 (DOS/4GW W4STEST) stuck after the banner | not attributed | 0 in 6 on UPDATE 84, 0 in 5 on the unchanged kernel; watch for it |
+
+## Closed in UPDATE 84
+
+- "Shell transient reloaded low": wrong diagnosis; it was EXEC's EXEPACK pad, fixed.
+- DOS/32A 9003 after a nested EXEC: same on plain DOS, no change.
 
 ## Open ideas
 
@@ -144,6 +156,9 @@ The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
   `rig/state`: link the pid file.
 - Guest memory under paging: read through `MEM_BlockRead` from gdb, not
   `MemBase + linear`. GDT at linear `1FA0h`.
+- Typing: lowercase only with `rig.sh key`, one key per call; uppercase
+  commands lost letters (`DPMI32` -> `PM32`). Redirection (`>`) does not
+  type reliably: read the screen instead.
 - Background processes (the emulator) do not survive the end of a
   working turn: boot and measure in one go.
 
@@ -169,3 +184,5 @@ The INT/IRET log can be opened the same way: `set var pmt_win_size=N`,
 | 80 | host int 21h translation: DTA (1Ah/2Fh/4Eh/4Fh) and 42h by DOS conventions; per-client DTA in hook page 5 |
 | 81 | int 31h 0800h physical address mapping (identity, above RAM's linear space) |
 | 82 | 16-bit clients: int 21h high words cleared (was a host crash); 5Ch DOS conventions; int 38h 02h/04h ES; tidy-up |
+| 83 | kernel `chkacc`: compat read opens coexist with deny-write / deny-none (DJGPP "can't open") |
+| 84 | kernel EXEC: the EXEPACK pad block is owned by the new program (13.6 KB lost after the first DJGPP program). INT 22h / DOS/32A 9003 is standard DOS behaviour (`INT22-9003.md`) |
