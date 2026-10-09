@@ -1,0 +1,73 @@
+30h        major=5 minor=0 oem=FF
+3306h      al=06 true=5.0 rev=0 flags=10
+3305h      al=05 boot drive=3
+3300h      break=0
+3700h      al=00 switchar=/
+54h        verify=0
+19h        drive=2
+0Eh        lastdrive count=26
+psp        51h==62h:yes psp int20=yes
+34h        indos ptr nonzero=yes
+52h        first mcb=set
+mcb        chain ok, 6 blocks
+3800h      cf=0 code=1 datefmt=0 cur=$ thou=, dec=. date=/ time=:
+6501h      cf=0 id=01 len=38 country=1 cp=437
+6520h      cf=0 upcase('a')=A
+6601h      cf=0 ax=6601 bx=01B5 cx=0000 dx=01B5
+3Ch        cf=0 ax=0005 bx=0000 cx=0000 dx=02D9
+40h        cf=0 ax=000A bx=0005 cx=000A dx=02E5
+4202h -2   cf=0 ax=0008 bx=0005 cx=FFFF dx=0000
+3Fh @3     cf=0 n=4 data=3456
+45h dup    cf=0 ax=0006 bx=0005 cx=0000 dx=0000
+4201h dup  cf=0 ax=0007 bx=0006 cx=0000 dx=0000
+5700h      cf=0 time=A800 date=5D49
+5701h      cf=0 time=6000 date=5949
+68h commit cf=0 ax=6800 bx=0005 cx=0000 dx=0000
+5Ch lock   cf=0 ax=0000 bx=0005 cx=0000 dx=0000
+5Ch unlock cf=0 ax=0000 bx=0005 cx=0000 dx=0000
+4300h      cf=0 attr=0020
+4301h ro   cf=0 attr=0001
+3D01h ro   cf=0 ax=0005 (want cf=1 ax=0005)
+56h ren    cf=0 ax=5600 bx=0000 cx=0000 dx=02D9
+3Dh nofile cf=1 ax=0002 bx=0000 cx=0000 dx=03E6
+59h        err=0002 class=08 action=01 locus=00
+41h nofile cf=1 ax=0002 bx=0000 cx=0000 dx=03E6
+5Bh exists cf=1 ax=0050 bx=0000 cx=0000 dx=03D6
+6Ch open   cf=0 ax=0006 action=1 (want 1 opened)
+6Ch create cf=0 ax=0006 action=2 (want 2 created)
+6Ch exists cf=1 ax=0050 (want cf=1 ax=0050)
+5Ah        cf=0 name=set
+60h        cf=0 name=\SW2.TMP
+39h md     cf=0 ax=0005 bx=0000 cx=0000 dx=04F3
+3Bh cd     cf=0 ax=0000 bx=0000 cx=0000 dx=04F3
+47h        cf=0 cwd=SWDIR
+3Ah rd     cf=0 ax=0005 bx=0000 cx=0000 dx=04F3
+3Ah again  cf=1 ax=0003 bx=0000 cx=0000 dx=04F3
+4Eh label  cf=0 attr=08
+4E/4Fh     entries>0=yes end ax=0012 (want 0012)
+4Eh none   cf=1 ax=0012 bx=0000 cx=0000 dx=058B
+48h max    cf=1 ax=0008 largest=set
+48h 16p    cf=0 ax=07F6 bx=0010 cx=0000 dx=0000
+4Ah grow   cf=0 ax=07F6 bx=0020 cx=0000 dx=0000
+49h        cf=0 ax=4900 bx=0020 cx=0000 dx=0000
+49h again  cf=0 ax=4900 bx=0020 cx=0000 dx=0000
+5800h      strategy=0
+5801h      cf=0 strategy=2
+5802h umb  cf=0 ax=5800 bx=0000 cx=0000 dx=0000
+67h 40     cf=0 ax=6700 bx=0028 cx=0000 dx=0000
+4400h stdin cf=0 ax=80D3 bx=0000 cx=0000 dx=80D3
+4400h stdout cf=0 ax=0002 bx=0001 cx=0000 dx=0002
+4408h def  cf=0 ax=0001 bx=0000 cx=0000 dx=0000
+4409h def  cf=0 ax=0300 bx=0000 cx=0000 dx=0802
+440Eh def  cf=0 ax=0700 bx=0000 cx=0000 dx=0000
+2Ah        year>=2024=yes dow<7=yes
+2Bh bad    al=FF (want FF)
+2Ch        h<24=yes
+2Dh bad    al=FF (want FF)
+36h        spc=32 avail>0=yes bps=512
+36h bad    ax=0020 (want FFFF)
+2F 4300h   xms=80
+2F 1600h   windows=00
+2F 1687h   dpmi ax=1687
+7147h      cf=1 ax=7100 (LFN: 7100h = not supported)
+SWEEP DONE

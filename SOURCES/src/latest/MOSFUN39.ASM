@@ -222,6 +222,12 @@ mjs 09/17/92	added security check to i21f3b.
 mjs 09/18/92	added a call to findphdl to the start of mosfun68
 		(per sah).
 
+UPDATE 87 2026-10-09	functions 65h (extended country info, upper case
+		tables) and 66h (code page 437) implemented; 5802h/5803h
+		return "no UMB link" without error, as DOS 5; function
+		60h is TRUENAME (from mostemp, where it returned the last
+		opened file name).
+
 =======================================================================^
 
 .xlist
@@ -3202,15 +3208,20 @@ f58_1:
 
 ; get upper memory link
 
-f58_2:
-	mov	[tal],0
-	or	[tflag],carry
+f58_2:					; UPDATE 87: as DOS 5 without UMBs:
+	mov	[tal],0			;  al = 0 (not linked), no error
+	and	[tflag],not carry	;  (was: carry set)
 	jmp	short f58x2
 
 ; set upper memory link
 
 f58_3:
-	mov	[tax],1
+	cmp	[tbx],0			; unlink: nothing to do, ok
+	jne	f58_3a
+	and	[tflag],not carry
+	jmp	short f58x2
+f58_3a:
+	mov	[tax],1			; link: no UMBs (error 1, as DOS)
 	or	[tflag],carry
 	jmp	short f58x2
 
@@ -3798,29 +3809,334 @@ lundef	locklen
 lundef	lockofs
 lendp	mosfun5c
 
-	subttl mosfun65,66 - unsupported code page functions
+	subttl mosfun60 - truename
+	page
+;======================================================================
+; UPDATE 87: function 60h is TRUENAME since DOS 3.0: the canonical
+; name of the path at ds:si, written to es:di as "D:\DIR\NAME.EXT"
+; (upper case, "." and ".." resolved, the current directory of the
+; drive put in front of a relative path). The old function 60h (mostemp)
+; returned the last opened file name and ignored ds:si; for a program
+; that passes the name of the file it
+; just opened (RM-COBOL), the result is the same file, fully
+; qualified. No SUBST/JOIN/network forms. Error 0Fh (invalid drive)
+; for a bad drive.
+;
+	assume	ds:grp,ss:tcb,es:nothing
+	public mosfun60
+mosfun60 proc	near
+	mov	es,[tes]
+	mov	di,[tdi]
+	mov	ds,[tds]
+	mov	si,[tsi]
+	cld
+
+; drive
+
+	cmp	byte ptr [si+1],':'
+	jne	mf60cur
+	lodsb
+	callmos1 caps
+	sub	al,'A'
+	inc	si			; past the ':'
+	jmp	short mf60drv
+mf60cur:
+	push	si
+	mov	ah,19h			; current drive
+	callmos1 sim21
+	pop	si
+mf60drv:
+	mov	dl,al			; 0 = A
+	add	al,'A'
+	stosb
+	mov	al,':'
+	stosb
+	mov	al,'\'
+	stosb
+	mov	bx,di			; bx = just after the root '\'
+
+; relative path: the drive's current directory first
+
+	mov	al,[si]
+	cmp	al,'\'
+	je	mf60abs
+	cmp	al,'/'
+	je	mf60abs
+	push	ds
+	push	si
+	push	es
+	push	di
+	push	es
+	pop	ds
+	mov	si,di			; ds:si = es:di (after "D:\")
+	inc	dl			; 1 = A for 47h
+	mov	ah,47h
+	callmos1 sim21
+	pop	di
+	pop	es
+	pop	si
+	pop	ds
+	ljc	mf60bad
+mf60cwd:				; to the end of the directory
+	cmp	byte ptr es:[di],0
+	je	mf60cwd1
+	inc	di
+	jmp	short mf60cwd
+mf60cwd1:
+	cmp	di,bx			; root: nothing to separate
+	je	mf60comp
+	mov	al,'\'
+	stosb
+	jmp	short mf60comp
+mf60abs:
+	inc	si
+
+; components
+
+mf60comp:
+	mov	al,[si]
+	or	al,al
+	jz	mf60end
+	cmp	al,'\'			; empty component ("\\")
+	je	mf60skip
+	cmp	al,'/'
+	je	mf60skip
+	cmp	al,'.'
+	jne	mf60name
+	mov	al,[si+1]
+	or	al,al
+	jz	mf60dot
+	cmp	al,'\'
+	je	mf60dot
+	cmp	al,'/'
+	je	mf60dot
+	cmp	al,'.'
+	jne	mf60name
+	mov	al,[si+2]		; ".."
+	or	al,al
+	jz	mf60up
+	cmp	al,'\'
+	je	mf60up
+	cmp	al,'/'
+	jne	mf60name
+mf60up:					; drop the last component
+	add	si,2
+	cmp	di,bx
+	je	mf60comp		; already at the root
+	dec	di			; the '\' after it
+mf60up1:
+	cmp	di,bx
+	je	mf60comp
+	cmp	byte ptr es:[di-1],'\'
+	je	mf60comp
+	dec	di
+	jmp	short mf60up1
+mf60dot:				; "."
+	inc	si
+	jmp	short mf60comp
+mf60skip:
+	inc	si
+	jmp	short mf60comp
+mf60name:				; copy one component, upper case
+	lodsb
+	or	al,al
+	jz	mf60last
+	cmp	al,'\'
+	je	mf60sep
+	cmp	al,'/'
+	je	mf60sep
+	callmos1 caps
+	cmp	al,05h			; caps turns e5h into 05h
+	jne	mf60n1
+	mov	al,0e5h
+mf60n1:
+	stosb
+	jmp	short mf60name
+mf60sep:
+	mov	al,'\'
+	stosb
+	jmp	short mf60comp
+mf60last:
+	dec	si
+mf60end:
+	cmp	di,bx			; drop a trailing '\' (not the root's)
+	je	mf60z
+	cmp	byte ptr es:[di-1],'\'
+	jne	mf60z
+	dec	di
+mf60z:
+	xor	al,al
+	stosb
+	and	[tflag],not carry
+	ret
+mf60bad:
+	mov	[tax],0fh		; invalid drive
+	or	[tflag],carry
+	ret
+mosfun60 endp
+
+	subttl mosfun65,66 - extended country information, code page
 	page
 ;======================================================================
 ;,fs
-; mosfun65,66 - unsupported code page functions
+; mosfun65 - get extended country information (UPDATE 87)
 ;
-; functions 65 and 66 currently deal with code pages for international
-; support.  mos does not currently implement code pages, so these
-; two functions are presently unsupported.
+; Was unsupported (invalid function). PC-MOS has one code page (437),
+; so the tables are fixed:
 ;
-; in:	
+;	01h  es:di <- 01h, dw size 38, dw country, dw 437, then the
+;	     34 bytes of function 38h; cx = 41 (needs cx >= 41)
+;	02h, 04h, 05h, 06h, 07h (table pointers): not provided, invalid
+;	     function (kernel space: UPDATE 87 keeps the low area size)
+;	20h  dl = upper case of dl
+;	21h  ds:dx, cx bytes to upper case
+;	22h  ds:dx asciiz to upper case
+;	23h  dl yes/no: ax = 0 no, 1 yes, 2 neither
 ;
-; out:	
+; mosfun66 - code page: 01h get (bx = dx = 437), 02h set (437 only)
 ;
 ;,fe
 ;======================================================================
 	assume	ds:grp,ss:tcb,es:nothing
-public	mosfun65, mosfun66
-mosfun65:
-mosfun66:
+
+;
+; f65upc: al -> upper case al (code page 437: caps, without its
+; e5h -> 05h directory-entry substitution)
+;
+
+f65upc	proc	near
+	cmp	al,0e5h
+	je	f65u1
+	callmos1 caps
+f65u1:
+	ret
+f65upc	endp
+
+public	mosfun65
+mosfun65 proc near
+	mov	al,[tal]
+	cmp	al,1
+	je	f6501
+	cmp	al,20h
+	lje	f6520
+	cmp	al,21h
+	lje	f6521
+	cmp	al,22h
+	lje	f6522
+	cmp	al,23h
+	jne	f65bad
+	jmp	f6523
+f65bad:
 	mov	[tax],error_invalid_function
 	or	[tflag],carry
 	ret
+
+; 01h: header, then function 38h's 34 bytes into es:di+7
+
+f6501:
+	cmp	[tcx],41
+	jb	f65bad
+	mov	es,[tes]
+	mov	di,[tdi]
+	push	ds
+	mov	ds,[tes]
+	mov	dx,di
+	add	dx,7
+	mov	ax,3800h		; current country
+	mov	bx,[tdx]
+	cmp	bx,0ffffh
+	je	f65011
+	mov	ax,38ffh		; the one in bx
+f65011:
+	callmos1 sim21
+	pop	ds
+	jc	f65bad
+	cld
+	mov	al,1
+	stosb
+	mov	ax,38
+	stosw
+	mov	ax,bx			; country code
+	stosw
+	mov	ax,437
+	stosw
+	mov	[tcx],41
+	jmp	short f65ok
+
+f6520:
+	mov	al,[tdl]
+	call	f65upc
+	mov	[tdl],al
+	jmp	short f65ok
+
+f6521:					; cx bytes at ds:dx
+	mov	cx,[tcx]
+	jcxz	f65ok
+	mov	es,[tds]
+	mov	di,[tdx]
+f65211:
+	mov	al,es:[di]
+	call	f65upc
+	mov	es:[di],al
+	inc	di
+	loop	f65211
+	jmp	short f65ok
+
+f6522:					; asciiz at ds:dx
+	mov	es,[tds]
+	mov	di,[tdx]
+f65221:
+	mov	al,es:[di]
+	or	al,al
+	jz	f65ok
+	call	f65upc
+	mov	es:[di],al
+	inc	di
+	jmp	short f65221
+
+f6523:					; yes / no
+	mov	al,[tdl]
+	call	f65upc
+	xor	bx,bx			; 0 = no
+	cmp	al,'N'
+	je	f65231
+	inc	bx			; 1 = yes
+	cmp	al,'Y'
+	je	f65231
+	inc	bx			; 2 = neither
+f65231:
+	mov	[tax],bx
+
+f65ok:
+	and	[tflag],not carry
+	ret
+mosfun65 endp
+
+public	mosfun66
+mosfun66 proc near
+	mov	al,[tal]
+	cmp	al,1
+	jne	f6602
+	mov	[tbx],437		; active code page
+	mov	[tdx],437		; system code page
+	and	[tflag],not carry
+	ret
+f6602:
+	cmp	al,2
+	jne	f66bad
+	cmp	[tbx],437
+	jne	f66nf
+	and	[tflag],not carry
+	ret
+f66nf:
+	mov	[tax],error_file_not_found	; code page not available
+	or	[tflag],carry
+	ret
+f66bad:
+	mov	[tax],error_invalid_function
+	or	[tflag],carry
+	ret
+mosfun66 endp
 
 	subttl mosfun67 - set handle count
 	page

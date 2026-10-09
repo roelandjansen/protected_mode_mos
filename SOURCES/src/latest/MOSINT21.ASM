@@ -206,6 +206,8 @@ mjs 12/19/91	int25 and int26 no longer support the mlg calling
 
 mjs 08/18/92	clean up segment declarations
 
+UPDATE 87 2026-10-09	function 60h moves to the far (mo2) table: TRUENAME.
+
 =======================================================================^
 
 .xlist
@@ -391,7 +393,7 @@ vct21	label	word
 	irp	fn,<xx,xx,52,53,54,55,fr,fr,fr,fr,fr,fr,fr,5d,5e,5f>
 	extvct	fn
 	endm
-	irp	fn,<60,61,xx,63,xx,fr,fr,fr,fr,xx,xx,xx,fr>
+	irp	fn,<fr,61,xx,63,xx,fr,fr,fr,fr,xx,xx,xx,fr>	; 60h far: UPDATE 87
 	extvct	fn
 	endm
 lnvct21 equ	$-vct21
@@ -415,7 +417,7 @@ far21	label	word
 	irp	fn,<fx,fx,fx,fx,fx,fx,56,57,58,59,5a,5b,5c,fx,fx,fx>
 	extfar	fn
 	endm
-	irp	fn,<fx,fx,fx,fx,fx,65,66,67,68,fx,fx,fx,6c>>
+	irp	fn,<60,fx,fx,fx,fx,65,66,67,68,fx,fx,fx,6c>>
 	extfar	fn
 	endm
 

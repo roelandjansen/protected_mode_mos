@@ -125,6 +125,9 @@ SAH 07/22/92    Found that we need to save bx during INT 29h handler
 
 mjs 08/18/92	clean up segment declarations
 
+UPDATE 87 2026-10-09	function 60h (was "last open file name") removed;
+		it is TRUENAME in mosfun39 now (mosseg was full).
+
 =======================================================================^
 
 .xlist
@@ -908,50 +911,10 @@ mosfun5f	proc	near
 	ret
 mosfun5f	endp
 
-	 subttl mosfun60 - get last open file name (undocumented)
-	 page
-;======================================================================
-;,fs
-; mosfun60 - get last open file name (undocumented)
 ;
-; the following is currently knowned implementation of
-; undocmomented function 60 which from information from pd doc
-; about undocumented call returns the current drive and
-; and directory into address specify by es:di.  rm-cobol 85 uses
-; this function.
-; after investigation function 60 seems to return the last open
-; file by system, here is what i observed:
+; mosfun60 (TRUENAME) is in mosfun39.asm, segment mo2 (UPDATE 87:
+; mosseg had no room left).
 ;
-; task open file with function 3d and later (the task)
-; converted the filename at ds:dx of open function to full path
-; when function 60 is called, it seems to return the same info
-; stored at ds:dx of the prevous open file.  possiablity trans-
-; lated under pc-networks but i am not sure about it.
-;
-; in:	
-;
-; out:	
-;
-;,fe
-;======================================================================
-	assume ds:grp,es:nothing,ss:tcb
-	public mosfun60
-mosfun60 proc	near
-	mov	di,[tdi]
-	mov	ax,[tes]
-	mov	es,ax
-	lds	si,[tcbopen60]
-mf60loop:
-	lodsb				; get character
-	or	al,al
-	jz	mf60done
-	stosb				; store it in user space
-	jmp	short mf60loop
-mf60done:
-	stosb				; store trailing zero
-	mov	[tax],004ch		; seems to be right (who knows)
-	ret
-mosfun60 endp
 
 	subttl mosfun63 - get dos interim flag
 	page
