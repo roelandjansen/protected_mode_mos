@@ -16,6 +16,11 @@ Two separate problems:
 
 1. **MOS is full** (58 bytes left). Nothing more can go into `mos`;
    it does not cost per-task memory, it only blocks growth.
+   **Worse than the link map says (UPDATE 91):** 24 bytes of padding
+   (MOSSEG 0FFC6h -> 0FFDEh) already make a program with redirected
+   output hang. The link succeeds, and segment #2 ends at 10F700h,
+   inside the HMA. So something else limits `mos` below 0FFDEh; find
+   it first (phase 0) before relying on any `mos` space.
 2. **GRP+MO2 is the low area** ("IO system data", 74K in `MEM`) that
    sits below every task. It grows in 8 KB steps. Today MO2 ends
    about **130 bytes** before the next step.

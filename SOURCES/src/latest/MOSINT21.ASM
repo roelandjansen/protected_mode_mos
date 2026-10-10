@@ -393,7 +393,7 @@ vct21	label	word
 	irp	fn,<xx,xx,52,53,54,55,fr,fr,fr,fr,fr,fr,fr,5d,5e,5f>
 	extvct	fn
 	endm
-	irp	fn,<fr,61,xx,63,xx,fr,fr,fr,fr,xx,xx,xx,fr>	; 60h far: UPDATE 87
+	irp	fn,<fr,61,xx,63,xx,fr,fr,fr,fr,fr,xx,xx,fr>	; 60h, 69h far: UPDATE 87, 91
 	extvct	fn
 	endm
 lnvct21 equ	$-vct21
@@ -417,7 +417,7 @@ far21	label	word
 	irp	fn,<fx,fx,fx,fx,fx,fx,56,57,58,59,5a,5b,5c,fx,fx,fx>
 	extfar	fn
 	endm
-	irp	fn,<60,fx,fx,fx,fx,65,66,67,68,fx,fx,fx,6c>>
+	irp	fn,<60,fx,fx,fx,fx,65,66,67,68,69,fx,fx,6c>>
 	extfar	fn
 	endm
 

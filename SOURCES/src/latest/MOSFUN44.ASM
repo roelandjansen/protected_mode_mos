@@ -145,7 +145,7 @@ ddt	segment
 	extrn	okswt:near
 	extrn	sttax0:near
 
-	public	mosfun44
+	public	mosfun44, mosfun69
 
 if 0 eq 0				; trick public.com
 
@@ -252,6 +252,50 @@ mosf44x:
 mosf44sk:
 	mov	bp,bx
 lendp	mosfun44
+
+	subttl mosfun69 - get/set disk serial number (DOS 4+)
+	page
+;======================================================================
+;,fs
+; mosfun69 - get/set disk serial number (UPDATE 91)
+;
+; same as int 21h 440Dh with cx=0866h (al=0, get) or 0846h (al=1,
+; set) on drive bl: passed on to mosfun44 with the task's al and cx
+; changed, and restored afterwards (unless an error code is in tax).
+;
+; in:	tal = 0 get, 1 set
+;	tbl = drive (0 = default)
+;	tds:tdx -> media id buffer
+;
+; out:	carry bit of tflag set if error, tax = error code
+;
+;,fe
+;======================================================================
+	assume	ds:nothing,es:nothing,ss:tcb
+mosfun69 proc near
+	mov	al,[tal]
+	mov	cx,0866h
+	cmp	al,0
+	je	mf69a
+	mov	cx,0846h
+	cmp	al,1
+	je	mf69a
+	mov	[tal],0ffh		; other subfunctions: invalid function
+	jmp	mosfun44
+mf69a:
+	push	[tcx]
+	push	ax
+	mov	[tcx],cx
+	mov	[tal],0dh
+	call	mosfun44
+	pop	ax
+	pop	[tcx]
+	test	[tflag],carry
+	jnz	mf69x			; tax holds the error code
+	mov	[tal],al
+mf69x:
+	ret
+mosfun69 endp
 
 	subttl ioctl00 - get device information
 	page

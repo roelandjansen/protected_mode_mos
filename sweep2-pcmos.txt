@@ -1,0 +1,58 @@
+2F0100h    al=00
+2F1000h    al=FF
+2F1100h    al=00
+2F1400h    al=00
+2F1600h    al=00
+2F1A00h    al=00
+2F4300h    al=80
+2F4800h    al=00
+2FAD00h    al=00
+2FB700h    al=00
+2F4A10h    al=10
+2F1689h    al=89
+4400 out   cf=0 ax=0000 bx=0001 cx=0000 dx=0000
+4400 file  cf=0 dx&3F=00 dx&C0=00
+4406 file  cf=0 al=00
+4407 file  cf=0 al=FF
+440A file  cf=0 ax=440A dx&8000=0000
+4401 file  cf=1 ax=0001
+6800h      cf=0
+5C00 lock  cf=0 ax=0000
+5C01 unlk  cf=0 ax=0000
+5C01 again cf=1 ax=0021
+5700h      cf=0 time-set=yes
+5701h      cf=0
+5700 back  cf=0 cx=6000 dx=5821
+4408 dflt  cf=0 ax=0000
+4408 Z:    cf=1 ax=0001
+4409 dflt  cf=0 dx&9200=0000
+4409 Z:    cf=1 ax=000F
+440E dflt  cf=0 al=01
+4411 0860  cf=0 ax=4411
+4411 0866  cf=0 ax=4411
+440D 0860  cf=0 ax=0000 devtype=7 bps=512 spc=1 res=1 fats=2 root=224 media=F0
+440D 0866  cf=0 ax=0000 fs=FAT12   
+0866 raw   00 00 05 02 44 25 4E 4F 20 4E 41 4D 45 20 20 20 20 46 41 54 31 32 20 20 20
+440D 0867  cf=1 ax=0016
+36h        cf=0 spc=1 bps=512 clusters=2847 free>0=yes
+36h Z:     ax=FFFF
+1Bh        spc=1 bps=512 clusters=2847 same-as-36h=yes
+1Ch dflt   spc=1 bps=512 clusters=2847
+1Ch Z:     al=FF
+1Fh        al=00 bps=512 spc=1 shift=0 res=1 fats=2 root=224 data=33 maxcl=2848 same=yes
+32h dflt   al=00
+32h Z:     al=FF
+6900h      cf=0 ax=0000 fs=FAT12   
+6900 raw   00 00 05 02 44 25 4E 4F 20 4E 41 4D 45 20 20 20 20 46 41 54 31 32 20 20 20
+6902h      cf=1 ax=0001
+6C create  cf=0 action=2
+6C open    cf=0 action=1
+6C excl    cf=1 ax=0050
+6C trunc   cf=0 action=3
+6C nofile  cf=1 ax=0002
+5Bh new    cf=0
+5Bh again  cf=1 ax=0050
+5Ah temp   cf=0 namelen=10
+4300 nf    cf=1 ax=0002
+5F02h      cf=1 ax=0001
+END
