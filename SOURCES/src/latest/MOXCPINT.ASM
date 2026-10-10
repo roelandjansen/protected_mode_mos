@@ -2485,8 +2485,12 @@ cda5 proc
 cda5 endp
 
 cda14 proc				; mod to full year amount
-	cmp	ax,100
-	ja	cda6
+	cmp	ax,99			; 2-digit year: 80-99 is 19xx,
+	ja	cda6			; 00-79 is 20xx (as MS-DOS)
+	cmp	ax,80
+	jae	cda14a
+	add	ax,100
+cda14a:
 	add	ax,1900
 cda6:
 	ret
