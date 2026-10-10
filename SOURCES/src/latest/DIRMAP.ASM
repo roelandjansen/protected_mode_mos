@@ -694,8 +694,25 @@ Tr6:
 	call	Bin2Dec
 	mov	ax,[Tally]
 	mov	dx,[Tally+2]
+	cmp	dx,05f5h	; 100,000,000 bytes (05F5E100h) or more?
+	jb	Tr6b
+	ja	Tr6a
+	cmp	ax,0e100h
+	jb	Tr6b
+Tr6a:
+	mov	cx,10		; yes: show it in K, as DIR does
+Tr6s:
+	shr	dx,1
+	rcr	ax,1
+	loop	Tr6s
+	mov	byte ptr [WorkBuf+76],'K'
+	lea	bx,[WorkBuf+75]
+	mov	cx,7
+	jmp	short Tr6c
+Tr6b:
 	lea	bx,[WorkBuf+76]
 	mov	cx,8
+Tr6c:
 	call	Bin2Dec
 	mov	word ptr [WorkBuf+77],0a0dh
 	lea	dx,[WorkBuf]

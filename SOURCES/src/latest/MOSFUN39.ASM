@@ -884,7 +884,7 @@ lstring secbuf,<size sectorblk>
 	inc	dx
 	jnz	mosf3ba2		; if not a root of a physical disk
 	mov	dx,[bdbroot]		; get root directory for the disk
-	jmp	short mosf3ba3
+	jmp	short mosf3ba5	; root: no dir entry, no class to check
 	assume	es:dbb
 mosf3ba2:
 	test	[dbbbuf+si+datr],dir
@@ -911,6 +911,7 @@ mosf3ba3:
 ; set new subdir data in cdb
 ; but remember old data in case of error
 
+mosf3ba5:
 	mov	cx,[bdbroot]		; root directory cluster for the real drive
 	mov	[rootclust],cx
 	mov	bl,[bdbid]
