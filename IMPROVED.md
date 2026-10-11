@@ -1,14 +1,16 @@
 # PC-MOS/386 v5.01 -- what has been improved
 
 Summary of the work recorded in `CHANGES.md`, `HANDOVER.md` and
-`UPDATE62.md` .. `UPDATE96.md` (state 20261011). Per item: the update
+`UPDATE62.md` .. `UPDATE97.md` (state 20261011). Per item: the update
 number where the detail lives. UPDATE 90 is not in the archive.
 
 Short version: PC-MOS/386 now has a **working DPMI 0.9 host** (DJGPP,
 DOS/4GW and DOS/32A run real programs, nested and in several tasks at
 once), a new **XMS 3.0 driver**, **disks up to 2 TB addressable via int
 13h extensions** with 2 GB FAT16 partitions, a set of **DOS API
-compatibility fixes**, and **Y2K fixes** in DATE and at boot.
+compatibility fixes**, **Y2K fixes** in DATE and at boot, and files and
+directories made by other systems (FreeDOS, Windows, mtools) no longer
+get a random security class.
 
 ---
 
@@ -102,6 +104,7 @@ compatibility fixes**, and **Y2K fixes** in DATE and at boot.
 | EBR chain assumed packed partitions | 94 |
 | FORMAT beyond 8.4 GB wrote boot sector/FAT at a wrapped CHS address (**data loss**) | 95 |
 | Set device parameters re-read boot sector via CHS -> garbage BPB | 95 |
+| Directory entries written by DOS 7 / Windows / FreeDOS / mtools got a random security class from their creation-time byte -> read-only or "Access not allowed"; class now only counts with the system attribute | 97 |
 
 ### Shell (`$$SHELL.SYS`) and utilities
 
@@ -111,6 +114,8 @@ compatibility fixes**, and **Y2K fixes** in DATE and at boot.
 | `hibin2dec` lost leading zeros (`1, 64,042,496`) -- 1992 bug | 87 |
 | DATE: 2-digit year always 19yy -> every date after 1999 refused | 89 |
 | Boot: RTC century 19 on old BIOS -> wrong date; now windowed 00-79 = 20yy | 96 |
+| DIR: junk in CLS / USER columns for entries made by other systems | 97 |
+| FILEMODE: "Syntax error" with redirected output (trailing blank) | 97 |
 | FORMAT: cylinder count / bad-track check overflow > 2 GB; BPB size past partition end | 95 |
 | FORMAT/MSYS `scan_partitions`: 0Eh/0Fh, LBA, DOS EBR chain rule | 95 |
 
@@ -127,6 +132,7 @@ compatibility fixes**, and **Y2K fixes** in DATE and at boot.
 | Max task size | 596 KB with `$386.SYS` | 71-82 |
 | Hard-disk init code moved out of resident `mos` | 1,160 bytes less HMA, MOSSEG room 34 -> 1,194 bytes | 93 |
 | Hook table 320 -> 1024 entries | | 67 |
+| Class lookup through one helper (`dclasslvl`) | `mo2` 38 bytes smaller | 97 |
 
 ---
 
@@ -141,10 +147,11 @@ compatibility fixes**, and **Y2K fixes** in DATE and at boot.
 ## 5. Known limits / open
 
 - One `GO.BAT` run in twelve: DOS/4GW task stuck after banner (not attributed).
-- Four-task `GO.BAT` stalls on the current 2 vCPU rig -- environment, also with UPDATE 91 binaries (UPDATE 96).
+- Four-task `GO.BAT` on the 2 vCPU rig: too slow with the debug emulator; passes with the release build (UPDATE 96-97).
 - FAT16 2 GB per partition; no FAT32, no LFN; max two hard disks.
 - `HDSETUP` still makes 32 MB CHS volumes -- partition with another tool.
-- `mo2` has ~80 bytes before the next 8 KB per-task step.
+- `mo2` has ~118 bytes before the next 8 KB per-task step (UPDATE 97).
 - #GP delivery not testable under DOSBox; needs real hardware.
 - 6502h-6507h table pointers left out (cost 8 KB per task).
 - MSYS on logical drives: does nothing (same as original).
+- Directories classed through int 38h 83h before UPDATE 97 without the system attribute are now unclassified; set the class again.
