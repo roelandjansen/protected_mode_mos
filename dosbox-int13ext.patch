@@ -1,0 +1,89 @@
+--- a/src/ints/bios_disk.cpp
++++ b/src/ints/bios_disk.cpp
+@@ -506,6 +506,7 @@
+ 		imageDiskList[drivenum]->Get_Geometry(&tmpheads, &tmpcyl, &tmpsect, &tmpsize);
+ 		if (tmpcyl==0) LOG(LOG_BIOS,LOG_ERROR)("INT13 DrivParm: cylinder count zero!");
+ 		else tmpcyl--;		// cylinder count -> max cylinder
++		if (tmpcyl > 1023) tmpcyl = 1023;	// pmrig: CHS limit
+ 		if (tmpheads==0) LOG(LOG_BIOS,LOG_ERROR)("INT13 DrivParm: head count zero!");
+ 		else tmpheads--;	// head count -> max head
+ 		reg_ch = (uint8_t)(tmpcyl & 0xff);
+@@ -582,6 +583,78 @@
+ 		reg_ah = 0x00;
+ 		CALLBACK_SCF(false);
+ 		break;
++	// pmrig: IBM/Phoenix int 13h extensions (41h/42h/43h/48h) for
++	// hard disk images, so LBA code can be tested beyond 1024 cylinders
++	case 0x41: /* Extensions installation check */
++		if ((reg_dl & 0x80) == 0 || reg_bx != 0x55aa || driveInactive(drivenum)) {
++			reg_ah = 0x01;
++			CALLBACK_SCF(true);
++			return CBRET_NONE;
++		}
++		reg_bx = 0xaa55;
++		reg_ah = 0x21; // version 1.1
++		reg_cx = 0x0001; // fixed disk access subset
++		CALLBACK_SCF(false);
++		break;
++	case 0x42: /* Extended read */
++	case 0x43: /* Extended write */
++	{
++		if ((reg_dl & 0x80) == 0 || driveInactive(drivenum)) {
++			reg_ah = 0x01;
++			CALLBACK_SCF(true);
++			return CBRET_NONE;
++		}
++		const uint16_t pseg = SegValue(ds);
++		const uint16_t poff = reg_si;
++		const uint16_t count = real_readw(pseg, poff + 2);
++		uint16_t boff = real_readw(pseg, poff + 4);
++		const uint16_t bseg = real_readw(pseg, poff + 6);
++		const uint32_t lba = real_readd(pseg, poff + 8);
++		const uint8_t fn = reg_ah;
++		for (uint16_t i = 0; i < count; i++) {
++			if (fn == 0x42) {
++				last_status = imageDiskList[drivenum]->Read_AbsoluteSector(lba + i, sectbuf);
++				for (t = 0; t < 512; t++)
++					real_writeb(bseg, boff++, sectbuf[t]);
++			} else {
++				for (t = 0; t < 512; t++)
++					sectbuf[t] = real_readb(bseg, boff++);
++				last_status = imageDiskList[drivenum]->Write_AbsoluteSector(lba + i, sectbuf);
++			}
++			if (last_status != 0) {
++				real_writew(pseg, poff + 2, i);
++				reg_ah = 0x04;
++				CALLBACK_SCF(true);
++				return CBRET_NONE;
++			}
++		}
++		reg_ah = 0x00;
++		CALLBACK_SCF(false);
++		break;
++	}
++	case 0x48: /* Extended get drive parameters */
++	{
++		if ((reg_dl & 0x80) == 0 || driveInactive(drivenum)) {
++			reg_ah = 0x01;
++			CALLBACK_SCF(true);
++			return CBRET_NONE;
++		}
++		uint32_t h, c, s, z;
++		imageDiskList[drivenum]->Get_Geometry(&h, &c, &s, &z);
++		const uint16_t pseg = SegValue(ds);
++		const uint16_t poff = reg_si;
++		real_writew(pseg, poff + 0, 0x1a);
++		real_writew(pseg, poff + 2, 0x0002);
++		real_writed(pseg, poff + 4, c);
++		real_writed(pseg, poff + 8, h);
++		real_writed(pseg, poff + 12, s);
++		real_writed(pseg, poff + 16, h * c * s);
++		real_writed(pseg, poff + 20, 0);
++		real_writew(pseg, poff + 24, 512);
++		reg_ah = 0x00;
++		CALLBACK_SCF(false);
++		break;
++	}
+ 	default:
+ 		LOG(LOG_BIOS,LOG_ERROR)("INT13: Function %x called on drive %x (dos drive %d)", reg_ah,  reg_dl, drivenum);
+ 		reg_ah=0xff;

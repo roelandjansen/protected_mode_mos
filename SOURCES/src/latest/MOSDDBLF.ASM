@@ -255,6 +255,8 @@ dib_seg		dw	0	; ptr to dib storage area within smp
 dib_cnt		db	-1	; actual number of dib entries (0 based)
 dib_max		db	0	; max possible number of dib entries (init only)
 dib_ptr		dw	0	; offset of dib entry being operated on
+lbadrv		db	2 dup (0) ; 1: drive 80h+n has int 13h extensions (UPDATE 93)
+xlba		dw	0,0	; sector number for int 13h 42h/43h (i13x)
 nslow		dw	0	; low word in # of sectors in partition
 nshigh		dw	0	; high word of # of sectors in partition
 strtsec		dd	0	; starting sector adjustment factor (init only)
@@ -274,7 +276,7 @@ dftbpb	bpb	<512,4,1,2,512,4080,0f8h,1,17,5,0>
 ;==== function table
 
 	even
-hfuntbl	dw	hinitblk	; 0  init
+hfuntbl	dw	hinitstub	; 0  init (UPDATE 93: far to init segment)
 	dw	hmedck		; 1  media check
 	dw	hbldbpb		; 2  build bpb
 	dw	0		; 3  i/o control input
@@ -523,6 +525,17 @@ diskio_loop:
 	push	cx			; save retry count
 	mov	ax,[sectstr]		; get starting logical sector
 	mov	dx,[sectstr+2]		; high word of starting sector
+	push	es			; lba of this transfer for i13x (UPDATE 93)
+	mov	es,[dib_seg]
+	push	ax
+	push	dx
+	add	ax,es:[si].dibOffsetLo
+	adc	dx,es:[si].dibOffsetHi
+	mov	[xlba],ax
+	mov	[xlba+2],dx
+	pop	dx
+	pop	ax
+	pop	es
 	call	calcabs			; calculate absolute disk loc. from logical
 	push	es
 	mov	es,[dib_seg]
@@ -543,7 +556,7 @@ iopart:
 	mov	di,ax			; save io count
 	pop	bx			; restore buffer pointer
 	mov	ah,[biosfun]		; bios disk function
-	int	13h
+	call	i13x			; chs or lba (UPDATE 93)
 	jnc	iook
 	push	ax
 	mov	ah,0			; reset after error
@@ -631,6 +644,66 @@ calcabs proc near
 	popset	ax,es
 	ret
 calcabs endp
+
+	subttl i13x - int 13h read/write, chs or lba
+	page
+;======================================================================
+;,fs
+; i13x - int 13h read/write, chs or lba (UPDATE 93)
+;
+; a hard disk whose bios has the int 13h extensions (41h, set up in
+; process_partition) is read and written with 42h/43h and the 32-bit
+; sector number in xlba, so partitions beyond cylinder 1023 (about
+; 8.4 GB) can be used.  other drives use the chs call as before.
+;
+; in:	ah = 2 (read) or 3 (write), al = sector count
+;	ch, cl, dh = chs address, dl = bios drive
+;	es:bx -> buffer
+;	ds -> grp, xlba = absolute sector number of the first sector
+;
+; out:	as int 13h: cy and ah = error code if error
+;
+;,fe
+;======================================================================
+	assume	ds:grp,es:nothing,ss:nothing
+
+i13x proc near
+	push	bx
+	mov	bl,dl
+	and	bx,1
+	test	[lbadrv+bx],1
+	pop	bx
+	jnz	i13x1
+	int	13h			; chs
+	ret
+i13x1:
+	push	bp
+	push	si
+	push	ds
+	xor	bp,bp			; disk address packet on the stack:
+	push	bp			;   sector number bits 48-63
+	push	bp			;   bits 32-47
+	push	[xlba+2]		;   bits 16-31
+	push	[xlba]			;   bits 0-15
+	push	es			;   buffer segment
+	push	bx			;   buffer offset
+	mov	bp,ax
+	and	bp,00ffh
+	push	bp			;   sector count
+	mov	bp,0010h
+	push	bp			;   packet size 16
+	mov	si,sp
+	push	ss
+	pop	ds			; ds:si -> packet
+	or	ah,40h			; 02h -> 42h, 03h -> 43h
+	xor	al,al			; 43h: no verify
+	int	13h
+	lea	sp,[si+10h]		; drop the packet (flags kept)
+	pop	ds
+	pop	si
+	pop	bp
+	ret
+i13x endp
 
 	subttl houtput - output write
 	page
@@ -1279,6 +1352,10 @@ read_pbr:
 	mov	es,[dib_seg]
 	mov	cx,es:[si].dibPBRcx
 	mov	dx,es:[si].dibPBRdx
+	mov	ax,es:[si].dibOffsetLo	; lba of the pbr for i13x
+	mov	[xlba],ax
+	mov	ax,es:[si].dibOffsetHi
+	mov	[xlba+2],ax
 	mov	ax,0201h		; read 1 sector
 	mov	bx,ds
 	mov	es,bx
@@ -1286,7 +1363,7 @@ read_pbr:
 	mov	[typrtr],3		; 3 retries
 rpr1:
 	mov	ax,0201h		; read 1 sector
-	int	13h
+	call	i13x			; chs or lba (UPDATE 93)
 	jnc	rpr3			; if successfully read sector
 	push	ax
 	xor	ah,ah			; reset drive on timeout
@@ -1447,13 +1524,17 @@ hsetmedid proc near
 	mov	es,[dib_seg]
 	mov	cx,es:[bp].dibPBRcx
 	mov	dx,es:[bp].dibPBRdx
+	mov	ax,es:[bp].dibOffsetLo	; lba of the pbr for i13x
+	mov	[xlba],ax
+	mov	ax,es:[bp].dibOffsetHi
+	mov	[xlba+2],ax
 	mov	bx,ds
 	mov	es,bx
 	mov	bx,offset grp:ourbuf
 	mov	[typrtr],3		; 3 retries
 hsets10:
 	mov	ax,0301h		; write 1 sector
-	int	13h
+	call	i13x			; chs or lba (UPDATE 93)
 	jnc	hsets40			; if successful
 	push	ax
 	xor	ah,ah			; reset drive on timeout
@@ -1531,7 +1612,74 @@ hiqz:
 	ret
 hioquery endp
 
+
+initseg	segment
+	extrn	imosaddr:word
+initseg	ends
+
+	extrn	sinit:word, initcall:word
+
+; hinitstub - the hard disk init (hinitblk, process_partition, next_dib)
+; is in the init segment (UPDATE 93).  a far call the way cainit does it;
+; cainit itself is after clobber and gone once mos is relocated, while
+; the drivers are initialised a second time after the relocation.
+
+	assume	ds:grp,es:nothing,ss:nothing
+hinitstub proc near
+	push	ds
+	mov	ds,cs:[sinit]
+	assume	ds:init
+	mov	word ptr ds:[imosaddr],offset init:hinitblk
+	pop	ds
+	assume	ds:grp
+	call	dword ptr cs:[initcall]
+	ret
+hinitstub endp
 hendres label	byte
+
+
+	subttl ldiv - perform long division
+	page
+;======================================================================
+;,fs
+; ldiv - perform long division
+;
+; in:	dx:ax contains double word dividend
+;	cx contains divisor
+;
+; out:	dx:ax contains double word quotient of dx:ax / cx
+;	bx contains remainder
+;
+;,fe
+;=====================================================================
+	assume	ds:nothing,es:nothing,ss:nothing
+ldiv proc
+	mov	bx,ax			; save low word of dividend
+	mov	ax,dx
+	xor	dx,dx			; divide 0:high word by cx
+	div	cx
+	xchg	bx,ax			; high quotient for low of dividend
+	div	cx			; divide remainder:ax by cx
+	xchg	bx,dx			; return remainder in bx, and
+	ret				; restore high word of quotient
+ldiv endp
+
+	even
+
+mosseg	ends
+
+;======================================================== init segment
+; process_partition, next_dib and hinitblk only run at boot: they live
+; in the init segment, which is discarded after init (UPDATE 93).
+
+initseg	segment
+	assume	cs:init
+	extrn	initmos:word, camos:near
+
+cfmos	macro	addr
+	mov	word ptr cs:[imosaddr],offset addr
+	call	camos
+	endm
 
 	subttl process_partition - fill out a dib block for a partition
 	page
@@ -1555,6 +1703,18 @@ process_partition proc near
 	pushset ax,bx,cx,dx,si,di,es
 	push	bx
 	push	cx
+	mov	ah,41h			; int 13h extensions? (UPDATE 93)
+	mov	bx,55aah
+	int	13h
+	jc	prp005
+	cmp	bx,0aa55h
+	jne	prp005
+	test	cl,1			; fixed disk access subset
+	jz	prp005
+	mov	bl,dl
+	and	bx,1
+	mov	[lbadrv+bx],1
+prp005:
 
 ; get the heads and sectors per track values for the default bpb
 
@@ -1628,12 +1788,16 @@ prp010:
 	mov	es,[dib_seg]
 	mov	es:[di].dibPBRcx,cx
 	mov	es:[di].dibPBRdx,dx
+	mov	ax,es:[di].dibOffsetLo	; lba of the pbr for i13x
+	mov	[xlba],ax
+	mov	ax,es:[di].dibOffsetHi
+	mov	[xlba+2],ax
 	mov	ax,0201h		; read 1 sector
 	mov	bx,ds
 	mov	es,bx
 	mov	bx,offset grp:ourbuf
 	push	dx
-	int	13h
+	cfmos	i13x			; chs or lba (UPDATE 93)
 	pop	dx
 	ljc	prp070
 	push	si
@@ -1712,7 +1876,7 @@ prp055:
 	mov	ax,[nslow]		; total sectors
 	mov	dx,[nshigh]
 	mov	cx,es:[di].dibSecPerTrack
-	call	ldiv
+	cfmos	ldiv			; mos routine, far from init (UPDATE 93)
 	div	es:[di].dibHeads	; max tracks/heads = cylinders
 	or	dx,dx			; remainder?
 	jz	prp060			; if even division
@@ -1726,7 +1890,7 @@ prp060:
 	mov	ax,es:[di].dibOffsetLo
 	mov	dx,es:[di].dibOffsetHi
 	mov	cx,es:[di].dibSecPerTrack
-	call	ldiv
+	cfmos	ldiv			; mos routine, far from init (UPDATE 93)
 	div	es:[di].dibHeads
 	mov	es:[di].dibCylsFBeg,ax	; store cylinder offset
 	pop	dx
@@ -1850,7 +2014,7 @@ init010:
 	mov	[dib_max],dib_total
 	mov	dx,(16 + dib_overhead + (size dib * dib_total) + 15) / 16
 	xor	ah,ah
-	call	mosheman
+	cfmos	mosheman		; mos routine, far from init (UPDATE 93)
 	or	al,al
 	jz	init020
 
@@ -1882,7 +2046,7 @@ init010:
 	shr	ax,1
 	mov	dx,ax
 	xor	ah,ah
-	call	mosheman
+	cfmos	mosheman		; mos routine, far from init (UPDATE 93)
 	or	al,al
 	ljnz	init290			; shouldn't happen
 init020:
@@ -2252,7 +2416,7 @@ init270:
 	inc	dx			; quirk of shrink, must account
 	mov	es,[dib_seg]		; for the header's paragraph
 	mov	ah,2
-	call	mosheman
+	cfmos	mosheman		; mos routine, far from init (UPDATE 93)
 	or	al,al
 	jnz	init290
 
@@ -2271,9 +2435,10 @@ init280:
 
 ; report ending address
 
-	lea	dx,hendres
+	mov	dx,offset mos:hendres
 	mov	word ptr es:[bx].irEndAddress,dx
-	mov	word ptr es:[bx+2].irEndAddress,cs
+	mov	ax,cs:[initmos]	; the driver ends in mos (UPDATE 93)
+	mov	word ptr es:[bx+2].irEndAddress,ax
 
 ; init pointer to bpb pointer array
 
@@ -2300,35 +2465,7 @@ init300:
 	ret
 hinitblk endp
 
-	subttl ldiv - perform long division
-	page
-;======================================================================
-;,fs
-; ldiv - perform long division
-;
-; in:	dx:ax contains double word dividend
-;	cx contains divisor
-;
-; out:	dx:ax contains double word quotient of dx:ax / cx
-;	bx contains remainder
-;
-;,fe
-;=====================================================================
-	assume	ds:nothing,es:nothing,ss:nothing
-ldiv proc
-	mov	bx,ax			; save low word of dividend
-	mov	ax,dx
-	xor	dx,dx			; divide 0:high word by cx
-	div	cx
-	xchg	bx,ax			; high quotient for low of dividend
-	div	cx			; divide remainder:ax by cx
-	xchg	bx,dx			; return remainder in bx, and
-	ret				; restore high word of quotient
-ldiv endp
-
-	even
-
-mosseg	ends
+initseg	ends
 	end
 
 

@@ -14,11 +14,16 @@ UPDATE 88 kernel (md5 `4be8fcbff98e`).
 
 Two separate problems:
 
-1. **MOS is not full (corrected in UPDATE 92).** Only 1080h-`CLOBBER`
-   is resident in the HMA; the code after `CLOBBER` up to `MOSEND` is
-   init code. About **2.2 KB** are left before the end of the HMA.
-   The UPDATE 91 "hang on growth" was a media-change bug in
-   `fgenioctl`, fixed in UPDATE 92. Phase 0 is done.
+1. **MOS (corrected in UPDATE 93).**
+   - The 64 KB segment limit counts the init code after `CLOBBER`
+     too, so the HMA room (about 2.2 KB) was never the real limit.
+   - UPDATE 93 moved the hard disk init (`hinitblk`,
+     `process_partition`, `next_dib`) to the init segment. MOSSEG is
+     now 0FB56h: **1,194 bytes free**. The HMA use dropped by 1,160
+     bytes.
+   - More init-only code in `mos` can be moved the same way.
+   - The UPDATE 91 "hang on growth" was a media-change bug in
+     `fgenioctl`, fixed in UPDATE 92. Phase 0 is done.
 2. **GRP+MO2 is the low area** ("IO system data", 74K in `MEM`) that
    sits below every task. It grows in 8 KB steps. Today MO2 ends
    about **80 bytes** before the next step (after UPDATE 91).

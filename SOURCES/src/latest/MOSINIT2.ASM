@@ -339,7 +339,7 @@ initseg	segment
 	extrn	initend:byte, imosaddr:word, mscall:far
 	extrn	initmos:word, initmo2:word, initgrp:word
 
-	public	incall, exit13
+	public	incall, exit13, camos	; camos: UPDATE 93 (MOSDDBLF)
 
 
 	db	'PATCH_INIT'
