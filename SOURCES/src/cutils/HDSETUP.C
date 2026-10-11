@@ -31,6 +31,16 @@ mjs 05/21/92	modified calls to ul_view() to match new version
 		modified the "OTH" string written to the summary
 		file for proper columnar alignment.
 
+rj  20261011	UPDATE 99: disks beyond 8.4 GB, read side.
+		locations come from the 32-bit start fields (MBR, EBR
+		chain), not from the CHS fields.  sectors are read and
+		written through lba_io() (int 13h 42h/43h when the bios
+		has the extensions, CHS otherwise).  the drive size comes
+		from int 13h 48h (lba_probe).  full cylinder numbers in
+		prE[].BC/EC.  types 0eh/0fh shown as DLG/extended.
+		writing to a disk beyond 1024 cylinders is refused.
+		builds with Open Watcom (__WATCOMC__) as well.
+
 =======================================================================
 */
 
@@ -48,6 +58,29 @@ mjs 05/21/92	modified calls to ul_view() to match new version
 #include "vidattr.h"
 #include "summary.h"
 
+#ifdef __WATCOMC__
+
+//
+// Open Watcom: Borland pseudo registers and the AH=0 far call
+//
+
+#include <ctype.h>
+void farcall_ah0(void __far *f);
+#pragma aux farcall_ah0 = \
+  "push es" "push bx" "xor ah,ah" "mov bx,sp" \
+  "call dword ptr ss:[bx]" "add sp,4" \
+  parm [es bx] modify [ax bx cx dx si di];
+
+#endif
+
+//
+// Partition types for partitions beyond cylinder 1023 (LBA access)
+//
+
+#define PTCl16	0x0e			// FAT16, LBA
+#define PTClext	0x0f			// extended, LBA
+#define CHSMAXC	1023			// last cylinder a CHS field can hold
+
 byte *c = "(c) Copyright 1992 The Software Link, Incorporated";  /* @@XLAT */
 
 //=========================================================
@@ -63,7 +96,11 @@ struct prec {
     byte NeedMSYS;		// for mlg->dlg conversion 
     byte DriveLetter;		// the assigned drive letter 
     byte OrigDriveLetter;	// the initially assigned drive letter 
-    struct prec *ExtPR;	 	// ptr to next node when PTC == 5 
+    struct prec *ExtPR;	 	// ptr to next node when PTC == 5
+    word BC;			// begin cylinder (full 16 bits)
+    word EC;			// end cylinder (full 16 bits)
+    unsigned long ABS;		// absolute first sector (pbr or ebr)
+    byte OrigPTC;		// type as read from disk (0eh/0fh kept)
     } prE[4];			// one pr1_type record per PT 
   };
 
@@ -91,7 +128,8 @@ struct drec {
   byte drDriveNum;		// 0 based drive number 
   word drHeads;			// total # of heads 
   word drSPT;			// sectors per track 
-  word drCylds;			// total # of cylinders 
+  word drCylds;			// total # of cylinders
+  byte drLBA;			// != 0 when int 13h extensions work
   pr_type *drPR;		// ptr to 1st pr_type 
   struct drec *drNext;		// ptr to next drive record 
   };
@@ -469,7 +507,7 @@ enum recodes {
   errcode_insuficmem, errcode_diskread, errcode_diskwrite, 
   errcode_data1, errcode_data2, errcode_data3, errcode_data4, 
   errcode_data5, errcode_data6, errcode_badcylnum, 
-  errcode_execmsys};
+  errcode_execmsys, errcode_bigdisk};
 
 // globals for lead-through logic
 
@@ -1000,6 +1038,22 @@ byte write_sector(byte drv, byte head, byte sect, byte cyld, byte *bufofs) {
 ========================================================================*/
 void set_pe_data(pr_type *pr, byte p_ndx, word begsect, word begcyld, word endsect, word endcyld) {
 
+  // the full cylinder numbers are kept in BC/EC.  a CHS field
+  // cannot hold a cylinder beyond 1023: such a field gets the
+  // conventional 1023/254/63, the start and size fields are used.
+
+  pr->prE[p_ndx].BC = begcyld;
+  pr->prE[p_ndx].EC = endcyld;
+  if(begcyld > CHSMAXC) {
+    pr->prE[p_ndx].PT.peBeginHead = 0xfe;
+    begsect = 0x3f;
+    begcyld = CHSMAXC;
+    }
+  if(endcyld > CHSMAXC) {
+    pr->prE[p_ndx].PT.peEndHead = 0xfe;
+    endsect = 0x3f;
+    endcyld = CHSMAXC;
+    }
   pr->prE[p_ndx].PT.peBeginSector = begsect + (word)((begcyld & 0x0300) >> 2);
   pr->prE[p_ndx].PT.peBeginCylinder = begcyld;
   pr->prE[p_ndx].PT.peEndSector = endsect + (word)((endcyld & 0x0300) >> 2);
@@ -1030,11 +1084,193 @@ void set_pe_data(pr_type *pr, byte p_ndx, word begsect, word begcyld, word endse
 void get_pe_data(pr_type *pr, byte p_ndx, word *begsect, word *begcyld, word *endsect, word *endcyld) {
 
   *begsect = pr->prE[p_ndx].PT.peBeginSector & 0x3f;
-  *begcyld = pr->prE[p_ndx].PT.peBeginCylinder + 
-  ((pr->prE[p_ndx].PT.peBeginSector & 0xc0) << 2);
+  *begcyld = pr->prE[p_ndx].BC;
   *endsect = pr->prE[p_ndx].PT.peEndSector & 0x3f;
-  *endcyld = pr->prE[p_ndx].PT.peEndCylinder + 
-  ((pr->prE[p_ndx].PT.peEndSector & 0xc0) << 2);
+  *endcyld = pr->prE[p_ndx].EC;
+  }
+
+/*======================================================================
+;,fs
+; byte lba_io(byte fn, dr_type *dr, unsigned long lba, byte *bufofs)
+;
+; read (fn = 0x42) or write (fn = 0x43) one sector by its absolute
+; sector number.  uses the int 13h extensions when the drive has them,
+; otherwise converts to CHS (cylinders 0-1023 only).
+;
+; in:	fn = 0x42 or 0x43
+;	dr -> drive record
+;	lba = absolute sector number
+;	bufofs = the _DS based offset of the sector buffer
+;
+; out:	retval != 0 if error
+;
+;,fe
+========================================================================*/
+byte lba_io(byte fn, dr_type *dr, unsigned long lba, byte *bufofs) {
+
+  static struct {
+    byte dpSize;
+    byte dpRes;
+    word dpCount;
+    word dpOfs;
+    word dpSeg;
+    unsigned long dpLo;
+    unsigned long dpHi;
+    } dap;
+  unsigned long spc;
+  word cyld;
+  byte head;
+  byte sect;
+  byte drv;
+  byte retries;
+
+  drv = 0x80 + dr->drDriveNum;
+  if(!dr->drLBA) {
+    spc = (unsigned long)dr->drHeads * dr->drSPT;
+    if(lba / spc > CHSMAXC) {
+      return(1);
+      }
+    cyld = (word)(lba / spc);
+    head = (byte)((lba / dr->drSPT) % dr->drHeads);
+    sect = (byte)(lba % dr->drSPT) + 1 + (byte)((cyld & 0x0300) >> 2);
+    if(fn == 0x43) {
+      return(write_sector(drv,head,sect,(byte)cyld,bufofs));
+      }
+    return(read_sector(drv,head,sect,(byte)cyld,bufofs));
+    }
+  retries = 3;
+  while(1) {
+    dap.dpSize = 16;
+    dap.dpRes = 0;
+    dap.dpCount = 1;
+    dap.dpOfs = (word)bufofs;
+    dap.dpSeg = _DS;
+    dap.dpLo = lba;
+    dap.dpHi = 0;
+    regs.h.ah = fn;
+    regs.h.al = 0;
+    regs.h.dl = drv;
+    regs.x.si = (word)&dap;
+    sregs.ds = _DS;
+    int86x(0x13,&regs,&regs,&sregs);
+    if(!regs.x.cflag) {
+      return(0);
+      }
+    retries--;
+    if(retries == 0) {
+      return(1);
+      }
+    regs.x.ax = 0;
+    regs.h.dl = drv;
+    int86x(0x13,&regs,&regs,&sregs);	/* reset drive */
+    }
+  }
+
+/*======================================================================
+;,fs
+; void lba_probe(dr_type *dr)
+;
+; check for the int 13h extensions (41h) and, when present, take the
+; drive size from 48h.  drCylds is raised to the size in cylinders of
+; the bios geometry, limited so that the megs column (a word) holds
+; the whole drive (65535 megs).
+;
+; in:	dr -> drive record with drHeads, drSPT, drCylds from 08h
+;
+; out:	dr->drLBA, dr->drCylds
+;
+;,fe
+========================================================================*/
+void lba_probe(dr_type *dr) {
+
+  static struct {
+    word gpSize;
+    word gpFlags;
+    unsigned long gpCyls;
+    unsigned long gpHeads;
+    unsigned long gpSPT;
+    unsigned long gpSecsLo;
+    unsigned long gpSecsHi;
+    word gpBPS;
+    } gp;
+  unsigned long spc;
+  unsigned long cyls;
+  unsigned long maxc;
+
+  dr->drLBA = 0;
+  regs.h.ah = 0x41;
+  regs.x.bx = 0x55aa;
+  regs.h.dl = 0x80 + dr->drDriveNum;
+  int86x(0x13,&regs,&regs,&sregs);
+  if(regs.x.cflag || regs.x.bx != 0xaa55 || (regs.x.cx & 1) == 0) {
+    return;
+    }
+  dr->drLBA = 1;
+  memset(&gp,0,sizeof(gp));
+  gp.gpSize = 26;
+  regs.h.ah = 0x48;
+  regs.h.dl = 0x80 + dr->drDriveNum;
+  regs.x.si = (word)&gp;
+  sregs.ds = _DS;
+  int86x(0x13,&regs,&regs,&sregs);
+  if(regs.x.cflag) {
+    return;
+    }
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  maxc = (65535UL * 2048UL) / spc;
+  cyls = gp.gpSecsLo / spc;
+  if(gp.gpSecsHi != 0 || cyls > maxc) {
+    cyls = maxc;
+    }
+  if(cyls > dr->drCylds) {
+    dr->drCylds = (word)cyls;
+    }
+  }
+
+/*======================================================================
+;,fs
+; void pe_from_lba(dr_type *dr, pr_type *pr, byte p_ndx, unsigned long base)
+;
+; set BC/EC/ABS of a partition entry just read from disk from its
+; start and size fields (not from its CHS fields, which say 1023/254/63
+; beyond 8 GB).  the lba types 0eh/0fh are handled as 06h/05h; the
+; type read from disk is kept in OrigPTC.
+;
+; in:	pr->prE[p_ndx].PT = the entry as read
+;	base = the sector its start field is relative to
+;
+; out:	BC, EC, ABS, OrigPTC, peFileSystem
+;
+;,fe
+========================================================================*/
+void pe_from_lba(dr_type *dr, pr_type *pr, byte p_ndx, unsigned long base) {
+
+  struct prec1 *e;
+  unsigned long spc;
+  unsigned long c;
+
+  e = &(pr->prE[p_ndx]);
+  e->OrigPTC = e->PT.peFileSystem;
+  e->ABS = base + e->PT.peStartSector.li;
+  e->BC = 0;
+  e->EC = 0;
+  if(e->PT.peFileSystem == PTCnil) {
+    return;
+    }
+  if(e->PT.peFileSystem == PTCl16) {
+    e->PT.peFileSystem = PTCdlg;
+    }
+  if(e->PT.peFileSystem == PTClext) {
+    e->PT.peFileSystem = PTCext;
+    }
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  c = e->ABS / spc;
+  e->BC = (c > 0xffffUL) ? 0xffff : (word)c;
+  c = (e->ABS + e->PT.peSectors.li - 1) / spc;
+  if(e->PT.peSectors.li == 0) {
+    c = e->ABS / spc;
+    }
+  e->EC = (c > 0xffffUL) ? 0xffff : (word)c;
   }
 
 /*======================================================================
@@ -1211,9 +1447,8 @@ byte build_tree(void) {
   dp_type device_parms;
   dr_type *dr;
   byte dv_num;
-  word e_head;
-  word e_sect;
-  word e_cyld;
+  unsigned long ext_base;
+  unsigned long ebr;
   bt_type *btptr;
   pe_type *peptr;
   byte table_num;
@@ -1228,7 +1463,7 @@ byte build_tree(void) {
     regs.h.ah = 8;
     regs.h.dl = 0x80;			/* first hard drive */
     int86x(0x13,&regs,&regs,&sregs);
-    if((regs.x.flags & 1) == 0)	/* if carry not set */ {
+    if((regs.x.cflag & 1) == 0)	/* if carry not set */ {
       hard_drives = regs.h.dl;
       if(hard_drives > 2)		/* not setup for > 2 */ {
         hard_drives = 2;
@@ -1253,7 +1488,7 @@ byte build_tree(void) {
     regs.x.dx = (word)&device_parms;
     sregs.ds = _DS;
     int86x(0x21,&regs,&regs,&sregs);
-    if((regs.x.flags & 1) == 0)	/* if carry not set */ {
+    if((regs.x.cflag & 1) == 0)	/* if carry not set */ {
       hard_drives = 1;
       temp_cylds = device_parms.dpCylinders;
       temp_heads = device_parms.dpHeads;
@@ -1277,6 +1512,7 @@ byte build_tree(void) {
   dr->drSPT = temp_spt;
   dr->drCylds = temp_cylds;
   dr->drDriveNum = 0;
+  lba_probe(dr);
 
   /* allocate and init a dr_type record for the second hard drive */
 
@@ -1296,7 +1532,7 @@ byte build_tree(void) {
     regs.h.dl = 0x81;			/* second hard drive */
     int86x(0x13,&regs,&regs,&sregs);
 
-    if(regs.x.flags & 1) {
+    if(regs.x.cflag & 1) {
       report_error(errcode_diskread);
       return(1);
       }
@@ -1306,11 +1542,11 @@ byte build_tree(void) {
     dr->drHeads = regs.h.dh + 1;
     dr->drSPT = regs.h.cl & 0x3f;
     dr->drDriveNum = 1;
+    lba_probe(dr);
     }
 
   /* for each drive, check for existing partition tables */
 
-  dv_num = 0x80;
   dr = Root_dr;
   while(dr != NULL) {
     table_num = 0;
@@ -1325,31 +1561,27 @@ byte build_tree(void) {
 
     /* init its fields to null, just in case there is no partition info */
 
-    pr->prExt = 0;
+    memset(pr,0,sizeof(pr_type));
     pr->prTblNum = table_num++;
-    for(t1=0;t1<4;t1++) {
-      memset(&(pr->prE[t1].PT),0,16);
-      pr->prE[t1].MLG = 0;
-      pr->prE[t1].NeedMSYS = 0;
-      pr->prE[t1].ExtPR = NULL;
-      }
 
-    /* check for a master partition table at h0, s1, c0  */
+    /* check for a master partition table at sector 0.  all locations
+    come from the 32-bit start fields, not from the chs fields. */
 
-    if(read_sector(dv_num,0,1,0,sct_buf) != 0) {
+    if(lba_io(0x42,dr,0,sct_buf) != 0) {
       report_error(errcode_diskread);
       return(1);
       }
     if(sct_buf[510] == 0x55 && sct_buf[511] == 0xaa) {
       for(t1=0;t1<4;t1++) {
         memcpy(&(pr->prE[t1].PT),(sct_buf+0x1be+(t1*16)),16);
+        pe_from_lba(dr,pr,t1,0);
 
         /* when the ptc is 4, must check for MLG by reading the pbr,
         verifying it and seeing if the high byte of the btFATsecs field
         is non-zero. */
 
         if(pr->prE[t1].PT.peFileSystem == PTCsm16) {
-          if(read_sector(dv_num,pr->prE[t1].PT.peBeginHead,pr->prE[t1].PT.peBeginSector,pr->prE[t1].PT.peBeginCylinder,sct_buf2) != 0) {
+          if(lba_io(0x42,dr,pr->prE[t1].ABS,sct_buf2) != 0) {
             report_error(errcode_diskread);
             return(1);
             }
@@ -1367,16 +1599,17 @@ byte build_tree(void) {
       t2 = 0xff;
       for(t1=0;t1<4;t1++) {
         if(pr->prE[t1].PT.peFileSystem == PTCext) {
-          e_head = pr->prE[t1].PT.peBeginHead;
-          e_sect = pr->prE[t1].PT.peBeginSector;
-          e_cyld = pr->prE[t1].PT.peBeginCylinder;
+          ext_base = pr->prE[t1].ABS;
+          ebr = ext_base;
           t2 = t1;
           break;
           }
         }
 
       /* trace the extended chain, allocating and filling out a pr_type
-      record for each partition sector. */
+      record for each partition sector.  a logical drive starts at its
+      ebr + its start field; the next ebr is at the start of the
+      extended partition + the start field of the link entry. */
 
       (word)peptr = (word)&sct_buf + 0x1be;
       pr_prev = NULL;			/* used as a signal below */
@@ -1387,7 +1620,7 @@ byte build_tree(void) {
         first test to see if it is 'live' -- if its first pte has a
         ptc other than 0. */
 
-        if(read_sector(dv_num,e_head,e_sect,e_cyld,sct_buf) != 0) {
+        if(lba_io(0x42,dr,ebr,sct_buf) != 0) {
           report_error(errcode_diskread);
           return(1);
           }
@@ -1397,24 +1630,21 @@ byte build_tree(void) {
             report_error(errcode_insuficmem);
             return(1);
             }
+          memset(pr,0,sizeof(pr_type));
           pr_prev->prE[t2].ExtPR = pr;
           pr->prExt = 1;
           pr->prTblNum = table_num++;
-          pr->prE[0].MLG = 0;
-          pr->prE[1].MLG = 0;
-          pr->prE[2].MLG = 0;
-          pr->prE[3].MLG = 0;
           memcpy(&(pr->prE[0].PT),(sct_buf+0x1be),16);
           memcpy(&(pr->prE[1].PT),(sct_buf+0x1be+16),16);
+          pe_from_lba(dr,pr,0,ebr);
+          pe_from_lba(dr,pr,1,ext_base);
           pr->prE[2].PT.peFileSystem = 0;
           pr->prE[3].PT.peFileSystem = 0;
           pr->prE[1].ExtPR = NULL;
           }
         t2 = 1;
-        if((peptr+1)->peFileSystem == PTCext) {
-          e_head = (peptr+1)->peBeginHead;
-          e_sect = (peptr+1)->peBeginSector;
-          e_cyld = (peptr+1)->peBeginCylinder;
+        if((peptr+1)->peFileSystem == PTCext || (peptr+1)->peFileSystem == PTClext) {
+          ebr = ext_base + (peptr+1)->peStartSector.li;
           }
         else {
           t2 = 0xff;
@@ -2728,6 +2958,27 @@ void update_max(void) {
 
 /*======================================================================
 ;,fs
+; dr_type *dr_of(byte drv)
+;
+; in:	drv = 0 based drive number
+;
+; out:	retval -> the drive record
+;
+;,fe
+========================================================================*/
+dr_type *dr_of(byte drv) {
+
+  dr_type *dr;
+
+  dr = Root_dr;
+  while(dr->drNext != NULL && dr->drDriveNum != drv) {
+    dr = dr->drNext;
+    }
+  return(dr);
+  }
+
+/*======================================================================
+;,fs
 ; byte check_pbr(pr_type *pr, byte nx, byte drv)
 ; 
 ; check for a partition boot record which contains the wrong total
@@ -2756,7 +3007,7 @@ byte check_pbr(pr_type *pr, byte nx, byte drv) {
   if(pr->prE[nx].MLG) {
     return(0);
     }
-  if(read_sector(0x80+drv,pr->prE[nx].PT.peBeginHead,pr->prE[nx].PT.peBeginSector,pr->prE[nx].PT.peBeginCylinder,sct_buf) != 0) {
+  if(lba_io(0x42,dr_of(drv),pr->prE[nx].ABS,sct_buf) != 0) {
     report_error(errcode_insuficmem);
     return(1);
     }
@@ -2778,7 +3029,7 @@ byte check_pbr(pr_type *pr, byte nx, byte drv) {
     }
   if(not_pbr || d1.li != pr->prE[nx].PT.peSectors.li) {
     memset(&sct_buf,0xf6,512);
-    if(write_sector(0x80+drv,pr->prE[nx].PT.peBeginHead,pr->prE[nx].PT.peBeginSector,pr->prE[nx].PT.peBeginCylinder,sct_buf) != 0) {
+    if(lba_io(0x43,dr_of(drv),pr->prE[nx].ABS,sct_buf) != 0) {
       report_error(errcode_diskwrite);
       return(1);
       }
@@ -2809,6 +3060,18 @@ byte write_tree(void) {
   pr_type *pptr2;
   dword rel_secs;
 
+
+  /* this version reads disks beyond 8 GB but does not write them yet:
+  refuse before anything is written. */
+
+  dptr1 = Root_dr;
+  while(dptr1 != NULL) {
+    if(dptr1->drCylds > CHSMAXC + 1) {
+      report_error(errcode_bigdisk);
+      return(1);
+      }
+    dptr1 = dptr1->drNext;
+    }
 
   changed_disk = 1;
   ext_ndx = 0xff;
@@ -2861,8 +3124,7 @@ byte write_tree(void) {
         the pte number for later and calc the beginning cylinder number. */
 
         ext_ndx = t1;
-        bc = pptr1->prE[t1].ExtPR->prE[0].PT.peBeginCylinder + 
-        ((pptr1->prE[t1].ExtPR->prE[0].PT.peBeginSector & 0xc0) << 2);
+        bc = pptr1->prE[t1].ExtPR->prE[0].BC;
 
         /* to appease fdisk, must locate the ending cyld of the last
         extended partition and write it into the ending cyld field of
@@ -2892,12 +3154,13 @@ byte write_tree(void) {
       /* copy pt data to mbr buffer */
 
       set_pe_data(pptr1,t1,bs,bc,es,ec);
+      pptr1->prE[t1].ABS = pptr1->prE[t1].PT.peStartSector.li;
       memcpy((mbr_buf+0x1be+t1*16),&(pptr1->prE[t1].PT),16);
       }
 
     /* write the mbr buffer to disk */
 
-    if(write_sector(0x80+drive_num,0,1,0,mbr_buf) != 0) {
+    if(lba_io(0x43,dptr1,0,mbr_buf) != 0) {
       report_error(errcode_diskwrite);
       return(1);
       }
@@ -2961,6 +3224,7 @@ byte write_tree(void) {
         pptr1->prE[0].PT.peSectors.li = tsct.li;
         rel_secs.li += (tsct.li + dptr1->drSPT);
         set_pe_data(pptr1,0,bs,bc,es,ec);
+        pptr1->prE[0].ABS = spcyl.li * bc + dptr1->drSPT;
 
         /* if not the last extended partition in the chain, prepare
         the linkage entry in this partition table. */
@@ -2970,10 +3234,8 @@ byte write_tree(void) {
           get_pe_data(pptr1,1,&bs,&bc,&es,&ec);
           pptr1->prE[1].PT.peBeginHead = 0;
           bs = 1;
-          bc = pptr1->prE[1].ExtPR->prE[0].PT.peBeginCylinder + 
-          ((pptr1->prE[1].ExtPR->prE[0].PT.peBeginSector & 0xc0) << 2);
-          ec = pptr1->prE[1].ExtPR->prE[0].PT.peEndCylinder + 
-          ((pptr1->prE[1].ExtPR->prE[0].PT.peEndSector & 0xc0) << 2);
+          bc = pptr1->prE[1].ExtPR->prE[0].BC;
+          ec = pptr1->prE[1].ExtPR->prE[0].EC;
           es = dptr1->drSPT;
           pptr1->prE[1].PT.peEndHead = dptr1->drHeads - 1;
           pptr1->prE[1].PT.peStartSector.li = rel_secs.li;
@@ -2996,7 +3258,7 @@ byte write_tree(void) {
 
         /* write the sector buffer to disk */
 
-        if(write_sector(0x80+drive_num,0,pptr1->prE[0].PT.peBeginSector,pptr1->prE[0].PT.peBeginCylinder,sct_buf) != 0) {
+        if(lba_io(0x43,dptr1,spcyl.li * pptr1->prE[0].BC,sct_buf) != 0) {
           report_error(errcode_diskwrite);
           return(1);
           }
@@ -3054,8 +3316,12 @@ void reboot(void) {
     memptr.h[a_seg] = 0xf000;
     memptr.h[a_ofs] = 0xfff0;
     }
+#ifdef __WATCOMC__
+  farcall_ah0(memptr.ffptrv);
+#else
   _AH = 0;
   (memptr.ffptrv)();
+#endif
   }
 
 /*======================================================================
@@ -3199,6 +3465,8 @@ void insure_ext_sync(void) {
 
   for(t2=1;t2<4;t2++) {
     if(edit_mbrpt->prE[t2].ExtPR != NULL) {
+      edit_mbrpt->prE[t2].BC =
+      edit_mbrpt->prE[t2].ExtPR->prE[0].BC;
       edit_mbrpt->prE[t2].PT.peBeginCylinder = 
       edit_mbrpt->prE[t2].ExtPR->prE[0].PT.peBeginCylinder;
       edit_mbrpt->prE[t2].PT.peBeginSector = 
@@ -3973,8 +4241,7 @@ pr_type *ext_helper2(pr_type *prptr, dr_type *drptr) {
     pptr3 = prptr;
     pptr2 = pptr3->prE[t2].ExtPR;
     while(pptr2 != NULL) {
-      bc2 = pptr2->prE[0].PT.peBeginCylinder + 
-      ((pptr2->prE[0].PT.peBeginSector & 0xc0) << 2);
+      bc2 = pptr2->prE[0].BC;
       if(bc < bc2) {
         pptr1->prE[1].ExtPR = pptr2;
         pptr1->prE[1].PT.peFileSystem = PTCext;

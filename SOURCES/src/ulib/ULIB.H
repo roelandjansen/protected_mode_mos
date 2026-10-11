@@ -2,6 +2,18 @@
 #include "asmtypes.h"
 #endif
 
+#ifdef __WATCOMC__
+#include <string.h>
+#define movmem(s,d,n) memmove((d),(s),(n))
+#define UL_ASM __cdecl
+unsigned short ul_getds(void);
+#pragma aux ul_getds = "mov ax,ds" value [ax];
+#define _DS ul_getds()
+#define _SS _DS
+#else
+#define UL_ASM
+#endif
+
 #define box_none	0
 #define box_single	1
 #define box_double	2
@@ -86,8 +98,8 @@ void ul_get_xy(byte *xptr, byte *yptr);
 
 // window management
 
-void ul_save_window(int x, int y, int xm, int ym, void far *saveptr);
-void ul_restore_window(int x, int y, int xm, int ym, void far *saveptr);
+void UL_ASM ul_save_window(int x, int y, int xm, int ym, void far *saveptr);
+void UL_ASM ul_restore_window(int x, int y, int xm, int ym, void far *saveptr);
 wintype ul_open_window(byte xl,byte yt,byte xr,byte yb,byte vattr1,byte vattr2,byte boxtype);
 void ul_close_window(wintype win);
 
