@@ -275,7 +275,7 @@ mosfutil label near			; mark the beginning of this module - sjc
 	extrn	mosliman:near, caps:near, getdate:near, gettime:near
 	extrn	suspend:near, setbdb:near, fat12:near, fat16:near
 	extrn	mosheman:near, ckdev0:near, moslim0:near, getthdl:near
-	extrn	classlvl:near, devchk:near, mediachk:near, wrsector:near
+	extrn	classlvl:near, dclasslvl:near, devchk:near, mediachk:near, wrsector:near
 	extrn	rddir:near, flushdir:near, rdfat:near, todriver:near
 	extrn	toint24:near, flush:near, openfile:near, setphdl:near
 	extrn	flushdata:near, wrfat:near, findphdl:near, getphdl:near
@@ -1809,8 +1809,7 @@ pathfx1:
 	pop	es			; address constants in code segment
 	call	findnm
 	jc	pathfx3
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	cmp	al,cl
 	jae	pathfx2 		; taking the least allowed access level
 	mov	cl,al
@@ -1921,8 +1920,7 @@ pathc4:
 	xor	al,al
 pathc2:
 	push	ax
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	mov	cl,[clvl]
 	cmp	al,cl
 	jae	pathc3

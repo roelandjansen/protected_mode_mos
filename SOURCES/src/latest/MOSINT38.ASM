@@ -547,7 +547,7 @@ mosseg	segment
 $$$int38 label	byte
 
 	extrn	mosend:byte, sbios:word, scbfree:word
-	extrn	mosliman:near, mosheman:near, classlvl:near
+	extrn	mosliman:near, mosheman:near, classlvl:near, dclasslvl:near
 	extrn	noswitch:near, okswitch:near, moserror:near
 	extrn	tsl:near, suspend:near, suspend2:near
 	extrn	wrsector:near, flushdir:near, pathfind:near
@@ -856,8 +856,7 @@ mosf83ok:
 	or	bx,bx
 	jz	mosf83a
 	assume	es:dbb
-	mov	al,es:[dbbbuf+si+dclass0]  ; return access level
-	callmos2 classlvl
+	callmos2 dclasslvl	; class of the entry (UPDATE 97)
 mosf83a:
 	mov	cx,bp
 	mov	bp,[bp]
@@ -876,6 +875,10 @@ mosf83a:
 	les	di,[bf]
 	mov	cx,10/2
 	rep	movsw
+	test	byte ptr [si-11],sys	; no system attribute: the class byte is
+	jnz	mosf83g			; not a pc-mos class (dos 7 creation time),
+	mov	byte ptr es:[di-9],0	; report none (UPDATE 97)
+mosf83g:
 	xor	ax,ax
 	jmp	mosf83x
 
@@ -909,6 +912,15 @@ mosf83c:
 mosf83d:
 	mov	cx,10/2
 	rep	movsw
+	test	byte ptr es:[di-11],dir	; a directory that gets a class also
+	jz	mosf83e			; gets the system attribute: dclasslvl only
+	mov	al,es:[di-9]		; honours classes of entries that have it
+	or	al,al			; (UPDATE 97)
+	jz	mosf83e
+	cmp	al,' '
+	je	mosf83e
+	or	byte ptr es:[di-11],sys
+mosf83e:
 	mov	ds,dx
 	callmos2 wrsector
 	jc	mosf83x
@@ -2531,6 +2543,10 @@ mf8d70:
 mf8d80:
 	mov	[rclust],dx
 	mov	al,byte ptr [dbbbuf+si+dclass0]
+	test	byte ptr [dbbbuf+si+datr],sys  ; only with the system attribute
+	jnz	mf8d85			; is it a pc-mos class (UPDATE 97)
+	xor	al,al
+mf8d85:
 	mov	[class],al		; file class for calling task
 	mov	al,[bdbid]		; id of path's drive
 	mov	[pathdrv],al

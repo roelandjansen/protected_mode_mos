@@ -242,6 +242,18 @@ Vrchk3:
 	mov	bx,OPS		; check for parameters
 	mov	cl,byte ptr [bx]; load # of chars into cx
 	xor	ch,ch
+fmtrim:				; drop trailing blanks and tabs: with output
+	jcxz	fmtrimx		; redirection the shell leaves one, and the
+	mov	si,cx		; file name check then failed (UPDATE 97)
+	cmp	byte ptr [bx+si],' '
+	je	fmtrim1
+	cmp	byte ptr [bx+si],9
+	jne	fmtrimx
+fmtrim1:
+	dec	cx
+	jmp	fmtrim
+fmtrimx:
+	mov	byte ptr [bx],cl
 	or	cx,cx		; see if they entered any parms
 	jnz	parms_there
 	call	syntax_err	; no, syntax error

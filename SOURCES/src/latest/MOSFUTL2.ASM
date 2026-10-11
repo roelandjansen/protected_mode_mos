@@ -254,7 +254,7 @@ ddt	segment
 	public	toint24, caller1, m2retf, mo1seg, callfun1
 	public	blkread, blkwrite, mediachk, devchk, todriver
 	public	getclust, devread, devwrite, classbits
-	public	cpycmap, eblcmap, classlvl, encrypt, decrypt
+	public	cpycmap, eblcmap, classlvl, dclasslvl, encrypt, decrypt
 	public	random
 
 if 0 eq 0				; fake out public.com
@@ -389,6 +389,35 @@ classlvl proc near
 	pop	ds
 	ret
 classlvl endp
+
+	subttl dclasslvl - class access permission bits of a directory entry
+	page
+;======================================================================
+;,fs
+; dclasslvl - class access permission bits of a directory entry
+;
+; the class byte (offset 13) only counts when the entry has the system
+; attribute: pc-mos sets it on every entry it gives a class.  dos 7,
+; freedos, windows and mtools keep the creation time (tenths) in that
+; byte, often 'A'-'Z', which made such files and directories read-only
+; or inaccessible to pc-mos (UPDATE 97).
+;
+; in:	es:[dbbbuf+si] = directory entry
+;	ss = paragraph address of class map tcb
+;
+; out:	al = access bits
+;
+;,fe
+;======================================================================
+	assume	ds:nothing,es:nothing,ss:tcb
+dclasslvl proc near
+	mov	al,es:[dbbbuf+si+dclass0]
+	test	byte ptr es:[dbbbuf+si+datr],sys
+	jnz	dcl1
+	xor	al,al			; no system attribute: no class
+dcl1:
+	jmp	classlvl
+dclasslvl endp
 
 	subttl classbits - retrieve class access permission bits
 	page

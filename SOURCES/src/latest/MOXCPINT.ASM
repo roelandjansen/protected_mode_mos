@@ -2916,6 +2916,8 @@ doutime:
 getclass:
 	mov	bx,dtaaddr+21		; get file class
 	mov	al,[bx]
+	test	byte ptr ds:[dtaaddr+19],4  ; a class only counts with the system
+	jz	noclass			; attribute (UPDATE 97: dos 7 time byte)
 	or	al,al
 	jz	noclass
 	cmp	al,' '
@@ -2926,6 +2928,8 @@ noclass:
 	or	bp,bp			; is day # 0 ?
 	jz	notmosfile
 nocl2:
+	cmp	word ptr ds:[dtaaddr+28],0  ; no creation date: not written by
+	je	writelong		; pc-mos, bytes 14-17 are no user id (UPDATE 97)
 	mov	si,dtaaddr+22
 	lea	di,[workbuf+51]
 	cmp	byte ptr [si],0

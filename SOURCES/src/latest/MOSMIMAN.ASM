@@ -288,7 +288,7 @@ mosmiman label near
 	extrn iolock:near, getclust:near, blkread:near
 	extrn decrypt:near, devwrite:near,alloclust:near, flushdir:near
 	extrn getfat:near, putfat:near, dealloc:near, encrypt:near
-	extrn blkwrite:near, classlvl:near, exclude:near, timestamp:near
+	extrn blkwrite:near, classlvl:near, dclasslvl:near, exclude:near, timestamp:near
 	extrn rddir:near, wrsector:near, okchar:near, makelbl:near
 	extrn devread:near, create:near, todriver:near, findtfb:near
 
@@ -3372,8 +3372,7 @@ truncguts:
 	cmp	ah,3			; must have read/write access at parent dir
 	mov	ax,accdeny		;   to truncate
 	jb	truncgx
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	cmp	al,3			; must have read/write access to dir entry
 	mov	ax,accdeny		;   in order to truncate
 	jb	truncgx

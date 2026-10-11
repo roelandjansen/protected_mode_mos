@@ -1277,6 +1277,8 @@ mgx1:
 
 	xor	al,al			; default to space
 	mov	ah,byte ptr [si+dbbbuf+dclass0]
+	test	byte ptr [si+dbbbuf+datr],sys  ; only with the system attribute
+	jz	mgfbc1			; is it a pc-mos class (UPDATE 97)
 	cmp	ah,'A'
 	jb	mgfbc1
 	cmp	ah,'Z'

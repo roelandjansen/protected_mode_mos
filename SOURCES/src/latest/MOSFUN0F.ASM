@@ -170,7 +170,7 @@ ddt	segment
 	extrn	timestamp:near, wrsector:near, setphdl:near, iolock:near
 	extrn	devread:near, devwrite:near
 	extrn	devicenm:near, finddrv:near, exclude:near, okchar:near
-	extrn	classlvl:near, findbdb:near, capscmps:near
+	extrn	classlvl:near, dclasslvl:near, findbdb:near, capscmps:near
 	extrn	cpycmap:near, eblcmap:near
 	extrn	readguts:near, writeguts:near, truncguts:near, creatguts:near
 	extrn	checkexon:near
@@ -464,8 +464,7 @@ lstring secbuf,<size sectorblk>
 mosf13a:
 	test	[dbbbuf+si+datr],dir
 	jnz	mosf13c 		; can't delete directories
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	cmp	al,3			; on to next if don't have read/write
 	jc	mosf13c 		;   access to this class
 	call	exclude
@@ -768,8 +767,7 @@ mosf17a:
 
 ; make sure we can acquire exclusive access to the file
 
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	cmp	al,3			; go on to next if don't have read/write
 	jc	jmosf17d		;   access to this file's class
 	call	exclude
@@ -1393,8 +1391,7 @@ nextf2:
 	pop	ds
 	pop	si
 	jc	nextf3
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	or	al,al
 	jnz	nextfy			; z if not accessible to this tcb
 nextf3:

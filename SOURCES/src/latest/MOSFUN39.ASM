@@ -285,7 +285,7 @@ ddt	segment
 	extrn	pathfind:near, putfat:near, rddir:near, slash:near
 	extrn	timestamp:near, wrsector:near, setphdl:near, iolock:near
 	extrn	devread:near, devwrite:near, finddrv:near, exclude:near
-	extrn	okchar:near, encrypt:near, decrypt:near, classlvl:near
+	extrn	okchar:near, encrypt:near, decrypt:near, classlvl:near, dclasslvl:near
 	extrn	cpycmap:near, eblcmap:near, capscmps:near, findphdl:near
 
 ; extrn's from MOSMIMAN.ASM
@@ -900,8 +900,7 @@ jmosf3bx:
 ; check for security clearance
 
 mosf3ba3:
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	cmp	al,1
 	mov	ax,error_access_denied
 	jb	jmosf3bx
@@ -1739,8 +1738,7 @@ lstring secbuf,<size sectorblk>		; buffer for sector number
 	mov	ax,error_access_denied
 	jmp	short mosf41x
 noex2:
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl		; must have read/write access to dir entry
+	call	dclasslvl	; class of the entry (UPDATE 97)		; must have read/write access to dir entry
 	cmp	al,3			;   to delete it
 	mov	ax,error_access_denied
 	jb	mosf41x
@@ -1945,8 +1943,7 @@ mosf43c:
 jmosf43x:
 	jmp	short mosf43x
 noex3:
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl		; must have read/write access to dir/entry
+	call	dclasslvl	; class of the entry (UPDATE 97)		; must have read/write access to dir/entry
 	cmp	al,3			;   to change its attributes
 	mov	ax,error_access_denied
 	jb	mosf43x
@@ -2319,8 +2316,7 @@ mosf4ec:
 	call	ckexcl			; check for exclusion
 	jc	mosf4ed
 	push	ax			; else make sure this tcb can look at dir
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl		; entries of this class
+	call	dclasslvl	; class of the entry (UPDATE 97)		; entries of this class
 	or	al,al
 	pop	ax
 	jnz	mosf4ee			; class access ok if not deny access
@@ -2571,8 +2567,7 @@ mosf4fb:
 	jnz	mosf4fc			; ok if level access overrride for dir search
 	call	ckexcl			; check except/only list
 	jc	mosf4fa
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl
+	call	dclasslvl	; class of the entry (UPDATE 97)
 	or	al,al
 	jz	mosf4fa			; ignore dir entry at deny access level
 mosf4fc:
@@ -2851,8 +2846,7 @@ lstring secbuf,<size sectorblk>		; buffer for sector number
 jmosf56x:
 	jmp	mosf56x
 noex5:
-	mov	al,[dbbbuf+si+dclass0]
-	call	classlvl		; must have read/write access to source
+	call	dclasslvl	; class of the entry (UPDATE 97)		; must have read/write access to source
 	cmp	al,3			;   dir entry
 	mov	ax,error_access_denied
 	jb	jmosf56x
