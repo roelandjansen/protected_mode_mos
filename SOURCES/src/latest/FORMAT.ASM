@@ -689,12 +689,17 @@ main340:
 	mov	dx,word ptr [odevp].dpHugeSectors+2
 main400:
 
-; tracks = total sectors / spt
-; cylinders = tracs / heads
+; cylinders = total sectors / (spt * heads), rounded up.  one 32/16 bit
+; division: the old "tracks = total / spt" step overflowed beyond
+; 65535 tracks (about 2 gb), "divide by zero error" (UPDATE 95)
 
-	div	[spt]
-	mov	cx,[odevp].dpHeads
-	xor	dx,dx
+	push	dx
+	push	ax
+	mov	ax,[spt]
+	mul	[odevp].dpHeads
+	mov	cx,ax
+	pop	ax
+	pop	dx
 	div	cx
 
 ; if a remainder, bump up the count to the next cylinder.
@@ -1639,6 +1644,20 @@ genbpb proc near
 	sub	ax,cx
 	sbb	dx,0
 
+; a hard disk partition keeps its own size: rounded up to whole
+; cylinders the file system could reach past the partition end into
+; the next one when partitions are not cylinder aligned (UPDATE 95)
+
+	cmp	[hard],true
+	jne	gbkeep
+	xor	dx,dx
+	mov	ax,[odevp].dpSectors
+	or	ax,ax
+	jnz	gbkeep
+	mov	ax,word ptr [odevp].dpHugeSectors
+	mov	dx,word ptr [odevp].dpHugeSectors+2
+gbkeep:
+
 ; now it's time to store this total sector count in the 
 ; new parameter block/bpb.
 
@@ -2165,6 +2184,11 @@ fmt130:
 ; amount was closer to a whole track than a cluster.  
 ; this is marked as an overflow.
 
+	push	ax			; remainder of dx:ax / spt in two steps,
+	mov	ax,dx			; no overflow beyond 65535 tracks (UPDATE 95)
+	xor	dx,dx
+	div	[spt]
+	pop	ax
 	div	[spt]
 	add	dx,[spc]
 	mov	[ovflow_flag],false

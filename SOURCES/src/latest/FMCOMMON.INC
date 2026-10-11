@@ -34,6 +34,11 @@ ourbuf	db	512 dup(?)
 drives	db	?
 pt0	db	4*16 dup(0)
 pt1	db	4*16 dup(0)
+scext	dd	0		; start sector of the extended partition (UPDATE 95)
+sclba	dd	0		; sector of the next ebr, for rdsec
+scdap	dw	10h,1		; int 13h 42h disk address packet: 1 sector
+	dw	offset ourbuf,0	; -> ourbuf (segment set by rdsec)
+scdlba	dw	0,0,0,0		; 64-bit sector number
 
 
 ;==========================================================
@@ -116,6 +121,8 @@ scpc:
 	cmp	[si].peFileSystem,PTCsm16
 	je	scpc1
 	cmp	[si].peFileSystem,PTCdlg
+	je	scpc1
+	cmp	[si].peFileSystem,0eh	; FAT16 (LBA), UPDATE 95
 	ljne	scpx
 
 ; copy the partition table into the storage block
@@ -173,6 +180,8 @@ scpc2:
 	je	scpe
 	cmp	[si].peFileSystem,PTCdlg
 	je	scpe
+	cmp	[si].peFileSystem,0eh	; FAT16 (LBA), UPDATE 95
+	je	scpe
 scpd:
 	mov	[drives],1
 	jmp	scpf
@@ -208,7 +217,10 @@ scpg8:
 scpg1:
 	add	si,16			; advance to next pte
 	cmp	[si].peFileSystem,PTCext
+	je	scpg0
+	cmp	[si].peFileSystem,0fh	; extended (LBA), UPDATE 95
 	jne	scpg2
+scpg0:
 	mov	di,si
 	jmp	short scpg3
 scpg2:
@@ -216,6 +228,12 @@ scpg2:
 scpg3:
 	or	di,di			; was an extended partition found?
 	jz	scpgz
+	mov	ax,word ptr [di].peStartSector	; first ebr (UPDATE 95)
+	mov	word ptr [scext],ax
+	mov	word ptr [sclba],ax
+	mov	ax,word ptr [di].peStartSector+2
+	mov	word ptr [scext+2],ax
+	mov	word ptr [sclba+2],ax
 
 ; read the next partition table
 
@@ -226,7 +244,7 @@ scpg6:
 	mov	ax,0201h		; read 1 sector
 	mov	bx,offset ourbuf
 	push	dx
-	int	13h
+	call	rdsec			; chs or lba (UPDATE 95)
 	pop	dx
 	ljc	scpx
 
@@ -255,7 +273,16 @@ scpg6:
 
 scpg4:
 	cmp	[di].peFileSystem,PTCext
+	je	scpg5
+	cmp	[di].peFileSystem,0fh	; extended (LBA), UPDATE 95
 	jne	scpgz
+scpg5:
+	mov	ax,word ptr [di].peStartSector	; next ebr = extended start
+	add	ax,word ptr [scext]		; + start in entry 2 (UPDATE 95)
+	mov	word ptr [sclba],ax
+	mov	ax,word ptr [di].peStartSector+2
+	adc	ax,word ptr [scext+2]
+	mov	word ptr [sclba+2],ax
 	mov	cl,[di].peBeginSector
 	mov	ch,[di].peBeginCylinder
 	mov	dh,[di].peBeginHead	; (dl is still the drive number)
@@ -287,6 +314,8 @@ scph1:
 	cmp	[si].peFileSystem,PTCsm16
 	je	scph2
 	cmp	[si].peFileSystem,PTCdlg
+	je	scph2
+	cmp	[si].peFileSystem,0eh	; FAT16 (LBA), UPDATE 95
 	jne	scph3
 scph2:
 
@@ -335,3 +364,61 @@ scpz:
 
 
 
+	subttl rdsec - read one partition table sector
+	page
+;======================================================================
+;,fs
+; rdsec - read one partition table sector into ourbuf (UPDATE 95)
+;
+; with the int 13h extensions (41h) the sector in sclba is read with
+; 42h, otherwise the chs address in cx/dh is used.  ebrs beyond
+; cylinder 1023 have no usable chs address.
+;
+; in:	ds = cs, dl = bios drive, cx/dh = chs address, sclba = sector
+;
+; out:	cy if error
+;
+;,fe
+;======================================================================
+rdsec:
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	mov	ah,41h
+	mov	bx,55aah
+	int	13h
+	jc	rdsc0
+	cmp	bx,0aa55h
+	jne	rdsc0
+	test	cl,1
+	jz	rdsc0
+	pop	si
+	pop	dx
+	push	dx
+	push	si
+	mov	ax,word ptr [sclba]
+	mov	[scdlba],ax
+	mov	ax,word ptr [sclba+2]
+	mov	[scdlba+2],ax
+	mov	[scdap+6],ds
+	mov	si,offset scdap
+	mov	ah,42h
+	int	13h
+	jmp	short rdsc2
+rdsc0:
+	pop	si
+	pop	dx
+	pop	cx
+	push	cx
+	push	dx
+	push	si
+	mov	ax,0201h
+	mov	bx,offset ourbuf
+	int	13h
+rdsc2:
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	ret

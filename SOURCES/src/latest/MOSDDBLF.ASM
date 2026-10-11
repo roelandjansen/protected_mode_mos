@@ -677,6 +677,12 @@ i13x proc near
 	int	13h			; chs
 	ret
 i13x1:
+	cmp	ah,3			; verify (4) / format (5) track: nothing to
+	jbe	i13x2			; do on an lba disk (UPDATE 95)
+	xor	ah,ah
+	clc
+	ret
+i13x2:
 	push	bp
 	push	si
 	push	ds
@@ -873,11 +879,15 @@ hgsetparms proc near
 	mov	dx,ax
 	call	calcabs			; dx & cx set up for read
 	mov	dl,es:[si].dibRealDrive	; real drive id
+	mov	ax,es:[si].dibOffsetLo	; lba of logical sector 0 for i13x
+	mov	[xlba],ax		; (UPDATE 95: beyond cylinder 1023 the chs
+	mov	ax,es:[si].dibOffsetHi	; read wrapped: wrong bpb after format,
+	mov	[xlba+2],ax		; "divide by zero error")
 	push	ds
 	pop	es
 	lea	bx,[ourbuf]		; sector buffer
 	mov	ax,0201h		; command code to . . .
-	int	13h			; read the sector
+	call	i13x			; read the sector (chs or lba, UPDATE 95)
 	push	si
 	mov	di,si			; destination is our bpb
 	lea	si,[bx+11]		; source is sector buffer + 11
@@ -1106,13 +1116,40 @@ hg_fmtentry:
 	mov	di,es:[bx].rwHead	; check requested head number
 	mov	es,[dib_seg]
 	cmp	di,es:[si].dibHeads	; head number above max?
-	jae	hgwrer2			; if head number too big
+	ljnc	hgwrer2			; if head number too big
 
 ; check cylinder number.
 
 hgwr40:
 	cmp	cx,es:[si].dibCylsPerTrack  ; greater than cylinders on device?
-	jae	hgwrer3			; if out of range, add cylinder offset
+	ljnc	hgwrer3			; if out of range, add cylinder offset
+	push	ax			; xlba = partition start - hidden sectors
+	push	bx			; + (cyl * heads + head) * spt + sector:
+	push	dx			; the chs origin format uses (UPDATE 95)
+	mov	ax,cx
+	mul	es:[si].dibHeads	; dx:ax = cylinder * heads
+	add	ax,di
+	adc	dx,0			; + head
+	mov	bx,dx
+	mul	es:[si].dibSecPerTrack	; low word * spt
+	push	ax
+	push	dx
+	mov	ax,bx
+	mul	es:[si].dibSecPerTrack	; high word * spt
+	pop	dx
+	add	dx,ax
+	pop	ax
+	add	ax,[sectstr]		; + sector (0 based)
+	adc	dx,0
+	add	ax,es:[si].dibOffsetLo
+	adc	dx,es:[si].dibOffsetHi
+	sub	ax,word ptr es:[si].dibHiddenSecs
+	sbb	dx,word ptr es:[si].dibHiddenSecs+2
+	mov	[xlba],ax
+	mov	[xlba+2],dx
+	pop	dx
+	pop	bx
+	pop	ax
 	add	cx,es:[si].dibCylsFBeg	; to get physical cylinder
 
 ; set up registers for i/o.
@@ -1144,7 +1181,7 @@ hg_diskio:
 hg_iopart:
 	mov	al,byte ptr [sectcnt]	; sector count (format ignores this)
 	mov	ah,[biosfun]		; function to perform
-	int	13h
+	call	i13x			; chs or lba (UPDATE 95)
 	jnc	hg_iook			; if no error doing i/o
 	dec	[typrtr]		; out of retries?
 	jnz	hg_diskio		; no, try i/o again
