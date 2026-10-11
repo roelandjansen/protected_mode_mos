@@ -923,6 +923,10 @@ cpc3:
 	mul	bl
 	xor	ch,ch
 	add	cx,ax
+	cmp	cx,1980			; a bios whose rtc century byte was never
+	jae	cpc1y			; set past 19 reports 19yy for 20yy: take
+	add	cx,100			; yy below 80 as 20yy (UPDATE 96)
+cpc1y:
 	mos	setdate
 	mov	ah,02h			; get rtc time
 	int	1ah
