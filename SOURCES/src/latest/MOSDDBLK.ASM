@@ -1529,21 +1529,21 @@ fremove endp
 fgenioctl proc near
 	les	bx,dword ptr [hdr]
 	mov	cl,es:[bx].giMinorCode	; minor function code
-	or	[si].dibAttributes,dirtybpb  ; insure mediachk returns "changed"
-	cmp	cl,setparms
-	je	fgen10
-	cmp	cl,getparms
-	je	fgen20
-	cmp	cl,wrttrack
-	je	fgen30
-	cmp	cl,rdtrack
-	je	fgen40
-	cmp	cl,fvtrack
-	je	fgen50
+	cmp	cl,getparms		; reading calls leave the bpb alone
+	je	fgen20			; (UPDATE 92: a 440Dh get parameters made
+	cmp	cl,rdtrack		; the next media check say "changed"
+	je	fgen40			; with files open: int 24h, general failure)
 	cmp	cl,vertrack
 	je	fgen60
 	cmp	cl,getmedid
 	je	fgen70
+	or	[si].dibAttributes,dirtybpb  ; insure mediachk returns "changed"
+	cmp	cl,setparms
+	je	fgen10
+	cmp	cl,wrttrack
+	je	fgen30
+	cmp	cl,fvtrack
+	je	fgen50
 	cmp	cl,setmedid
 	je	fgen80
 	mov	es:[bx].giStatus,8103h

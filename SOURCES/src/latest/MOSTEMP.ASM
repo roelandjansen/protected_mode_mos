@@ -427,6 +427,19 @@ i2f2:
 	call	mosrestore
 	xor	al,al			; os does support this call
 i2f3:
+	cmp	ax,1a00h		; ANSI.SYS installation check (UPDATE 91):
+	jne	i2f4			; installed if this task's console has ANSI on
+	push	ds
+	mgetscb ds
+	assume	ds:grp
+	mov	ds,[scbtcbpc]
+	assume	ds:tcb
+	cmp	byte ptr [tcbansi],0ffh
+	pop	ds
+	assume	ds:nothing
+	jne	i2f4
+	mov	al,0ffh
+i2f4:
 	iret
 mosint2f endp
 
