@@ -1681,6 +1681,12 @@ cfmos	macro	addr
 	call	camos
 	endm
 
+PTCl16	equ	0eh			; FAT16, LBA addressed (UPDATE 94)
+PTClext	equ	0fh			; extended, LBA addressed (UPDATE 94)
+
+extbase	dw	0,0			; start sector of the extended partition
+curebr	dw	0,0			; sector of the ebr being processed
+
 	subttl process_partition - fill out a dib block for a partition
 	page
 ;======================================================================
@@ -2112,6 +2118,8 @@ init040:
 	cmp	[si].peFileSystem,PTCsm16
 	je	init050
 	cmp	[si].peFileSystem,PTCdlg
+	je	init050
+	cmp	[si].peFileSystem,PTCl16	; FAT16 (LBA), UPDATE 94
 	ljne	init290
 
 ; copy the partition table into the first stack block
@@ -2160,6 +2168,8 @@ init060:
 	cmp	[si].peFileSystem,PTCsm16
 	je	init080
 	cmp	[si].peFileSystem,PTCdlg
+	je	init080
+	cmp	[si].peFileSystem,PTCl16	; FAT16 (LBA), UPDATE 94
 	je	init080
 init070:
 	mov	[drives],1
@@ -2218,7 +2228,10 @@ init110:
 init120:
 	add	si,16			; start looking at pte 1
 	cmp	ss:[si].peFileSystem,PTCext
+	je	init125
+	cmp	ss:[si].peFileSystem,PTClext	; extended (LBA), UPDATE 94
 	jne	init130
+init125:
 	mov	di,si
 	jmp	short init140
 init130:
@@ -2233,6 +2246,10 @@ init140:
 	mov	word ptr [strtsec],ax
 	mov	ax,word ptr ss:[di].peStartSector+2
 	mov	word ptr [strtsec+2],ax
+	mov	ax,word ptr [strtsec]	; start of the extended partition (UPDATE 94)
+	mov	word ptr cs:[extbase],ax
+	mov	ax,word ptr [strtsec+2]
+	mov	word ptr cs:[extbase+2],ax
 
 ; read the next partition table
 
@@ -2240,12 +2257,18 @@ init140:
 	mov	ch,ss:[di].peBeginCylinder
 	mov	dh,ss:[di].peBeginHead
 init150:
+	mov	ax,word ptr [strtsec]	; this ebr: for process_partition and i13x
+	mov	word ptr cs:[curebr],ax
+	mov	[xlba],ax
+	mov	ax,word ptr [strtsec+2]
+	mov	word ptr cs:[curebr+2],ax
+	mov	[xlba+2],ax
 	mov	ax,0201h		; read 1 sector
 	mov	bx,ds
 	mov	es,bx
 	mov	bx,offset grp:ourbuf
 	push	dx
-	int	13h
+	cfmos	i13x			; chs or lba (UPDATE 94)
 	pop	dx
 	ljc	init260
 
@@ -2266,6 +2289,16 @@ init150:
 	push	cx
 	push	dx
 
+; next ebr = start of the extended partition + start in entry 2
+; (UPDATE 94; was: this ebr + start + size of entry 1)
+
+	mov	ax,word ptr [di].peStartSector
+	add	ax,word ptr cs:[extbase]
+	mov	word ptr [strtsec],ax
+	mov	ax,word ptr [di].peStartSector+2
+	adc	ax,word ptr cs:[extbase+2]
+	mov	word ptr [strtsec+2],ax
+
 ; make sure the extended node points to a 'live' partition
 ; before calling process_partition
 
@@ -2277,21 +2310,8 @@ init150:
 ; for extended partitions, a starting sector adjustment factor must
 ; be given to process_partition in the bx:cx registers.
 
-	mov	cx,word ptr [strtsec]
-	mov	bx,word ptr [strtsec+2]
-
-; now, just in case there is another extended partition after this one,
-; the adjustment factor must be stepped up by the total number of
-; sectors for the current partition.
-
-	mov	ax,word ptr [si].peSectors
-	add	word ptr [strtsec],ax
-	mov	ax,word ptr [si].peSectors+2
-	adc	word ptr [strtsec+2],ax
-	mov	ax,word ptr [si].peStartSector
-	add	word ptr [strtsec],ax
-	mov	ax,word ptr [si].peStartSector+2
-	adc	word ptr [strtsec+2],ax
+	mov	cx,word ptr cs:[curebr]	; logical partition = ebr + its start
+	mov	bx,word ptr cs:[curebr+2]	; (UPDATE 94)
 
 ; process the extended partition
 
@@ -2306,7 +2326,9 @@ init160:
 	pop	cx			; and ptc data from stack
 	pop	ax
 	cmp	al,PTCext
-	je	init150
+	lje	init150
+	cmp	al,PTClext		; extended (LBA), UPDATE 94
+	lje	init150
 	jmp	short init190
 init170:
 	add	sp,6
@@ -2341,6 +2363,8 @@ init220:
 	cmp	ss:[si].peFileSystem,PTCsm16
 	je	init230
 	cmp	ss:[si].peFileSystem,PTCdlg
+	je	init230
+	cmp	ss:[si].peFileSystem,PTCl16	; FAT16 (LBA), UPDATE 94
 	jne	init240
 init230:
 	call	next_dib
