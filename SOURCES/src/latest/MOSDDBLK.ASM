@@ -331,7 +331,7 @@ drvn	db	"A and press any key     ", 0ah, 0dh, 0ah, 0dh, 0  ;@@xlat
 ;==== function table
 
 	even
-ffuntbl dw	finitblk	; 0  init
+ffuntbl dw	finitstub	; 0  init (UPDATE 98: far to init segment)
 	dw	fmedck		; 1  media check
 	dw	fbldbpb		; 2  build bpb
 	dw	0		; 3  i/o control input
@@ -2501,7 +2501,45 @@ fiqz:
 fioquery endp
 
 
+
+initseg	segment
+	extrn	imosaddr:word
+initseg	ends
+
+	extrn	sinit:word, initcall:word
+
+; finitstub - the diskette init (finitblk, isdrive, maxparm) is in the
+; init segment (UPDATE 98).  far call as hinitstub in MOSDDBLF.ASM.
+
+	assume	ds:grp,es:nothing,ss:nothing
+finitstub proc near
+	push	ds
+	mov	ds,cs:[sinit]
+	assume	ds:init
+	mov	word ptr ds:[imosaddr],offset init:finitblk
+	pop	ds
+	assume	ds:grp
+	call	dword ptr cs:[initcall]
+	ret
+finitstub endp
 fendres label	byte
+
+
+mosseg	ends
+
+;======================================================== init segment
+; finitblk, isdrive and maxparm only run at boot: they live in the init
+; segment, which is discarded after init (UPDATE 98, as UPDATE 93 did
+; for the hard disk driver).
+
+initseg	segment
+	assume	cs:init
+	extrn	initmos:word, camos:near
+
+cfmos	macro	addr
+	mov	word ptr cs:[imosaddr],offset addr
+	call	camos
+	endm
 
 	subttl initblk - init driver
 	page
@@ -2523,7 +2561,7 @@ finitblk proc near
 	mov	ah,0
 	mov	dx,32+1			; want 32 paragraphs allocated+prefix
 	push	es
-	call	mosheman
+	cfmos	mosheman		; mos routine, far from init (UPDATE 98)
 	mov	ax,es
 	inc	ax			; don't wax the heap prefix
 	mov	[secbuf+2],ax		; store sector buffer segment address
@@ -2556,9 +2594,12 @@ fini10:
 	mov	al,es:[bx].irDriveNumber ; starting drive number
 	inc	al
 	mov	[startd],al
-	lea	dx,fendres
+	mov	dx,offset mos:fendres
 	mov	word ptr es:[bx].irEndAddress,dx  ; set ending address of driver
-	mov	word ptr es:[bx+2].irEndAddress,cs
+	push	ax			; the driver ends in mos (UPDATE 98)
+	mov	ax,cs:[initmos]
+	mov	word ptr es:[bx+2].irEndAddress,ax
+	pop	ax
 	lea	dx,bpbpntr
 	mov	word ptr es:[bx].irParamAddress,dx  ; set pointer to bpb pointer array
 	mov	word ptr es:[bx+2].irParamAddress,ds
@@ -2757,7 +2798,7 @@ maxparmx:
 	ret
 maxparm endp
 
-mosseg	ends
+initseg	ends
 	end
 
 
