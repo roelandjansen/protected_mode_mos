@@ -194,11 +194,25 @@ gus=false
 EOF
 
 	# HDIMG=file: attach a hard disk image (CHS from HDGEOM, default
-	# 512,63,255,260) as BIOS disk 80h, then boot the floppy
+	# 512,63,255,260) as BIOS disk 80h, then boot the floppy.
+	# HDIMG2/HDIMG3/HDIMG4 (geometry HDGEOM2..4): disks 81h-83h
+	# (needs the four-disk emulator patch, dosbox-hdd4.patch)
 	local BOOTARG="$STATE_DIR/boot.img"
+	local N
+	local IMGV
+	local GEOV
 	if [ -n "${HDIMG:-}" ]; then
-		printf '\n[autoexec]\nimgmount 2 %s -t hdd -fs none -size %s\nimgmount a %s -t floppy\nboot -l %s\n' \
-			"$HDIMG" "${HDGEOM:-512,63,255,260}" "$STATE_DIR/boot.img" "$( [ -n "${HDBOOT:-}" ] && printf c || printf a )" >>"$STATE_DIR/dosbox.conf"
+		printf '\n[autoexec]\nimgmount 2 %s -t hdd -fs none -size %s\n' \
+			"$HDIMG" "${HDGEOM:-512,63,255,260}" >>"$STATE_DIR/dosbox.conf"
+		for N in 2 3 4; do
+			IMGV="HDIMG$N"
+			GEOV="HDGEOM$N"
+			[ -n "${!IMGV:-}" ] || continue
+			printf 'imgmount %s %s -t hdd -fs none -size %s\n' \
+				"$((N + 1))" "${!IMGV}" "${!GEOV:-512,63,255,260}" >>"$STATE_DIR/dosbox.conf"
+		done
+		printf 'imgmount a %s -t floppy\nboot -l %s\n' \
+			"$STATE_DIR/boot.img" "$( [ -n "${HDBOOT:-}" ] && printf c || printf a )" >>"$STATE_DIR/dosbox.conf"
 		BOOTARG=""
 	fi
 

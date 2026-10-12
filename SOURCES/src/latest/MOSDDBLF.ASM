@@ -249,13 +249,12 @@ giobuf		dd	0	; buffer pointer for doint generic i/o
 typrtr		db	0	; retry count for generic i/o
 		db	0	; fill to word boundary
 drives		db	0	; actual number of hard drives
-pt0		dw	0	; ptr to copy of drive 0's partition table
-pt1		dw	0	; ptr to copy of drive 1's partition table
+pt0		dw	0	; ptr to the partition table copies (64 bytes per drive)
 dib_seg		dw	0	; ptr to dib storage area within smp
 dib_cnt		db	-1	; actual number of dib entries (0 based)
 dib_max		db	0	; max possible number of dib entries (init only)
 dib_ptr		dw	0	; offset of dib entry being operated on
-lbadrv		db	2 dup (0) ; 1: drive 80h+n has int 13h extensions (UPDATE 93)
+lbadrv		db	4 dup (0) ; 1: drive 80h+n has int 13h extensions (UPDATE 93, 104)
 xlba		dw	0,0	; sector number for int 13h 42h/43h (i13x)
 nslow		dw	0	; low word in # of sectors in partition
 nshigh		dw	0	; high word of # of sectors in partition
@@ -670,7 +669,7 @@ calcabs endp
 i13x proc near
 	push	bx
 	mov	bl,dl
-	and	bx,1
+	and	bx,3
 	test	[lbadrv+bx],1
 	pop	bx
 	jnz	i13x1
@@ -1723,8 +1722,7 @@ PTClext	equ	0fh			; extended, LBA addressed (UPDATE 94)
 
 extbase	dw	0,0			; start sector of the extended partition
 curebr	dw	0,0			; sector of the ebr being processed
-pri0	db	0ffh			; slot of the primary on 80h, 0ffh: none (6a)
-pri1	db	0ffh			; same for 81h
+pri	db	4 dup (0ffh)		; per drive: slot of its primary, 0ffh: none
 
 	subttl process_partition - fill out a dib block for a partition
 	page
@@ -1757,7 +1755,7 @@ process_partition proc near
 	test	cl,1			; fixed disk access subset
 	jz	prp005
 	mov	bl,dl
-	and	bx,1
+	and	bx,3
 	mov	[lbadrv+bx],1
 prp005:
 
@@ -2049,6 +2047,117 @@ pp040:
 	ret
 pickpri endp
 
+	subttl readmbr - read a drive's mbr and choose its primary
+	page
+;=====================================================================
+;,fs
+; readmbr - read a drive's mbr and choose its primary
+;
+; reads the mbr of drive 80h+bx into that drive's stack table and
+; moves its primary partition to slot 0 (pickpri).  a drive whose
+; mbr cannot be read or has no 55aah signature gets an empty table.
+; for drive 80h, a primary that came from slot 1-3 is entered in
+; trueboot as c: (UPDATE 101).  (UPDATE 104)
+;
+; in:	bx = drive index (0-3)
+;	[pt0] -> the stack tables, 64 bytes per drive
+;	ds -> grp
+;
+; out:	the drive's table filled in or zeroed
+;	cs:[pri+bx] = slot of its primary, 0ffh if none
+;
+;,fe
+;=====================================================================
+	assume	ds:grp,es:nothing,ss:nothing
+readmbr proc near
+	pushset ax,bx,cx,dx,si,di,es
+	mov	byte ptr cs:[pri+bx],0ffh
+	mov	di,bx			; di -> this drive's table
+	mov	cl,6
+	shl	di,cl
+	add	di,[pt0]
+	push	di
+	mov	ax,ss			; empty table to start with
+	mov	es,ax
+	xor	ax,ax
+	mov	cx,4*16/2
+	cld
+	rep	stosw
+	mov	dl,bl
+	or	dl,80h
+	push	bx
+	push	dx
+	mov	ax,0401h		; verify to position to cylinder 0
+	mov	cx,0001h		; c0, s1
+	xor	dh,dh			; h0
+	int	13h
+	pop	dx
+	push	dx
+	mov	ah,0			; reset
+	int	13h
+	pop	dx
+	mov	ax,0201h		; read 1 sector: the mbr
+	mov	bx,ds
+	mov	es,bx
+	mov	bx,offset grp:ourbuf
+	mov	cx,0001h		; c0, s1
+	xor	dh,dh			; h0
+	int	13h
+	pop	bx
+	pop	di
+	jc	rmb090
+	cmp	word ptr [ourbuf+01feh],0aa55h
+	jne	rmb090
+	push	di
+	mov	si,offset grp:ourbuf+1beh
+	mov	ax,ss
+	mov	es,ax
+	mov	cx,4*16/2
+	cld
+	rep	movsw
+	pop	di
+	call	pickpri
+	mov	cs:[pri+bx],al
+
+; booting from slot 1-3 of drive 80h: when that slot became the
+; primary (c:), mosinit must translate the boot drive to c:
+
+	or	bx,bx
+	jnz	rmb090
+	dec	al
+	cmp	al,2
+	ja	rmb090
+	mov	bl,al
+	mov	[trueboot+bx],2
+rmb090:
+	popset ax,bx,cx,dx,si,di,es
+	ret
+readmbr endp
+
+	subttl ptofdl - pointer to a drive's table copy
+	page
+;=====================================================================
+;,fs
+; ptofdl - pointer to a drive's table copy
+;
+; in:	dl = drive (80h-83h)
+;
+; out:	si = [pt0] + (dl and 3) * 64
+;
+;,fe
+;=====================================================================
+	assume	ds:grp,es:nothing,ss:nothing
+ptofdl proc near
+	push	cx
+	mov	si,dx
+	and	si,3
+	mov	cl,6
+	shl	si,cl
+	add	si,[pt0]
+	pop	cx
+	ret
+ptofdl endp
+
 	subttl hinitblk - init hard disk driver
 	page
 ;======================================================================
@@ -2090,13 +2199,11 @@ hinitblk proc near
 	pushset ax,bx,cx,dx,si,di,bp,ds,es
 	mov	[dib_cnt],-1		; init 0 based counter for 0 drives
 
-; allocate stack block for two partition tables (two tables of
+; allocate stack block for four partition tables (four tables of
 ; four entries each at 16 bytes per entry).
 
-	sub	sp,2*4*16
-	mov	[pt0],sp		; pointer to drive 0's table
-	mov	[pt1],sp		; pointer to drive 1's table
-	add	[pt1],4*16
+	sub	sp,4*4*16
+	mov	[pt0],sp		; drive n's table is at pt0 + n*64
 
 ; see how many physical hard drives exist
 
@@ -2105,9 +2212,9 @@ hinitblk proc near
 	int	13h			; get drive parameters
 	cmp	dl,0
 	lje	init290
-	cmp	dl,2			; limit to 2
+	cmp	dl,4			; limit to 4 (UPDATE 104; was 2)
 	jna	init010
-	mov	dl,2
+	mov	dl,4
 init010:
 	mov	[drives],dl
 
@@ -2183,104 +2290,22 @@ init030:
 	add	ax,size dib
 	loop	init030
 
-; reset drive 0 and then
-; read the first sector of drive 0 (h0, s1, c0, the first mbr)
+; read the mbr of every drive into its stack table and choose its
+; primary partition (UPDATE 104: up to four drives; was two with
+; separate code for each).  a drive whose mbr cannot be read or has
+; no signature gets an empty table: no drive letters, as before.
 
-	mov	ax,0401h		; verify to position to cylinder 0
-	mov	cx,0001h		; c0, s1
-	mov	dx,0080h		; h0, drive 80
-	int	13h
-	mov	ah,0			; reset
-	mov	dl,80h			; drive 80
-	int	13h
-	mov	ax,0201h		; read 1 sector
-	mov	bx,ds
-	mov	es,bx
-	mov	bx,offset grp:ourbuf
-	mov	cx,0001h		; c0, s1
-	mov	dx,0080h		; h0, drive 80
-	int	13h
-	ljc	init290
+	xor	bx,bx			; bx = drive index
+init040:
+	call	readmbr
+	inc	bx
+	cmp	bl,[drives]
+	jb	init040
 
-; validate the sector's signature
-
-	cmp	word ptr [ourbuf+01feh],0aa55h
-	ljne	init290
-	mov	si,offset grp:ourbuf+1beh
-
-; copy the partition table into the first stack block and move the
-; first FAT entry, in any slot, to slot 0 (UPDATE 101)
-
-init050:
-	mov	ax,ss
-	mov	es,ax
-	mov	di,[pt0]
-	mov	cx,4*16/2
-	cld
-	rep	movsw
-	mov	di,[pt0]
-	call	pickpri
-	mov	cs:[pri0],al
-
-; booting from slot 1-3 of drive 80h: when that slot became the
-; primary (c:), mosinit must translate the boot drive to c:
-
-	dec	al
-	cmp	al,2
-	ja	init055
-	xor	bh,bh
-	mov	bl,al
-	mov	[trueboot+bx],2
-init055:
-
-; if a second drive exists, reset it and then
-; read the first sector of drive 1 (h0, s1, c0, the second mbr)
-
-	cmp	[drives],2
-	jne	init090
-	mov	ax,0401h		; verify to position to cylinder 0
-	mov	cx,0001h		; c0, s1
-	mov	dx,0081h		; h0, drive 81
-	int	13h
-	mov	ah,0			; reset
-	mov	dl,81h			; drive 81
-	int	13h
-	mov	ax,0201h		; read 1 sector
-	mov	bx,ds
-	mov	es,bx
-	mov	bx,offset grp:ourbuf
-	mov	cx,0001h		; c0, s1
-	mov	dx,0081h		; h0, drive 81
-	int	13h
-	jc	init070
-
-; validate the sector's signature
-
-	cmp	word ptr [ourbuf+01feh],0aa55h
-	jne	init070
-	mov	si,offset grp:ourbuf+1beh
-	jmp	short init080
-init070:
-	mov	[drives],1
-	jmp	short init090
-
-; copy the partition table into the second stack block and move the
-; first FAT entry to slot 0 (UPDATE 101)
-
-init080:
-	mov	ax,ss
-	mov	es,ax
-	mov	di,[pt1]
-	mov	cx,4*16/2
-	cld
-	rep	movsw
-	mov	di,[pt1]
-	call	pickpri
-	mov	cs:[pri1],al
-
-; process the primary parititon of drive 0.  a drive without a FAT
-; primary gets no dib for it, but its logical drives are still used.
-; every dib is opened with next_dib, so start one before the first.
+; process the primary partitions, drive by drive.  a drive without a
+; FAT primary gets no dib for it, but its logical drives are still
+; used.  every dib is opened with next_dib, so start one before the
+; first.
 
 init090:
 	mov	[dib_cnt],-1		; 0 based counter, none yet
@@ -2289,41 +2314,36 @@ init090:
 ; and the dib_overhead for the bpb pointer array
 
 	mov	[dib_ptr],16+dib_overhead-size dib
-	cmp	cs:[pri0],0ffh
-	je	init095
+	xor	bx,bx
+init092:
+	cmp	byte ptr cs:[pri+bx],0ffh
+	je	init094
 	call	next_dib
 	ljc	init250
-	mov	si,[pt0]
+	push	bx
+	mov	si,bx			; si -> this drive's table
+	mov	cl,6
+	shl	si,cl
+	add	si,[pt0]
 	mov	bp,ss
-	mov	dl,80h
+	mov	dl,bl
+	or	dl,80h
 	xor	bx,bx
 	xor	cx,cx
 	call	process_partition
-	ljc	init290
-
-; if a second drive exists,
-; process the primary parititon of drive 1
-
-init095:
-	cmp	[drives],2
-	jne	init100
-	cmp	cs:[pri1],0ffh
-	je	init100
-	call	next_dib
-	ljc	init250
-	mov	si,[pt1]
-	mov	bp,ss
-	mov	dl,81h
-	xor	bx,bx
-	xor	cx,cx
-	call	process_partition
+	pop	bx
 	ljc	init260
+init094:
+	inc	bx
+	cmp	bl,[drives]
+	jb	init092
 
-; process any extended partitions on drive 0
+; process any extended partitions, drive by drive
 
 init100:
 	mov	dl,80h
-	mov	si,[pt0]
+init105:
+	call	ptofdl			; si -> table of drive dl
 init110:
 	xor	di,di			; init di as a flag
 	mov	cx,4			; all 4 slots (UPDATE 101; was 1-3)
@@ -2440,23 +2460,21 @@ init180:
 	add	sp,6
 	jmp	init260
 
-; if a second drive exists, recycle through the above logic to
-; process any extended partitions on drive 1
+; next drive: process its extended partitions too
 
 init190:
-	cmp	dl,81h			; already been here?
-	je	init200
-	cmp	[drives],2
-	jne	init200
-	mov	si,[pt1]
-	mov	dl,81h
-	jmp	init110
+	inc	dl
+	mov	al,dl
+	and	al,7fh
+	cmp	al,[drives]
+	ljc	init105			; (jb)
 
-; process any secondary partitions on drive 0
+; process any secondary partitions, drive by drive
 
 init200:
 	mov	dl,80h
-	mov	si,[pt0]
+init205:
+	call	ptofdl			; si -> table of drive dl
 init210:
 	mov	cx,3
 init220:
@@ -2496,16 +2514,14 @@ init235:
 init240:
 	loop	init220
 
-; if a second drive exists, recycle through the above logic to
-; process any secondary partitions on drive 1
+; next drive: its secondary partitions too
 
-	cmp	dl,81h			; already been here?
-	je	init270
-	cmp	[drives],2
-	jne	init270
-	mov	si,[pt1]
-	mov	dl,81h
-	jmp	short init210
+	inc	dl
+	mov	al,dl
+	and	al,7fh
+	cmp	al,[drives]
+	ljc	init205			; (jb)
+	jmp	init270
 
 ; error handler - for when there are more drives than smp
 
@@ -2553,7 +2569,7 @@ init270:
 ; (deallocate partition table stack block)
 
 init280:
-	add	sp,2*4*16
+	add	sp,4*4*16
 	les	bx,dword ptr [hdr]
 
 ; report # of units
@@ -2584,7 +2600,7 @@ init280:
 ; (deallocate partition table stack block)
 
 init290:
-	add	sp,2*4*16
+	add	sp,4*4*16
 	les	bx,dword ptr [hdr]
 	mov	es:[bx].irUnits,0	; set no units inited
 	mov	ax,810bh		; report read fault error
@@ -2597,4 +2613,4 @@ hinitblk endp
 initseg	ends
 	end
 
-
+

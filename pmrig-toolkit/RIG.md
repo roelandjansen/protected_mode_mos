@@ -31,9 +31,10 @@ example.
 
 | file | what |
 | --- | --- |
-| `dosbox.gz` | prebuilt debug DOSBox Staging 0.82.2 with both patches (x86-64 Linux, Ubuntu 24.04 libraries) |
+| `dosbox.gz` | prebuilt debug DOSBox Staging 0.82.2 with all three patches (x86-64 Linux, Ubuntu 24.04 libraries) |
 | `dosbox-pmtrace.patch` | tracer patch against upstream `v0.82.2` |
 | `dosbox-int13ext.patch` | int 13h 41h/42h/43h/48h for hard disk images; 08h reports at most 1024 cylinders (UPDATE 93) |
+| `dosbox-hdd4.patch` | four hard disk images (80h-83h) instead of two; `imgmount 2`-`5` (UPDATE 104) |
 | `restore.sh` | installs the rig, uses or rebuilds the emulator |
 | `rig/` | the scripts and tools below |
 
@@ -43,7 +44,7 @@ example.
 
 | script | use |
 | --- | --- |
-| `rig.sh start [--testconfig] [--bootdir DIR] [--configsys F] [--add F]` | build a boot floppy and start the emulator headless; `HDIMG=` attaches a hard disk image, `HDGEOM=512,63,255,CYLS` gives its geometry; `DOSBOX=` and `CYCLES=` select the emulator; `BOOTIMG=img` boots that floppy image instead of building one, `HDBOOT=1` boots from the hard disk (`boot -l c`) |
+| `rig.sh start [--testconfig] [--bootdir DIR] [--configsys F] [--add F]` | build a boot floppy and start the emulator headless; `HDIMG=` attaches a hard disk image, `HDGEOM=512,63,255,CYLS` gives its geometry; `DOSBOX=` and `CYCLES=` select the emulator; `BOOTIMG=img` boots that floppy image instead of building one, `HDBOOT=1` boots from the hard disk (`boot -l c`); `HDIMG2`-`HDIMG4` (geometry `HDGEOM2`-`4`) attach disks 81h-83h |
 | `rig.sh screen` / `cpu` / `mem ADDR LEN` / `ivt N` | read the text screen, registers, guest memory, IVT entry |
 | `rig.sh type TEXT` / `key KEY...` | send keystrokes (see the keyboard notes) |
 | `rig.sh gdb CMD...` / `log` / `stop` | raw gdb against the emulator, its log, stop |

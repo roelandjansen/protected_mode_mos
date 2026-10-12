@@ -1,0 +1,27 @@
+diff -ru a/include/bios_disk.h b/include/bios_disk.h
+--- a/include/bios_disk.h	2026-10-12 15:03:36.614121806 +0200
++++ b/include/bios_disk.h	2026-10-12 15:03:36.610643969 +0200
+@@ -80,7 +80,7 @@
+ void updateDPT(void);
+ void incrementFDD(void);
+ 
+-#define MAX_HDD_IMAGES 2
++#define MAX_HDD_IMAGES 4	// pmrig: four hard disks (80h-83h)
+ 
+ #define MAX_DISK_IMAGES (2 + MAX_HDD_IMAGES)
+ 
+diff -ru a/src/ints/bios_disk.cpp b/src/ints/bios_disk.cpp
+--- a/src/ints/bios_disk.cpp	2026-10-12 15:03:36.618121807 +0200
++++ b/src/ints/bios_disk.cpp	2026-10-12 15:03:36.607324340 +0200
+@@ -515,8 +515,9 @@
+ 		last_status = 0x00;
+ 		if (reg_dl&0x80) {	// harddisks
+ 			reg_dl = 0;
+-			if(imageDiskList[2]) reg_dl++;
+-			if(imageDiskList[3]) reg_dl++;
++			for (int i = 2; i < MAX_DISK_IMAGES; i++) {	// pmrig: up to four
++				if (imageDiskList[i]) reg_dl++;
++			}
+ 		} else {		// floppy disks
+ 			reg_dl = 0;
+ 			if(imageDiskList[0]) reg_dl++;

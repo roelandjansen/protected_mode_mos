@@ -7,8 +7,8 @@ set -euo pipefail
 # usage:  tar xzf pmrig-toolkit.tar.gz && cd pmrig-toolkit && ./restore.sh
 #
 # Installs the prebuilt debug DOSBox Staging 0.82.2 if its libraries
-# resolve here; otherwise rebuilds it from upstream plus the pmtrace and
-# int13ext patches. Never uses sudo.
+# resolve here; otherwise rebuilds it from upstream plus the pmtrace,
+# int13ext and hdd4 patches. Never uses sudo.
 #
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,13 +53,14 @@ install_prebuilt() {
 #
 
 rebuild() {
-	printf 'rebuilding DOSBox Staging 0.82.2 with the pmtrace and int13ext patches...\n'
+	printf 'rebuilding DOSBox Staging 0.82.2 with the pmtrace, int13ext and hdd4 patches...\n'
 	rm -rf "$DBX_DIR"
 	git clone --depth 1 --branch v0.82.2 \
 		https://github.com/dosbox-staging/dosbox-staging.git "$DBX_DIR"
 	cd "$DBX_DIR"
 	git apply "$HERE/dosbox-pmtrace.patch"
 	git apply "$HERE/dosbox-int13ext.patch"
+	patch -p1 < "$HERE/dosbox-hdd4.patch"
 	meson setup build-dbg --buildtype=debug -Denable_debugger=heavy
 	ninja -C build-dbg
 	"$DBX_BIN" --version | head -1
