@@ -1,6 +1,7 @@
 # PC-MOS/386: Build and Boot — Quick Reference
 
-The whole workflow is three scripts, run in order.
+The whole workflow is three scripts, run in order, plus a fourth to install
+on a hard disk.
 
 ## 1. One-time setup
 
@@ -29,6 +30,11 @@ confirms success by checking `$$MOS.SYS` actually exists afterward, since
 DOSBox itself always exits 0 regardless of whether the DOS-side build
 succeeded.
 
+**HDSETUP** is Borland C, which this tree cannot build. `build.sh` builds
+it with Open Watcom (`SOURCES/src/cutils/HDBUILD.SH`) when `WATCOM` is set
+or `ci_prereq.sh` has installed Open Watcom under `toolchain/`. Otherwise
+it prints "HDSETUP skipped" and the rest of the build is unaffected.
+
 ## 3. Boot
 
 ```
@@ -40,6 +46,48 @@ empty-bootable.img` plus whatever's currently in `SOURCES/src/latest/`
 (kernel, shell, every utility, `HELP.SRC`), then boots it. Re-running
 `build.sh` and then `run.sh` is how you test any change — `run.sh` always
 picks up the latest build output.
+
+## 4. Install on a hard disk (VM or real machine)
+
+```
+./makefloppy.sh --all mosboot.img
+```
+
+Builds a persistent 1.44 MB boot floppy image from the latest build:
+
+- kernel and shell;
+- `$386.SYS` with `MEMDEV=$386.SYS` in `CONFIG.SYS` (not `DEVICE=`: that
+  gives "Not Enough SMP");
+- an `AUTOEXEC.BAT`, so there is no date/time prompt;
+- HDSETUP (`.EXE`, `.MSG`, `.HLP`), FORMAT and MSYS;
+- with `--all`, every other utility as well. Everything fits, with about
+  750 KB to spare.
+
+Attach the image as the VM's floppy, together with an empty virtual hard
+disk, and boot from floppy:
+
+1. **Partition:** `HDSETUP`.
+   - F3 adds the primary partition (C:, FAT16, at most 2 GB).
+   - F4 adds logical drives.
+   - The keypad arrows move between lines; the grey arrows may not.
+   - Esc, then Y writes the partition table and the MBR boot code. C:
+     is marked active.
+   - At "Prepare system for reboot", reboot from the floppy again.
+2. **Format:** `FORMAT C:`, answer `Y`, press Enter once more.
+3. **Make C: bootable:** `MSYS C:` writes the PC-MOS boot sector. It is
+   silent when it works.
+4. **Copy the system:** `COPY *.* C:` copies the kernel, shell,
+   `CONFIG.SYS`, `AUTOEXEC.BAT` and the utilities. Wait for the prompt;
+   it takes a while.
+5. **Boot from C:** remove the floppy and reboot. The prompt is
+   `[C:\]`.
+
+Keep C: and the virtual disk modest for a first install (8 GB or less).
+Beyond 8.4 GB PC-MOS needs a BIOS with int 13h extensions (SeaBIOS in
+QEMU has them).
+
+Tested end to end in DOSBox Staging with int 13h extensions: blank 2 GB
+disk, steps 1-5, boot from C:.
 
 ## While it's running
 

@@ -71,7 +71,8 @@ clean_build_artifacts() {
 
 	rm -f "$SRC/latest/"*.SYS "$SRC/latest/"*.EXE "$SRC/latest/"*.COM \
 		"$SRC/latest/"*.OBJ "$SRC/latest/"*.MAP "$SRC/latest/"*.PUB \
-		"$SRC/latest/"*.PSS "$SRC/latest/"*.NDX 2>/dev/null || true
+		"$SRC/latest/"*.PSS "$SRC/latest/"*.NDX \
+		"$SRC/latest/HDSETUP.MSG" "$SRC/latest/HDSETUP.HLP" 2>/dev/null || true
 
 	rm -f "$SRC/cdlink/"*.SYS "$SRC/cdlink/"*.EXE "$SRC/cdlink/"*.COM \
 		"$SRC/cdlink/"*.OBJ "$SRC/cdlink/"*.MAP "$SRC/cdlink/"*.PUB 2>/dev/null || true
@@ -159,6 +160,33 @@ check_build_output() {
 	printf 'Build succeeded: %s\n' "$KERNEL_IMAGE"
 }
 
+#
+# Builds HDSETUP.EXE with Open Watcom (cutils/HDBUILD.SH) and puts it,
+# with its HDSETUP.MSG and HDSETUP.HLP, next to the other utilities in
+# SOURCES/src/latest. MAKEMOS.BAT can't build it: it is Borland C and
+# there is no Borland compiler. Uses WATCOM, or else the Open Watcom
+# that ci_prereq.sh installs in toolchain/; skipped with a note if neither.
+#
+
+build_hdsetup() {
+	local LATEST="$SCRIPT_DIR/SOURCES/src/latest"
+	local OUT
+
+	if [ -z "${WATCOM:-}" ] && [ -d "$TOOLCHAIN_DIR/open-watcom/h" ]; then
+		WATCOM="$TOOLCHAIN_DIR/open-watcom"
+		export WATCOM
+	fi
+	if [ -z "${WATCOM:-}" ]; then
+		printf 'HDSETUP skipped: set WATCOM to the Open Watcom root to build it.\n'
+		return
+	fi
+	OUT="$(mktemp -d)"
+	OUT="$OUT" "$SCRIPT_DIR/SOURCES/src/cutils/HDBUILD.SH"
+	cp "$OUT/HDSETUP.EXE" "$OUT/HDSETUP.MSG" "$OUT/HDSETUP.HLP" "$LATEST/"
+	rm -rf "$OUT"
+	printf 'HDSETUP built: %s\n' "$LATEST/HDSETUP.EXE"
+}
+
 check_args "$@"
 if [ "$CLEAN_ONLY" -eq 1 ]; then
 	clean_build_artifacts
@@ -172,3 +200,4 @@ fi
 write_dosbox_conf
 run_build
 check_build_output
+build_hdsetup

@@ -152,7 +152,11 @@ cmd_start() {
 	rm -rf "$STATE_DIR"
 	mkdir -p "$STATE_DIR"
 
-	build_floppy "$BOOTDIR" "$USE_TESTCONFIG" "$CONFIGSYS" "${ADD[@]}"
+	if [ -n "${BOOTIMG:-}" ]; then
+		cp "$BOOTIMG" "$STATE_DIR/boot.img"
+	else
+		build_floppy "$BOOTDIR" "$USE_TESTCONFIG" "$CONFIGSYS" "${ADD[@]}"
+	fi
 
 	if ! pgrep -f "Xvfb $DISPLAY_NUM" >/dev/null; then
 		setsid nohup Xvfb "$DISPLAY_NUM" -screen 0 1280x1024x24 -nolisten tcp >"$STATE_DIR/xvfb.log" 2>&1 &
@@ -193,8 +197,8 @@ EOF
 	# 512,63,255,260) as BIOS disk 80h, then boot the floppy
 	local BOOTARG="$STATE_DIR/boot.img"
 	if [ -n "${HDIMG:-}" ]; then
-		printf '\n[autoexec]\nimgmount 2 %s -t hdd -fs none -size %s\nimgmount a %s -t floppy\nboot -l a\n' \
-			"$HDIMG" "${HDGEOM:-512,63,255,260}" "$STATE_DIR/boot.img" >>"$STATE_DIR/dosbox.conf"
+		printf '\n[autoexec]\nimgmount 2 %s -t hdd -fs none -size %s\nimgmount a %s -t floppy\nboot -l %s\n' \
+			"$HDIMG" "${HDGEOM:-512,63,255,260}" "$STATE_DIR/boot.img" "$( [ -n "${HDBOOT:-}" ] && printf c || printf a )" >>"$STATE_DIR/dosbox.conf"
 		BOOTARG=""
 	fi
 

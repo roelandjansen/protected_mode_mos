@@ -1723,6 +1723,8 @@ PTClext	equ	0fh			; extended, LBA addressed (UPDATE 94)
 
 extbase	dw	0,0			; start sector of the extended partition
 curebr	dw	0,0			; sector of the ebr being processed
+pri0	db	0ffh			; slot of the primary on 80h, 0ffh: none (6a)
+pri1	db	0ffh			; same for 81h
 
 	subttl process_partition - fill out a dib block for a partition
 	page
@@ -1987,6 +1989,66 @@ ncx:
 	ret
 next_dib endp
 
+	subttl pickpri - choose the primary partition of a drive
+	page
+;=====================================================================
+;,fs
+; pickpri - choose the primary partition of a drive
+;
+; the primary partition (the drive's first drive letter) is the first
+; FAT entry of the partition table, in any slot.  it is swapped into
+; slot 0, where the rest of hinitblk expects it.  (UPDATE 101; before,
+; slot 0 had to be FAT, or drive 80h got no drive letters at all.)
+;
+; in:	ss:di -> copy of the 4 partition table entries
+;
+; out:	al = original slot (0-3) of the primary partition
+;	al = 0ffh when the table has no FAT entry (table unchanged)
+;
+;,fe
+;=====================================================================
+	assume	ds:grp,es:nothing,ss:nothing
+pickpri proc near
+	push	bx
+	push	cx
+	push	dx
+	push	di
+	xor	bx,bx
+	xor	al,al
+pp010:
+	mov	ah,ss:[di+bx].peFileSystem
+	cmp	ah,PTCsm12
+	je	pp020
+	cmp	ah,PTCsm16
+	je	pp020
+	cmp	ah,PTCdlg
+	je	pp020
+	cmp	ah,PTCl16
+	je	pp020
+	add	bx,16
+	inc	al
+	cmp	al,4
+	jb	pp010
+	mov	al,0ffh
+	jmp	short pp040
+pp020:
+	or	bx,bx
+	jz	pp040
+	mov	cx,8			; swap slot 0 and slot al (16 bytes)
+pp030:
+	mov	dx,ss:[di]
+	xchg	dx,ss:[di+bx]
+	mov	ss:[di],dx
+	add	di,2
+	loop	pp030
+pp040:
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
+	ret
+pickpri endp
+
 	subttl hinitblk - init hard disk driver
 	page
 ;======================================================================
@@ -2140,26 +2202,14 @@ init030:
 	int	13h
 	ljc	init290
 
-; validate the sector's signature and partition table
+; validate the sector's signature
 
 	cmp	word ptr [ourbuf+01feh],0aa55h
 	ljne	init290
 	mov	si,offset grp:ourbuf+1beh
-	cmp	[si].peBootable,80h
-	je	init040
-	cmp	[si].peBootable,0
-	ljne	init290
-init040:
-	cmp	[si].peFileSystem,PTCsm12
-	je	init050
-	cmp	[si].peFileSystem,PTCsm16
-	je	init050
-	cmp	[si].peFileSystem,PTCdlg
-	je	init050
-	cmp	[si].peFileSystem,PTCl16	; FAT16 (LBA), UPDATE 94
-	ljne	init290
 
-; copy the partition table into the first stack block
+; copy the partition table into the first stack block and move the
+; first FAT entry, in any slot, to slot 0 (UPDATE 101)
 
 init050:
 	mov	ax,ss
@@ -2168,6 +2218,20 @@ init050:
 	mov	cx,4*16/2
 	cld
 	rep	movsw
+	mov	di,[pt0]
+	call	pickpri
+	mov	cs:[pri0],al
+
+; booting from slot 1-3 of drive 80h: when that slot became the
+; primary (c:), mosinit must translate the boot drive to c:
+
+	dec	al
+	cmp	al,2
+	ja	init055
+	xor	bh,bh
+	mov	bl,al
+	mov	[trueboot+bx],2
+init055:
 
 ; if a second drive exists, reset it and then
 ; read the first sector of drive 1 (h0, s1, c0, the second mbr)
@@ -2190,29 +2254,18 @@ init050:
 	int	13h
 	jc	init070
 
-; validate the sector's signature and partition table
+; validate the sector's signature
 
 	cmp	word ptr [ourbuf+01feh],0aa55h
 	jne	init070
 	mov	si,offset grp:ourbuf+1beh
-	cmp	[si].peBootable,80h
-	je	init060
-	cmp	[si].peBootable,0
-	jne	init070
-init060:
-	cmp	[si].peFileSystem,PTCsm12
-	je	init080
-	cmp	[si].peFileSystem,PTCsm16
-	je	init080
-	cmp	[si].peFileSystem,PTCdlg
-	je	init080
-	cmp	[si].peFileSystem,PTCl16	; FAT16 (LBA), UPDATE 94
-	je	init080
+	jmp	short init080
 init070:
 	mov	[drives],1
-	jmp	init090
+	jmp	short init090
 
-; copy the partition table into the second stack block
+; copy the partition table into the second stack block and move the
+; first FAT entry to slot 0 (UPDATE 101)
 
 init080:
 	mov	ax,ss
@@ -2221,16 +2274,25 @@ init080:
 	mov	cx,4*16/2
 	cld
 	rep	movsw
+	mov	di,[pt1]
+	call	pickpri
+	mov	cs:[pri1],al
 
-; process the primary parititon of drive 0
+; process the primary parititon of drive 0.  a drive without a FAT
+; primary gets no dib for it, but its logical drives are still used.
+; every dib is opened with next_dib, so start one before the first.
 
 init090:
-	mov	[dib_cnt],0		; 0 based counter
+	mov	[dib_cnt],-1		; 0 based counter, none yet
 
 ; to start writing dib blocks, must skip past the mosheman header
 ; and the dib_overhead for the bpb pointer array
 
-	mov	[dib_ptr],16+dib_overhead
+	mov	[dib_ptr],16+dib_overhead-size dib
+	cmp	cs:[pri0],0ffh
+	je	init095
+	call	next_dib
+	ljc	init250
 	mov	si,[pt0]
 	mov	bp,ss
 	mov	dl,80h
@@ -2242,8 +2304,11 @@ init090:
 ; if a second drive exists,
 ; process the primary parititon of drive 1
 
+init095:
 	cmp	[drives],2
 	jne	init100
+	cmp	cs:[pri1],0ffh
+	je	init100
 	call	next_dib
 	ljc	init250
 	mov	si,[pt1]
@@ -2261,9 +2326,10 @@ init100:
 	mov	si,[pt0]
 init110:
 	xor	di,di			; init di as a flag
-	mov	cx,3
+	mov	cx,4			; all 4 slots (UPDATE 101; was 1-3)
+	sub	si,16
 init120:
-	add	si,16			; start looking at pte 1
+	add	si,16
 	cmp	ss:[si].peFileSystem,PTCext
 	je	init125
 	cmp	ss:[si].peFileSystem,PTClext	; extended (LBA), UPDATE 94
@@ -2461,6 +2527,8 @@ init260:
 ; actually needed.
 
 init270:
+	cmp	[dib_cnt],-1		; no dib at all (UPDATE 101)
+	lje	init290
 	mov	al,[dib_cnt]
 	inc	al
 	cmp	al,[dib_max]
@@ -2529,4 +2597,4 @@ hinitblk endp
 initseg	ends
 	end
 
-
+

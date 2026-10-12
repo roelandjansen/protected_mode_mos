@@ -43,7 +43,7 @@ example.
 
 | script | use |
 | --- | --- |
-| `rig.sh start [--testconfig] [--bootdir DIR] [--configsys F] [--add F]` | build a boot floppy and start the emulator headless; `HDIMG=` attaches a hard disk image, `HDGEOM=512,63,255,CYLS` gives its geometry; `DOSBOX=` and `CYCLES=` select the emulator |
+| `rig.sh start [--testconfig] [--bootdir DIR] [--configsys F] [--add F]` | build a boot floppy and start the emulator headless; `HDIMG=` attaches a hard disk image, `HDGEOM=512,63,255,CYLS` gives its geometry; `DOSBOX=` and `CYCLES=` select the emulator; `BOOTIMG=img` boots that floppy image instead of building one, `HDBOOT=1` boots from the hard disk (`boot -l c`) |
 | `rig.sh screen` / `cpu` / `mem ADDR LEN` / `ivt N` | read the text screen, registers, guest memory, IVT entry |
 | `rig.sh type TEXT` / `key KEY...` | send keystrokes (see the keyboard notes) |
 | `rig.sh gdb CMD...` / `log` / `stop` | raw gdb against the emulator, its log, stop |
