@@ -38,8 +38,18 @@ rj  20261011	UPDATE 99: disks beyond 8.4 GB, read side.
 		has the extensions, CHS otherwise).  the drive size comes
 		from int 13h 48h (lba_probe).  full cylinder numbers in
 		prE[].BC/EC.  types 0eh/0fh shown as DLG/extended.
-		writing to a disk beyond 1024 cylinders is refused.
 		builds with Open Watcom (__WATCOMC__) as well.
+
+rj  20261012	UPDATE 100: disks beyond 8.4 GB, write side.
+		write_tree lays out every entry in absolute sectors.
+		entries read from disk and not moved, resized or retyped
+		keep their exact start and size (pe_kept), also when not
+		cylinder aligned.  the extended partition runs from its
+		first ebr to the end of its last logical drive; link
+		entries point at the next ebr.  chs fields from the lba
+		(1023/last head/last sector beyond cylinder 1023).  FAT16
+		and extended entries ending beyond cylinder 1023 are
+		written as 0eh/0fh.  ext_ndx is reset for each drive.
 
 =======================================================================
 */
@@ -90,6 +100,7 @@ byte *c = "(c) Copyright 1992 The Software Link, Incorporated";  /* @@XLAT */
 struct prec {
   byte prExt;			// != 0 if this is an extended parition 
   byte prTblNum;		// 0 based partition table number
+  unsigned long EBR;		// sector of this ebr as loaded (0: new)
   struct prec1 {
     pe_type PT;			// copy of PT data 
     byte MLG;			// flags MLG type partitions 
@@ -101,6 +112,11 @@ struct prec {
     word EC;			// end cylinder (full 16 bits)
     unsigned long ABS;		// absolute first sector (pbr or ebr)
     byte OrigPTC;		// type as read from disk (0eh/0fh kept)
+    word LBC;			// BC as loaded (0 LSIZE: not loaded)
+    word LEC;			// EC as loaded
+    byte LPTC;			// type as loaded (after 0eh/0fh mapping)
+    unsigned long LABS;		// first sector as loaded
+    unsigned long LSIZE;	// size as loaded
     } prE[4];			// one pr1_type record per PT 
   };
 
@@ -507,7 +523,7 @@ enum recodes {
   errcode_insuficmem, errcode_diskread, errcode_diskwrite, 
   errcode_data1, errcode_data2, errcode_data3, errcode_data4, 
   errcode_data5, errcode_data6, errcode_badcylnum, 
-  errcode_execmsys, errcode_bigdisk};
+  errcode_execmsys};
 
 // globals for lead-through logic
 
@@ -1271,6 +1287,11 @@ void pe_from_lba(dr_type *dr, pr_type *pr, byte p_ndx, unsigned long base) {
     c = e->ABS / spc;
     }
   e->EC = (c > 0xffffUL) ? 0xffff : (word)c;
+  e->LBC = e->BC;
+  e->LEC = e->EC;
+  e->LPTC = e->PT.peFileSystem;
+  e->LABS = e->ABS;
+  e->LSIZE = e->PT.peSectors.li;
   }
 
 /*======================================================================
@@ -1423,6 +1444,34 @@ word derive_maxsml(dr_type *dr) {
   d1.li *= dr->drHeads;		/* calc sectors per cylinder */
   d2.li = 0xffffl;
   return(d2.li / d1.li);
+  }
+
+/*======================================================================
+;,fs
+; void cap_fat(dr_type *dr, word *cylds, word *megs)
+;
+; limit a new or resized FAT partition to the FAT16 maximum: 64K
+; clusters of 32K, 2 GB.  the shipped version allowed the whole
+; free space, which made partitions FORMAT cannot handle on disks
+; larger than 2 GB.
+;
+; in:	dr -> drive record, *cylds / *megs = proposed maximum
+;
+; out:	*cylds / *megs limited
+;
+;,fe
+========================================================================*/
+void cap_fat(dr_type *dr, word *cylds, word *megs) {
+
+  unsigned long spc;
+  word maxc;
+
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  maxc = (word)(4190000UL / spc);
+  if(*cylds > maxc) {
+    *cylds = maxc;
+    *megs = cylds2megs(dr,maxc);
+    }
   }
 
 /*======================================================================
@@ -1632,11 +1681,19 @@ byte build_tree(void) {
             }
           memset(pr,0,sizeof(pr_type));
           pr_prev->prE[t2].ExtPR = pr;
+          pr->EBR = ebr;
           pr->prExt = 1;
           pr->prTblNum = table_num++;
           memcpy(&(pr->prE[0].PT),(sct_buf+0x1be),16);
           memcpy(&(pr->prE[1].PT),(sct_buf+0x1be+16),16);
           pe_from_lba(dr,pr,0,ebr);
+
+          /* the ebr belongs to its logical drive: the drive's first
+          cylinder is the one that holds the ebr, so a new partition in
+          the gap before it cannot overwrite the ebr. */
+
+          pr->prE[0].BC = (word)(ebr / ((unsigned long)dr->drHeads * dr->drSPT));
+          pr->prE[0].LBC = pr->prE[0].BC;
           pe_from_lba(dr,pr,1,ext_base);
           pr->prE[2].PT.peFileSystem = 0;
           pr->prE[3].PT.peFileSystem = 0;
@@ -2923,6 +2980,7 @@ byte is_secondary(lr_type *lr) {
 void update_max(void) {
 
   word max_small_cylds;
+  byte pval;
 
   edit_megs_max = 0;
   edit_cylds_max = 0;
@@ -2947,6 +3005,13 @@ void update_max(void) {
       if(edit_cylds_max > max_small_cylds) {
         edit_cylds_max = max_small_cylds;
         }
+      }
+
+    // a FAT partition cannot grow beyond the FAT16 maximum
+
+    pval = edit_pr->prE[edit_pndx].PT.peFileSystem;
+    if(pval == PTCsm12 || pval == PTCsm16 || pval == PTCdlg) {
+      cap_fat(edit_dr,&edit_cylds_max,&edit_megs_max);
       }
 
     // calc the max megs for the max cylds
@@ -3039,9 +3104,149 @@ byte check_pbr(pr_type *pr, byte nx, byte drv) {
 
 /*======================================================================
 ;,fs
+; byte pe_kept(struct prec1 *e)
+;
+; in:	e -> partition entry
+;
+; out:	retval != 0 when the entry was read from disk and the user did
+;	not move, resize or retype it.  such an entry keeps its start
+;	and size exactly, even when it does not start on a cylinder
+;	boundary (other tools align to 1 MiB).
+;
+;,fe
+========================================================================*/
+byte pe_kept(struct prec1 *e) {
+
+  return(e->LSIZE != 0 && e->BC == e->LBC && e->EC == e->LEC &&
+    e->PT.peFileSystem == e->LPTC);
+  }
+
+/*======================================================================
+;,fs
+; void pe_span(dr_type *dr, struct prec1 *e, byte headoff, unsigned long *first, unsigned long *count)
+;
+; in:	dr -> drive record
+;	e -> partition entry
+;	headoff != 0 when a new partition starts at head 1 of its
+;	first cylinder (track 0 holds the mbr or the ebr)
+;
+; out:	*first = absolute first sector, *count = size in sectors
+;
+;,fe
+========================================================================*/
+void pe_span(dr_type *dr, struct prec1 *e, byte headoff, unsigned long *first, unsigned long *count) {
+
+  unsigned long spc;
+
+  if(pe_kept(e)) {
+    *first = e->LABS;
+    *count = e->LSIZE;
+    return;
+    }
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  *first = (unsigned long)e->BC * spc;
+  *count = ((unsigned long)e->EC - e->BC + 1) * spc;
+  if(headoff) {
+    *first += dr->drSPT;
+    *count -= dr->drSPT;
+    }
+  }
+
+/*======================================================================
+;,fs
+; void pe_chs(dr_type *dr, pe_type *pe, unsigned long first, unsigned long last)
+;
+; fill the chs fields of a partition table entry from its first and
+; last absolute sectors.  a sector beyond cylinder 1023 gets
+; 1023 / last head / last sector.
+;
+;,fe
+========================================================================*/
+void pe_chs(dr_type *dr, pe_type *pe, unsigned long first, unsigned long last) {
+
+  unsigned long spc;
+  unsigned long x;
+  word c;
+  byte h;
+  byte s;
+  byte i;
+
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  for(i=0;i<2;i++) {
+    x = (i == 0) ? first : last;
+    if(x / spc > CHSMAXC) {
+      c = CHSMAXC;
+      h = dr->drHeads - 1;
+      s = dr->drSPT;
+      }
+    else {
+      c = (word)(x / spc);
+      h = (byte)((x / dr->drSPT) % dr->drHeads);
+      s = (byte)(x % dr->drSPT) + 1;
+      }
+    if(i == 0) {
+      pe->peBeginHead = h;
+      pe->peBeginSector = s + (byte)((c & 0x0300) >> 2);
+      pe->peBeginCylinder = (byte)c;
+      }
+    else {
+      pe->peEndHead = h;
+      pe->peEndSector = s + (byte)((c & 0x0300) >> 2);
+      pe->peEndCylinder = (byte)c;
+      }
+    }
+  }
+
+/*======================================================================
+;,fs
+; byte pe_wtype(dr_type *dr, struct prec1 *e, unsigned long last)
+;
+; in:	e -> partition entry, last = its last absolute sector
+;
+; out:	the type byte to write.  a FAT16 or extended partition that
+;	ends beyond cylinder 1023 gets 0eh / 0fh (lba types).  an entry
+;	that was 0eh / 0fh on disk and is kept, keeps that type.
+;
+;,fe
+========================================================================*/
+byte pe_wtype(dr_type *dr, struct prec1 *e, unsigned long last) {
+
+  unsigned long spc;
+  byte big;
+  byte t;
+
+  spc = (unsigned long)dr->drHeads * dr->drSPT;
+  big = (last / spc > CHSMAXC);
+  t = e->PT.peFileSystem;
+  if(t == PTCsm16 || t == PTCdlg) {
+    if(big || (pe_kept(e) && e->OrigPTC == PTCl16)) {
+      return(PTCl16);
+      }
+    }
+  if(t == PTCext) {
+    if(big || e->OrigPTC == PTClext) {
+      return(PTClext);
+      }
+    }
+  return(t);
+  }
+
+/*======================================================================
+;,fs
 ; byte write_tree(void)
-; 
-; in:	
+;
+; write the mbr and the ebr chain of each drive.  all locations are
+; absolute sector numbers (lba_io), so disks beyond 8 GB work.
+;
+; - an entry the user did not touch keeps its start and size.
+; - a new or changed entry is laid out on cylinders: a primary in
+;   table slot 0 (or at cylinder 0) and every logical drive start at
+;   head 1; the ebr of a new logical drive is at head 0 of its first
+;   cylinder.
+; - the extended partition runs from its first ebr to the end of its
+;   last logical drive; the link entries point at the next ebr.
+;
+; in:
 ;
 ; out:	retval != 0 if error
 ;	error message will have been reported.
@@ -3051,35 +3256,58 @@ byte check_pbr(pr_type *pr, byte nx, byte drv) {
 byte write_tree(void) {
 
   byte ext_ndx;
-  dword tsct;
-  dword spcyl;
   byte msg[10];
   byte pval;
   dr_type *dptr1;
   pr_type *pptr1;
   pr_type *pptr2;
-  dword rel_secs;
+  pr_type *pnext;
+  struct prec1 *e;
+  unsigned long spc;
+  unsigned long ext_base;
+  unsigned long ext_end;
+  unsigned long a;
+  unsigned long n;
 
-
-  /* this version reads disks beyond 8 GB but does not write them yet:
-  refuse before anything is written. */
-
-  dptr1 = Root_dr;
-  while(dptr1 != NULL) {
-    if(dptr1->drCylds > CHSMAXC + 1) {
-      report_error(errcode_bigdisk);
-      return(1);
-      }
-    dptr1 = dptr1->drNext;
-    }
 
   changed_disk = 1;
-  ext_ndx = 0xff;
   dptr1 = Root_dr;
   drive_num = 0;
   while(dptr1 != NULL) {
     pptr1 = dptr1->drPR;
-    spcyl.li = dptr1->drSPT * dptr1->drHeads;
+    spc = (unsigned long)dptr1->drSPT * dptr1->drHeads;
+
+    /* lay out the extended chain first: the extended partition entry
+    in the mbr depends on it. */
+
+    ext_ndx = 0xff;
+    for(t1=0;t1<4;t1++) {
+      if(pptr1->prE[t1].PT.peFileSystem == PTCext && pptr1->prE[t1].ExtPR != NULL) {
+        ext_ndx = t1;
+        break;
+        }
+      }
+    ext_base = 0xffffffffUL;
+    ext_end = 0;
+    if(ext_ndx != 0xff) {
+      for(pptr2 = pptr1->prE[ext_ndx].ExtPR; pptr2 != NULL; pptr2 = pptr2->prE[1].ExtPR) {
+        e = &(pptr2->prE[0]);
+        pe_span(dptr1,e,1,&a,&n);
+        if(!pe_kept(e) || pptr2->EBR == 0) {
+          pptr2->EBR = (unsigned long)e->BC * spc;
+          }
+        e->ABS = a;
+        e->PT.peStartSector.li = a - pptr2->EBR;
+        e->PT.peSectors.li = n;
+        pe_chs(dptr1,&(e->PT),a,a+n-1);
+        if(pptr2->EBR < ext_base) {
+          ext_base = pptr2->EBR;
+          }
+        if(a + n - 1 > ext_end) {
+          ext_end = a + n - 1;
+          }
+        }
+      }
 
     /* insure the partition table is fresh (needed when processing
     the second drive, where the first drive had more partition table
@@ -3090,72 +3318,26 @@ byte write_tree(void) {
     /* process the ptes 0-3 within mbr */
 
     for(t1=0;t1<4;t1++) {
-
-      if(pptr1->prE[t1].PT.peFileSystem == PTCnil) {
+      e = &(pptr1->prE[t1]);
+      if(e->PT.peFileSystem == PTCnil) {
         continue;
         }
-
-      /* set beginning head and sector number */
-
-      get_pe_data(pptr1,t1,&bs,&bc,&es,&ec);
-      pptr1->prE[t1].PT.peBeginHead = 0;
-      if(t1 == 0) {
-        pptr1->prE[t1].PT.peBeginHead = 1;
-        }
-      bs = 1;
-      if(pptr1->prE[t1].PT.peFileSystem != PTCext) {
-
-        /* set ending head and sector number */
-
-        pptr1->prE[t1].PT.peEndHead = dptr1->drHeads - 1;
-        es = dptr1->drSPT;
-
-        /* calc total sectors value */
-
-        tsct.li = spcyl.li * (ec - bc + 1);
-        if(t1 == 0) {
-          tsct.li -= dptr1->drSPT;
+      if(e->PT.peFileSystem == PTCext) {
+        if(t1 != ext_ndx) {
+          continue;
           }
-        pptr1->prE[t1].PT.peSectors.li = tsct.li;
+        a = ext_base;
+        n = ext_end - ext_base + 1;
         }
       else {
-
-        /* for the root entry of a chain of extended partitions, record
-        the pte number for later and calc the beginning cylinder number. */
-
-        ext_ndx = t1;
-        bc = pptr1->prE[t1].ExtPR->prE[0].BC;
-
-        /* to appease fdisk, must locate the ending cyld of the last
-        extended partition and write it into the ending cyld field of
-        each PTCext entry (along with the ending head and sector).
-        */
-
-        pptr2 = pptr1->prE[ext_ndx].ExtPR;
-        while(pptr2->prE[1].ExtPR != NULL) {
-          pptr2 = pptr2->prE[1].ExtPR;
-          }
-        get_pe_data(pptr2,0,&bs2,&bc2,&es2,&ec);
-        es = dptr1->drSPT;
-        pptr1->prE[t1].PT.peEndHead = dptr1->drHeads - 1;
-
-        /* also to appease fdisk */
-
-        pptr1->prE[t1].PT.peStartSector.li = rel_secs.li;
-        tsct.li = spcyl.li * (ec - bc + 1);
-        pptr1->prE[t1].PT.peSectors.li = tsct.li;
+        pe_span(dptr1,e,(t1 == 0 || e->BC == 0),&a,&n);
         }
-
-      /* derive relative sectors value */
-
-      pptr1->prE[t1].PT.peStartSector.li = 
-      (spcyl.li * bc) + (pptr1->prE[t1].PT.peBeginHead * dptr1->drSPT);
-
-      /* copy pt data to mbr buffer */
-
-      set_pe_data(pptr1,t1,bs,bc,es,ec);
-      pptr1->prE[t1].ABS = pptr1->prE[t1].PT.peStartSector.li;
-      memcpy((mbr_buf+0x1be+t1*16),&(pptr1->prE[t1].PT),16);
+      e->ABS = a;
+      e->PT.peStartSector.li = a;
+      e->PT.peSectors.li = n;
+      pe_chs(dptr1,&(e->PT),a,a+n-1);
+      memcpy((mbr_buf+0x1be+t1*16),&(e->PT),16);
+      mbr_buf[0x1be+t1*16+4] = pe_wtype(dptr1,e,a+n-1);
       }
 
     /* write the mbr buffer to disk */
@@ -3190,85 +3372,46 @@ byte write_tree(void) {
         }
       }
 
-    /* process any extended partitions chains */
+    /* write the ebr chain.  a logical drive's start is relative to its
+    own ebr, a link entry's start to the start of the extended
+    partition. */
 
     if(ext_ndx != 0xff) {
-      pptr1 = pptr1->prE[ext_ndx].ExtPR;
-      rel_secs.li = 0;
-      while(pptr1 != NULL) {
-
-        /* prepare a blank sector buffer */
-
+      for(pptr2 = pptr1->prE[ext_ndx].ExtPR; pptr2 != NULL; pptr2 = pnext) {
+        pnext = pptr2->prE[1].ExtPR;
         memset(&sct_buf,0,512);
         sct_buf[510] = 0x55;
         sct_buf[511] = 0xaa;
-
-        /* set beginning and ending head and sector numbers */
-
-        get_pe_data(pptr1,0,&bs,&bc,&es,&ec);
-        pptr1->prE[0].PT.peBeginHead = 1;
-        bs = 1;
-        pptr1->prE[0].PT.peEndHead = dptr1->drHeads - 1;
-        es = dptr1->drSPT;
-
-        /* derive relative sectors value */
-
-        pptr1->prE[0].PT.peStartSector.li = dptr1->drSPT;
-
-        /* calc total sectors value */
-
-        tsct.li = dptr1->drSPT;
-        tsct.li *= dptr1->drHeads;
-        tsct.li *= (ec - bc + 1);
-        tsct.li -= dptr1->drSPT;
-        pptr1->prE[0].PT.peSectors.li = tsct.li;
-        rel_secs.li += (tsct.li + dptr1->drSPT);
-        set_pe_data(pptr1,0,bs,bc,es,ec);
-        pptr1->prE[0].ABS = spcyl.li * bc + dptr1->drSPT;
-
-        /* if not the last extended partition in the chain, prepare
-        the linkage entry in this partition table. */
-
-        if(pptr1->prE[1].ExtPR != NULL) {
-          pptr1->prE[1].PT.peFileSystem = PTCext;
-          get_pe_data(pptr1,1,&bs,&bc,&es,&ec);
-          pptr1->prE[1].PT.peBeginHead = 0;
-          bs = 1;
-          bc = pptr1->prE[1].ExtPR->prE[0].BC;
-          ec = pptr1->prE[1].ExtPR->prE[0].EC;
-          es = dptr1->drSPT;
-          pptr1->prE[1].PT.peEndHead = dptr1->drHeads - 1;
-          pptr1->prE[1].PT.peStartSector.li = rel_secs.li;
-          tsct.li = dptr1->drSPT;
-          tsct.li *= dptr1->drHeads;
-          tsct.li *= (ec - bc + 1);
-          pptr1->prE[1].PT.peSectors.li = tsct.li;
-          set_pe_data(pptr1,1,bs,bc,es,ec);
+        e = &(pptr2->prE[0]);
+        memcpy(sct_buf+0x1be,&(e->PT),16);
+        sct_buf[0x1be+4] = pe_wtype(dptr1,e,e->ABS+e->PT.peSectors.li-1);
+        if(pnext != NULL) {
+          e = &(pptr2->prE[1]);
+          e->PT.peBootable = 0;
+          e->PT.peFileSystem = PTCext;
+          a = pnext->EBR;
+          n = pnext->prE[0].ABS + pnext->prE[0].PT.peSectors.li - a;
+          e->PT.peStartSector.li = a - ext_base;
+          e->PT.peSectors.li = n;
+          pe_chs(dptr1,&(e->PT),a,a+n-1);
+          memcpy(sct_buf+0x1be+16,&(e->PT),16);
           }
         else {
-          memset(&(pptr1->prE[1].PT),0,16);
+          memset(&(pptr2->prE[1].PT),0,16);
           }
-        memset(&(pptr1->prE[2].PT),0,16);
-        memset(&(pptr1->prE[3].PT),0,16);
+        memset(&(pptr2->prE[2].PT),0,16);
+        memset(&(pptr2->prE[3].PT),0,16);
 
-        /* transfer the data to the sector buffer */
-
-        memcpy(sct_buf+0x1be,&(pptr1->prE[0].PT),16);
-        memcpy(sct_buf+0x1be+16,&(pptr1->prE[1].PT),16);
-
-        /* write the sector buffer to disk */
-
-        if(lba_io(0x43,dptr1,spcyl.li * pptr1->prE[0].BC,sct_buf) != 0) {
+        if(lba_io(0x43,dptr1,pptr2->EBR,sct_buf) != 0) {
           report_error(errcode_diskwrite);
           return(1);
           }
 
         /* don't let format be confused by a left-over pbr. */
 
-        if(check_pbr(pptr1,0,drive_num) != 0) {
+        if(check_pbr(pptr2,0,drive_num) != 0) {
           return(1);
           }
-        pptr1 = pptr1->prE[1].ExtPR;
         }
       }
     dptr1 = dptr1->drNext;
@@ -3589,6 +3732,7 @@ void delete_all_guts(void) {
       pptr2 = pptr3;
       }
     memset(&(pptr1->prE[t1].PT),0,16);
+    pptr1->prE[t1].LSIZE = 0;
     }
   edit_pr_hold = NULL;
   edit_line = 0;
@@ -4071,6 +4215,7 @@ void add_primary(void) {
   lgap_ptr = find_largest_gap(FIND_PRI);
   new_cylds_max = lgap_ptr->lrCylds;
   new_megs_max = lgap_ptr->lrMegs;
+  cap_fat(edit_dr,&new_cylds_max,&new_megs_max);
   ul_set_attr(LIST_XL,LIST_TOP+edit_line,LIST_XR,main_attr);
   ul_set_cursor(0,24);
   display_cmd_box(F1_FLAG);
@@ -4167,6 +4312,7 @@ void add_ext_helper1(void) {
     }
   new_cylds_max = lgap_ptr->lrCylds;
   new_megs_max = lgap_ptr->lrMegs;
+  cap_fat(edit_dr,&new_cylds_max,&new_megs_max);
   }
 
 /*======================================================================
@@ -4197,6 +4343,7 @@ pr_type *ext_helper2(pr_type *prptr, dr_type *drptr) {
     report_error(errcode_insuficmem);
     exit(1);
     }
+  memset(pptr1,0,sizeof(pr_type));
   pptr1->prExt = 1;
   if(no_ext) {
     lptr1 = find_largest_gap(FIND_PRI);

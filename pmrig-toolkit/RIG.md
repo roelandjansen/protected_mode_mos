@@ -1,0 +1,159 @@
+# PC-MOS/386 debug rig
+
+A headless test rig around DOSBox Staging 0.82.2, patched with an
+emulator-side tracer and with int 13h extensions. Private tooling, not
+part of the project tree.
+
+## Restore in a fresh session
+
+    tar xzf pmrig-toolkit.tar.gz
+    cd pmrig-toolkit
+    ./restore.sh
+
+`restore.sh` installs the rig into `/home/claude/rig` and the emulator
+into `/home/claude/dosbox-staging/build-dbg/dosbox`.
+
+- It uses the prebuilt binary if its libraries resolve.
+- Otherwise it clones upstream `v0.82.2`, applies
+  `dosbox-pmtrace.patch` and `dosbox-int13ext.patch`, and rebuilds
+  (meson, `--buildtype=debug -Denable_debugger=heavy`).
+- No sudo.
+
+Then unpack the PC-MOS tree to `/home/claude/pm`.
+
+**Which tree the rig boots:** `rig.sh` takes the kernel, drivers and
+utilities from `PM_ROOT` (default `/home/claude/pm`). The work tree is
+`/home/claude/scr`, so set `PM_ROOT=/home/claude/scr` to boot current
+builds. An older kernel does not see 0Fh extended partitions, for
+example.
+
+## Contents
+
+| file | what |
+| --- | --- |
+| `dosbox.gz` | prebuilt debug DOSBox Staging 0.82.2 with both patches (x86-64 Linux, Ubuntu 24.04 libraries) |
+| `dosbox-pmtrace.patch` | tracer patch against upstream `v0.82.2` |
+| `dosbox-int13ext.patch` | int 13h 41h/42h/43h/48h for hard disk images; 08h reports at most 1024 cylinders (UPDATE 93) |
+| `restore.sh` | installs the rig, uses or rebuilds the emulator |
+| `rig/` | the scripts and tools below |
+
+## Scripts
+
+**Emulator control**
+
+| script | use |
+| --- | --- |
+| `rig.sh start [--testconfig] [--bootdir DIR] [--configsys F] [--add F]` | build a boot floppy and start the emulator headless; `HDIMG=` attaches a hard disk image, `HDGEOM=512,63,255,CYLS` gives its geometry; `DOSBOX=` and `CYCLES=` select the emulator |
+| `rig.sh screen` / `cpu` / `mem ADDR LEN` / `ivt N` | read the text screen, registers, guest memory, IVT entry |
+| `rig.sh type TEXT` / `key KEY...` | send keystrokes (see the keyboard notes) |
+| `rig.sh gdb CMD...` / `log` / `stop` | raw gdb against the emulator, its log, stop |
+| `kt.sh CMD [WAIT]` | type a command one key at a time, check the echo, press Return, print the screen |
+| `waitp.sh [TRIES]` | wait for an idle `A:\` prompt before typing |
+| `boot.sh`, `xstart.sh`, `stop.sh`, `screen.sh`, `regs.sh`, `mem.sh`, `key.sh` | lower-level pieces used by the above |
+| `mkfloppy.sh OUT.img [CFGDIR] [OVERLAYDIR]` | build a boot floppy without starting the emulator |
+| `common.sh`, `env.sh` | shared settings; source `env.sh` first (library and tool paths, mtools) |
+
+**Builds**
+
+| script | use |
+| --- | --- |
+| `dosbuild.sh _NAME` | build one driver (`_386`, `_DPMI`) with an error gate; `TREE=` selects the tree |
+| `kbuild.sh [OBJ...]` | build the kernel via `make -f KERNEL.MAK $$MOS.SYS`; never uses `MAKEMOS.BAT` (its `del $*.*` wipes every built driver) |
+| `ubuild.sh TARGET` | build one utility via `MAKEUTIL.MAK` (timeout 900 s) |
+| `combuild.sh NAME` | build one `.COM` from `NAME.ASM` inside the emulator |
+
+HDSETUP is built outside the emulator, with Open Watcom, by the tree's
+own `SOURCES/src/cutils/HDBUILD.SH` (UPDATE 99/100).
+
+**Analysis**
+
+| script | use |
+| --- | --- |
+| `mcbwalk.sh DUMP` | print the DOS MCB chain from a memory dump |
+| `pair.sh LOG REGEX` | pair int 31h calls with their returns in a pmtrace log |
+| `txtscr.c` | text-screen decoder used by `rig.sh screen` |
+
+**Disk images** (Linux side; `restore.sh` builds `mkpt` and `mkmbr`)
+
+| tool | use |
+| --- | --- |
+| `mkmbr IMG [type start size]...` | write an MBR with up to four primary partitions (UPDATE 93) |
+| `mkpt IMG SEC BASE [type start size]...` | write a partition table sector (MBR or EBR) at sector `SEC`; starts as stored (relative for EBRs), CHS computed from `BASE + start`, 1023/254/63 when too big |
+| `ptdump.sh IMG` | print the MBR and follow the EBR chain: type, start, absolute start, size, CHS |
+
+Example, a 1 MiB aligned layout with a logical drive beyond 8.4 GB:
+
+    truncate -s 21467980800 t.img
+    mkpt t.img 0 0 06 2048 204800 0f 20000768 1050624
+    mkpt t.img 20000768 20000768 0e 2048 1048576
+    mformat -i t.img@@$((2048*512)) -T 204800 -h 255 -s 63 -H 2048 ::
+    ptdump.sh t.img
+    HDIMG=$PWD/t.img HDGEOM=512,63,255,2610 PM_ROOT=/home/claude/scr rig.sh start --testconfig
+
+Always set `TREE=` explicitly for scratch builds: the default is the real
+tree.
+
+## Keyboard and timing notes
+
+- **Missing xdotool:** on a host without it, run
+  `apt-get download xdotool libxdo3`, unpack with `dpkg-deb -x` and put a
+  wrapper on `PATH` that sets `LD_LIBRARY_PATH`. No sudo.
+- **Shifted characters:** `xdotool type` drops them (`:` `*`). Use
+  `kt.sh`, or `rig.sh key ... shift+semicolon`.
+- **Arrow keys:** the grey arrow keys do nothing in HDSETUP. Use
+  `KP_Up`/`KP_Down`, and do not send keypad digits.
+- **Typing too early:** keys typed right after boot are lost. Wait for
+  the prompt (`waitp.sh`), about 65-70 s with `--testconfig`.
+- **FORMAT:** it needs an extra Return after `Y`.
+- **Image writes:** DOSBox buffers them. Wait a few seconds before
+  `rig.sh stop`, or the last sector written may be missing from the
+  image. PC-MOS has its own write-back cache on top of that.
+- **Stale emulators:** after a timeout, kill leftover dosbox processes
+  (`pgrep -a dosbox`, then `kill PID`). Never use `pkill -f`: it kills
+  the shell.
+- **Speed:** the debug build is slow; `FORMAT` of a 2 GB partition takes
+  about 15 minutes. Use `DOSBOX=.../build-rel/dosbox` for long runs. It
+  has to be built separately, with the same patches.
+
+## The pmtrace tracer
+
+Emulator-side, so it cannot change guest code layout — which guest-side
+instrumentation repeatedly did in this project. Enabled by environment:
+
+| variable | effect |
+| --- | --- |
+| `PMTRACE=file` | log every interrupt, exception and IRET in a window after each v-86 int 6Fh |
+| `PMTRACE_WIN=n` | size of that window (events) |
+| `PMTRACE_STEPS=n` | log the next n v-86 instructions after an int 6Fh `ax=7705h`, or a native `int 0D4h ah=11h` |
+| `PMTRACE_HOOK_LO` / `_HI` / `_N` | log `bp`, `esp`, all segment registers, the general registers, `[bp-16]`, `[bp-12]` and four words at `ss:esp` for every instruction executed in a code range |
+
+Hook ranges are offsets into the `$386.SYS` image (cs base `0700h`). For
+code elsewhere, subtract `0700h` from the linear address: the driver at
+`C0DE:xxxx` is `0xC0DE0 + xxxx - 0x700`.
+
+Stack and memory peeks use a read-only page-table walk over physical
+memory — no guest side effects.
+
+## Useful addresses (current tree)
+
+| what | where |
+| --- | --- |
+| GDT | image offset `17C0h`, linear `0700h + 17C0h` |
+| `dtitable` (descriptor ownership, 30 entries) | image offset `1789h` |
+| `$DPMI.SYS` group | segment `C0DE` in the test boots |
+
+`dtitable` values: `ff` free, a task id = task-owned (freed by `cleardti`
+on every `nmswitch`), `fe` permanent, `80h|taskid` = DPMI client
+descriptor (exempt from `cleardti`).
+
+## Lessons encoded in the tooling
+
+- **Measure from the emulator, not the guest.** Guest instrumentation
+  shifted layout and, once, never compiled in at all and was read back as
+  data.
+- **A value equal to its initialiser is not evidence.**
+- **Dump the frame before theorising about a selector.**
+- **Check encodings in the linked binary**, not the listing.
+- `awk` with `RS="\r\n"` counts records differently from line numbers
+  taken from a CR-stripped copy. Match on text, not line numbers, when
+  editing CRLF sources.

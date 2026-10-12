@@ -65,7 +65,7 @@ ESC
       Exit Program
 
 [ERRORTAGS]
-13
+12
 Error -
  Insufficient memory
  Disk read error
@@ -78,7 +78,6 @@ Error -
  Data error 6
  Improper cylinder numbering
  Failure in EXEC of MSYS/M
- Writing to disks larger than 8 GB is not supported yet
 
 [FKEYTAGS]
 20
