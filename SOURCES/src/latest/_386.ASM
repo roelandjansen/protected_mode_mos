@@ -770,6 +770,13 @@ doi6fgate:
 entinr13:
 	sti
 	pushf
+	cmp	ah,42h			; extended read/write (UPDATE 103)
+	je	x13ext0
+	cmp	ah,43h
+	jne	x13ext1
+x13ext0:
+	jmp	x13ext
+x13ext1:
 	cmp	dl,80h			; ***** exit if dma not used *****
 dmajump label word			; this is nop'ed out if hard disk uses dma
 	jae	fastex13
@@ -847,6 +854,168 @@ i13pass:
 	pop	si
 	pop	di
 	jmp	dword ptr cs:[oldint13]
+
+
+	subttl x13ext - stage int 13h 42h/43h (extended read/write)
+	page
+;======================================================================
+;,fs
+; x13ext - stage int 13h 42h/43h (extended read/write)
+;
+; the kernel reads and writes hard disks with the int 13h extensions
+; when the bios has them (UPDATE 93).  a bios that transfers with
+; bus-master dma (vmware, many real machines) writes to physical
+; addresses, but a buffer in remapped (paged) memory is somewhere
+; else physically: reads land in the wrong place, writes take the
+; wrong data.  so, as for the other disk calls, a transfer whose
+; buffer reaches into remapped memory (dmabank and up) goes through
+; the staging buffer, in pieces of at most buffsize.  a buffer below
+; dmabank is passed straight through.  (UPDATE 103)
+;
+; in:	int 13h 42h/43h registers: ds:si -> disk address packet
+;	(size, 0, count, buffer offset, buffer segment, 64-bit lba)
+;	stack: flags pushed by entinr13
+;
+; out:	as int 13h: cy and ah = error code if error; on an error the
+;	packet's count is set to the sectors transferred
+;
+;,fe
+;======================================================================
+x13ext:
+	pop	cs:[userflag]
+	push	di
+	push	si
+	push	ds
+	mov	cs:[userax],ax
+	mov	cs:[userbx],bx
+	mov	cs:[usercx],cx
+	mov	cs:[userdx],dx
+	mov	cs:[useres],es
+	mov	cs:[origcmd],ah
+	mov	cs:[xdapofs],si
+	mov	cs:[xdapseg],ds
+
+; last paragraph of the caller's buffer: segment + offset/16 + count*32
+
+	mov	bx,[si+4]
+	shr	bx,4
+	add	bx,[si+6]
+	jc	x13stg
+	mov	ax,[si+2]
+	cmp	ax,800h			; count*32 would overflow
+	jae	x13stg
+	shl	ax,5
+	add	ax,bx
+	jc	x13stg
+	cmp	ah,cs:[dmabank]		; below remapped memory?
+	jae	x13stg
+	push	cs			; i13pass expects ds = cs
+	pop	ds
+	jmp	i13pass			; no staging needed
+
+x13stg:
+	mov	ax,cs
+	mov	ds,ax
+	mov	ax,[buffsize]
+	xor	dx,dx
+	mov	bx,512
+	div	bx
+	mov	[buffsects],ax
+	les	si,dword ptr [xdapofs]	; es:si -> caller's packet
+	mov	ax,es:[si+2]
+	mov	[xleft],ax
+	mov	ax,es:[si+4]
+	mov	[xuofs],ax
+	mov	ax,es:[si+6]
+	mov	[xuseg],ax
+	mov	ax,es:[si+8]
+	mov	word ptr [xdap+8],ax
+	mov	ax,es:[si+10]
+	mov	word ptr [xdap+10],ax
+	mov	ax,es:[si+12]
+	mov	word ptr [xdap+12],ax
+	mov	ax,es:[si+14]
+	mov	word ptr [xdap+14],ax
+	mov	[xdone],0
+	mov	byte ptr [xdap],16
+	mov	byte ptr [xdap+1],0
+	mov	word ptr [xdap+4],0
+	mov	ax,[buffaddr]
+	mov	word ptr [xdap+6],ax
+
+x13lp:
+	mov	ax,[xleft]
+	or	ax,ax
+	jz	x13ok
+	cmp	ax,[buffsects]
+	jbe	x13l1
+	mov	ax,[buffsects]
+x13l1:
+	mov	[xnow],ax
+	mov	word ptr [xdap+2],ax
+	cmp	[origcmd],43h		; write: caller's data to the buffer
+	jne	x13l2
+	call	x13cpy
+x13l2:
+	mov	ah,[origcmd]
+	mov	al,byte ptr [userax]
+	mov	dx,[userdx]
+	mov	si,offset xdap		; ds = cs
+	call	call13u
+	pushf
+	pop	[userflag]
+	mov	[userax],ax
+	jc	x13er
+	cmp	[origcmd],42h		; read: buffer to the caller's data
+	jne	x13l3
+	call	x13cpy
+x13l3:
+	mov	ax,[xnow]
+	add	[xdone],ax
+	sub	[xleft],ax
+	add	word ptr [xdap+8],ax	; lba += pieces
+	adc	word ptr [xdap+10],0
+	adc	word ptr [xdap+12],0
+	adc	word ptr [xdap+14],0
+	shl	ax,5			; caller's buffer += xnow*512 bytes
+	add	[xuseg],ax
+	jmp	x13lp
+
+x13er:
+	les	si,dword ptr [xdapofs]	; report sectors done
+	mov	ax,[xdone]
+	mov	es:[si+2],ax
+	jmp	i13exit
+
+x13ok:
+	mov	byte ptr [userax+1],0	; ah = 0, carry clear
+	and	byte ptr [userflag],0feh
+	jmp	i13exit
+
+;==== copy xnow sectors between the caller's buffer and the staging
+;==== buffer: to the buffer for 43h, from it for 42h.  ds = cs.
+
+x13cpy:
+	pushset ax,cx,si,di,ds,es
+	mov	cx,[xnow]
+	xchg	ch,cl			; cx = xnow*256 words
+	cld
+	cmp	[origcmd],43h
+	jne	x13c1
+	mov	es,[buffaddr]
+	xor	di,di
+	mov	si,[xuofs]
+	mov	ds,[xuseg]
+	jmp	short x13c2
+x13c1:
+	mov	es,[xuseg]
+	mov	di,[xuofs]
+	mov	ds,[buffaddr]
+	xor	si,si
+x13c2:
+	rep	movsw
+	popset ax,cx,si,di,ds,es
+	ret
 
 
 	subttl advance_sect - calc new cyl, head, sect for +sect
@@ -2953,6 +3122,14 @@ usercx		dw	0		; entry/exit cx
 userdx		dw	0		; entry/exit dx
 useres		dw	0		; entry/exit es
 userflag	dw	0		; entry/exit flags
+xdapofs		dw	0		; caller's disk address packet (42h/43h)
+xdapseg		dw	0		; this must immediately follow xdapofs!
+xuofs		dw	0		; caller's buffer, advanced per piece
+xuseg		dw	0
+xleft		dw	0		; sectors still to transfer
+xdone		dw	0		; sectors transferred
+xnow		dw	0		; sectors in this piece
+xdap		db	16 dup (0)	; packet for the staged pieces
 
 ; assorted data
 
@@ -15974,4 +16151,5 @@ init32	ends
 	end   begin
 
 
+
 

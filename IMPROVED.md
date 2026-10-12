@@ -1,7 +1,7 @@
 # PC-MOS/386 v5.01 -- what has been improved
 
 Summary of the work recorded in `CHANGES.md`, `HANDOVER.md` and
-`UPDATE62.md` .. `UPDATE97.md` (state 20261011). Per item: the update
+`UPDATE62.md` .. `UPDATE103.md` (state 20261012). Per item: the update
 number where the detail lives. UPDATE 90 is not in the archive.
 
 Short version: PC-MOS/386 now has a **working DPMI 0.9 host** (DJGPP,
@@ -10,7 +10,10 @@ once), a new **XMS 3.0 driver**, **disks up to 2 TB addressable via int
 13h extensions** with 2 GB FAT16 partitions, a set of **DOS API
 compatibility fixes**, **Y2K fixes** in DATE and at boot, and files and
 directories made by other systems (FreeDOS, Windows, mtools) no longer
-get a random security class.
+get a random security class. PC-MOS **installs on and boots from a hard
+disk** again, verified in a VMware VM: HDSETUP rebuilt (Open Watcom) and
+fixed for big disks, and `$386.SYS` fixed for BIOSes that transfer with
+DMA.
 
 ---
 
@@ -41,6 +44,8 @@ get a random security class.
 | `$XMS.SYS` -- XMS 3.0 driver on top of `$386.SYS` (alloc/free/move/lock/realloc, per-task cleanup on `REMTASK`) | 86 |
 | `DPMITST.COM`, `DPMI32.COM` -- DPMI test clients | 15, 62 |
 | ADDTASK prints the current maximum task size on errors / usage | 70, 85 |
+| `cutils/HDBUILD.SH` -- builds HDSETUP with Open Watcom (no Borland C); `build.sh` runs it | 99, 102 |
+| `makefloppy.sh` -- install / boot floppy image from the latest build | 102 |
 
 ### Disk support
 
@@ -50,6 +55,9 @@ get a random security class.
 | int 13h extensions (LBA, 41h/42h/43h): partitions beyond 8.4 GB reachable, 32-bit sector numbers (2 TB) | 93 |
 | Extended partitions beyond 8.4 GB; partition types 0Eh / 0Fh accepted | 94 |
 | `FORMAT` works on 2 GB and LBA partitions; generic IOCTL track calls beyond 8.4 GB | 95 |
+| HDSETUP shows (99) and creates, deletes and resizes (100) partitions beyond 8.4 GB; LBA I/O, 0Eh/0Fh, partitions it did not touch keep their exact place | 99-100 |
+| Primary partition may be in any slot; a disk without a FAT primary still gets its logical drives (DOS behaviour) | 101 |
+| Install on a hard disk: `makefloppy.sh` install floppy, HDSETUP / FORMAT / MSYS / COPY, boot from C: (tested in DOSBox and VMware) | 102-103 |
 
 ### DOS API
 
@@ -79,6 +87,7 @@ get a random security class.
 - `memman` never initialised (UPDATE 1); `InitProtect` `rep movsd` with ESI/EDI/ES never set (UPDATE 14).
 - `GoProtect`: wrote through CS in protected mode, wrong selector register, no carry test after the switch (UPDATE 15-16).
 - A TSL #GP bug in exception handling (UPDATE 55).
+- **Hard disk DMA under paging:** int 13h 42h/43h (the extended read/write the kernel uses since UPDATE 93) were not staged through the bounce buffer. A BIOS that transfers with bus-master DMA (VMware, many real machines) read into and wrote from the wrong physical memory: garbage directories, "Invalid boot signature", **file system damage**. Now staged when the buffer is in remapped memory (UPDATE 103).
 - Host under-reported its data size; live descriptor in a free slot (UPDATE 29-33).
 
 ### DPMI host (found with real extenders)
@@ -105,6 +114,7 @@ get a random security class.
 | FORMAT beyond 8.4 GB wrote boot sector/FAT at a wrapped CHS address (**data loss**) | 95 |
 | Set device parameters re-read boot sector via CHS -> garbage BPB | 95 |
 | Directory entries written by DOS 7 / Windows / FreeDOS / mtools got a random security class from their creation-time byte -> read-only or "Access not allowed"; class now only counts with the system attribute | 97 |
+| Drive 80h had to have a FAT partition in slot 0, else **no hard disk drive letters at all** (Linux, EFI or recovery partition first) | 101 |
 
 ### Shell (`$$SHELL.SYS`) and utilities
 
@@ -118,6 +128,11 @@ get a random security class.
 | FILEMODE: "Syntax error" with redirected output (trailing blank) | 97 |
 | FORMAT: cylinder count / bad-track check overflow > 2 GB; BPB size past partition end | 95 |
 | FORMAT/MSYS `scan_partitions`: 0Eh/0Fh, LBA, DOS EBR chain rule | 95 |
+| HDSETUP: located partitions by their CHS fields; beyond 8.4 GB showed a 7 MB "OTH" and offered space in use | 99 |
+| HDSETUP: rebuilt every entry from cylinders; a 1 MiB aligned partition from another tool would have been moved (**data loss**) | 100 |
+| HDSETUP: offered the whole free space for a FAT partition (20 GB on a 20 GB disk); now capped at 2 GB | 100 |
+| HDSETUP: free space before a 1 MiB aligned logical drive included the cylinder holding its EBR | 100 |
+| HDSETUP: extended partition index not reset for the second drive | 100 |
 
 ---
 
@@ -133,6 +148,7 @@ get a random security class.
 | Hard-disk init code moved out of resident `mos` | 1,160 bytes less HMA, MOSSEG room 34 -> 1,194 bytes | 93 |
 | Hook table 320 -> 1024 entries | | 67 |
 | Class lookup through one helper (`dclasslvl`) | `mo2` 38 bytes smaller | 97 |
+| Diskette driver init moved to the init segment | 368 bytes less HMA, MOSSEG room 1,426 bytes | 98 |
 
 ---
 
@@ -141,6 +157,8 @@ get a random security class.
 - All diagnostic markers removed from `_386.ASM`, `_DPMI.ASM`, `MOSDDINT.ASM`, `MOSINIT2.ASM`; boot screen clean (UPDATE 11-13).
 - Project-added `DevLoadMsg` removed; original sign-on restored (UPDATE 11).
 - Stale binaries in the tree identified; builds now reproducible (same md5 in two containers).
+- HDSETUP builds from source again (Open Watcom, `-zp1` for Borland byte packing); the Borland sources stay buildable (UPDATE 99-100).
+- Rig toolkit refreshed: disk image tools (`mkpt`, `mkmbr`, `ptdump.sh`), int 13h extension patch, boot from a given floppy or from the hard disk (UPDATE 100-102).
 
 ---
 
@@ -148,10 +166,12 @@ get a random security class.
 
 - One `GO.BAT` run in twelve: DOS/4GW task stuck after banner (not attributed).
 - Four-task `GO.BAT` on the 2 vCPU rig: too slow with the debug emulator; passes with the release build (UPDATE 96-97).
-- FAT16 2 GB per partition; no FAT32, no LFN; max two hard disks.
-- `HDSETUP` still makes 32 MB CHS volumes -- partition with another tool.
+- FAT16 2 GB per partition; no FAT32, no LFN; max two hard disks (more than two: planned, `ITEM6-PLAN.md`).
+- HDSETUP: first 64 GB of a disk (16-bit megabyte arithmetic); new partitions on whole cylinders, placed first-fit.
 - `mo2` has ~118 bytes before the next 8 KB per-task step (UPDATE 97).
 - #GP delivery not testable under DOSBox; needs real hardware.
 - 6502h-6507h table pointers left out (cost 8 KB per task).
 - MSYS on logical drives: does nothing (same as original).
 - Directories classed through int 38h 83h before UPDATE 97 without the system attribute are now unclassified; set the class again.
+- Booting from a primary partition in slot 1-3 (`trueboot` path, UPDATE 101) not tested.
+- Several tasks using the hard disk at once with the DMA staging (UPDATE 103) not tested on VMware yet.
