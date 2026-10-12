@@ -32,8 +32,8 @@ fattype16	db	'FAT16   '
 
 ourbuf	db	512 dup(?)
 drives	db	?
-pt0	db	4*16 dup(0)
-pt1	db	4*16 dup(0)
+pt0	db	4*4*16 dup(0)	; mbr copies, 64 bytes per drive (UPDATE 105)
+fpri	db	4 dup(0ffh)	; slot of each drive's primary, 0ffh: none
 scext	dd	0		; start sector of the extended partition (UPDATE 95)
 sclba	dd	0		; sector of the next ebr, for rdsec
 scdap	dw	10h,1		; int 13h 42h disk address packet: 1 sector
@@ -50,6 +50,15 @@ scdlba	dw	0,0,0,0		; 64-bit sector number
 ;,fs
 ; scan_partitions
 ;
+; numbers the hard disk volumes the way the kernel does (mosddblf,
+; UPDATE 101/104) and finds the one asked for:
+;   1. the primary partition of each drive (the first FAT entry in
+;      any slot), drive 80h first;
+;   2. the logical drives in the extended partitions, drive by drive;
+;   3. the other FAT primaries, drive by drive.
+; up to four drives (80h-83h); a drive without a valid mbr has no
+; volumes.  (UPDATE 105; was two drives, primary only in slot 0)
+;
 ; when a match is found, the return bx register value is either a
 ; pointer to the partition table entry for the matching partition
 ; or bx is 0 (when the matching partition happens to be an extended
@@ -60,8 +69,8 @@ scdlba	dw	0,0,0,0		; 64-bit sector number
 ; in:	al = 0 based hard drive number to match (0 = c:, 1 = d:, etc.)
 ;
 ; out:	nc if no error
-;	 al = 80 if entry al corresponds to the first hard drive
-;	    = 0 if corresponds to second hard drive
+;	 al = 80 if the volume is on the first hard drive
+;	    = 0 if it is on another hard drive
 ;	 ds:bx -> copy of partition table entry (if primary or secondary)
 ;	 bx = 0 (if extended)
 ;	cy if error
@@ -73,7 +82,7 @@ scan_partitions:
 	mov	bx,cs
 	mov	ds,bx
 	mov	es,bx
-	xor	ah,ah			; init drive counter
+	mov	ah,0ffh			; volume counter, -1: none yet
 	mov	bp,ax
 
 ; see how many drives there are
@@ -83,137 +92,54 @@ scan_partitions:
 	int	13h			; get drive parameters
 	cmp	dl,0
 	lje	scpx
-	cmp	dl,2			; limit to 2
+	cmp	dl,4			; limit to 4
 	jna	scpa
-	mov	dl,2
+	mov	dl,4
 scpa:
 	mov	[drives],dl
 
-; reset drive 0 and then
-; read the first sector of drive 0 (h0, s1, c0, the first mbr)
+; read each drive's mbr into its table, primary moved to slot 0
 
-	mov	ax,0401h		; verify to position to cylinder 0
-	mov	cx,0001h		; c0, s1
-	mov	dx,0080h		; h0, drive 80
-	int	13h
-	mov	ah,0			; reset
-	mov	dl,80h			; drive 80
-	int	13h
-	mov	ax,0201h		; read 1 sector
-	mov	bx,offset ourbuf
-	mov	cx,0001h		; c0, s1
-	mov	dx,0080h		; h0, drive 80
-	int	13h
-	ljc	scpx
+	xor	bx,bx
+scpb:
+	call	fmrdmbr
+	inc	bx
+	cmp	bl,[drives]
+	jb	scpb
 
-; validate the sector's signature and partition table
+; 1. the primary partitions
 
-	cmp	word ptr [ourbuf+01feh],0aa55h
-	ljne	scpx
-	mov	si,offset ourbuf+1beh
-	cmp	[si].peBootable,80h
-	je	scpc
-	cmp	[si].peBootable,0
-	ljne	scpx
+	mov	dl,80h
 scpc:
-	cmp	[si].peFileSystem,PTCsm12
-	je	scpc1
-	cmp	[si].peFileSystem,PTCsm16
-	je	scpc1
-	cmp	[si].peFileSystem,PTCdlg
-	je	scpc1
-	cmp	[si].peFileSystem,0eh	; FAT16 (LBA), UPDATE 95
-	ljne	scpx
-
-; copy the partition table into the storage block
-
-scpc1:
-	mov	di,offset pt0
-	mov	cx,4*16/2
-	cld
-	rep	movsw
-
-; as soon as it's known that the first hard drive contains a valid
-; partition table, we know that there is a drive c:.  therefore,
-; if the entry al value is 0, we should return with al = 80 and nc.
-
-	mov	ax,bp
-	cmp	ah,al
-	jne	scpc3
-	mov	al,80h			; volume is on 1st drive
-	mov	bx,offset pt0
-	jmp	scpy
-scpc3:
-
-; if a second drive exists, reset it and then
-; read the first sector of drive 1 (h0, s1, c0, the second mbr)
-
-	cmp	[drives],2
-	jne	scpf
-	mov	ax,0401h		; verify to position to cylinder 0
-	mov	cx,0001h		; c0, s1
-	mov	dx,0081h		; h0, drive 81
-	int	13h
-	mov	ah,0			; reset
-	mov	dl,81h			; drive 81
-	int	13h
-	mov	ax,0201h		; read 1 sector
-	mov	bx,offset ourbuf
-	mov	cx,0001h		; c0, s1
-	mov	dx,0081h		; h0, drive 81
-	int	13h
-	jc	scpd
-
-; validate the sector's signature and partition table
-
-	cmp	word ptr [ourbuf+01feh],0aa55h
-	jne	scpd
-	mov	si,offset ourbuf+1beh
-	cmp	[si].peBootable,80h
+	call	fmptofdl		; si -> table of drive dl
+	mov	bl,dl
+	and	bx,3
+	cmp	[fpri+bx],0ffh		; no FAT primary on this drive
 	je	scpc2
-	cmp	[si].peBootable,0
-	jne	scpd
-scpc2:
-	cmp	[si].peFileSystem,PTCsm12
-	je	scpe
-	cmp	[si].peFileSystem,PTCsm16
-	je	scpe
-	cmp	[si].peFileSystem,PTCdlg
-	je	scpe
-	cmp	[si].peFileSystem,0eh	; FAT16 (LBA), UPDATE 95
-	je	scpe
-scpd:
-	mov	[drives],1
-	jmp	scpf
-scpe:
-
-; copy the partition table into the second stack block
-
-	mov	di,offset pt1
-	mov	cx,4*16/2
-	cld
-	rep	movsw
-
-; as soon as it's known that a second hard drive contains a valid
-; partition table, we know that there is a drive d:.  
-
 	mov	ax,bp
 	inc	ah
 	mov	bp,ax
 	cmp	ah,al
-	jne	scpf
-	xor	al,al			; volume is not on 1st drive
-	mov	bx,offset pt1
+	jne	scpc2
+	mov	al,dl
+	mov	bx,si
 	jmp	scpy
-scpf:
+scpc2:
+	inc	dl
+	mov	al,dl
+	and	al,7fh
+	cmp	al,[drives]
+	ljc	scpc			; (jb)
 
-; process any extended partitions on drive 0
+; 2. the extended partitions, drive by drive
 
 	mov	dl,80h
-	mov	si,offset pt0
+scpg9:
+	call	fmptofdl
 scpg8:
 	xor	di,di			; init di as a flag
-	mov	cx,3
+	mov	cx,4			; all four slots
+	sub	si,16
 scpg1:
 	add	si,16			; advance to next pte
 	cmp	[si].peFileSystem,PTCext
@@ -288,23 +214,20 @@ scpg5:
 	mov	dh,[di].peBeginHead	; (dl is still the drive number)
 	jmp	short scpg6
 
-; if a second drive exists, recycle through the above logic to
-; process any extended partitions on drive 1
+; next drive
 
 scpgz:
-	cmp	dl,81h			; already been here?
-	je	scph
-	cmp	[drives],2
-	jne	scph
-	mov	si,offset pt1
-	mov	dl,81h
-	jmp	scpg8
+	inc	dl
+	mov	al,dl
+	and	al,7fh
+	cmp	al,[drives]
+	ljc	scpg9			; (jb)
 
-; process any secondary partitions on drive 0
+; 3. the other FAT primaries, drive by drive
 
-scph:
 	mov	dl,80h
-	mov	si,offset pt0
+scph5:
+	call	fmptofdl
 scph4:
 	mov	cx,3
 scph1:
@@ -332,16 +255,13 @@ scph2:
 scph3:
 	loop	scph1
 
-; if a second drive exists, recycle through the above logic to
-; process any secondary partitions on drive 1
+; next drive
 
-	cmp	dl,81h			; already been here?
-	je	scpx
-	cmp	[drives],2
-	jne	scpx
-	mov	si,offset pt1
-	mov	dl,81h
-	jmp	short scph4
+	inc	dl
+	mov	al,dl
+	and	al,7fh
+	cmp	al,[drives]
+	ljc	scph5			; (jb)
 
 ; either a disk error occured or no match was found
 
@@ -363,7 +283,131 @@ scpz:
 
 
 
-
+
+
+
+	subttl fmrdmbr - read a drive's mbr, primary to slot 0
+	page
+;======================================================================
+;,fs
+; fmrdmbr - read a drive's mbr, primary to slot 0 (UPDATE 105)
+;
+; the same as readmbr/pickpri in mosddblf: the mbr of drive 80h+bx is
+; copied to that drive's table and its first FAT entry (01h, 04h,
+; 06h, 0eh), in any slot, is swapped into slot 0.  a drive whose mbr
+; cannot be read or has no 55aah signature gets an empty table.
+;
+; in:	bx = drive index (0-3), ds = es = cs
+;
+; out:	the drive's table filled in or zeroed
+;	[fpri+bx] = original slot of the primary, 0ffh if none
+;
+;,fe
+;======================================================================
+fmrdmbr:
+	pushset	ax,bx,cx,dx,si,di
+	mov	[fpri+bx],0ffh
+	mov	di,bx			; di -> this drive's table
+	mov	cl,6
+	shl	di,cl
+	add	di,offset pt0
+	push	di
+	xor	ax,ax			; empty table to start with
+	mov	cx,4*16/2
+	cld
+	rep	stosw
+	pop	di
+	mov	dl,bl
+	or	dl,80h
+	push	bx
+	push	dx
+	mov	ax,0401h		; verify to position to cylinder 0
+	mov	cx,0001h		; c0, s1
+	xor	dh,dh			; h0
+	int	13h
+	pop	dx
+	push	dx
+	mov	ah,0			; reset
+	int	13h
+	pop	dx
+	mov	ax,0201h		; read 1 sector: the mbr
+	mov	bx,offset ourbuf
+	mov	cx,0001h		; c0, s1
+	xor	dh,dh			; h0
+	int	13h
+	pop	bx
+	jc	fmrb9
+	cmp	word ptr [ourbuf+01feh],0aa55h
+	jne	fmrb9
+	mov	si,offset ourbuf+1beh
+	push	di
+	mov	cx,4*16/2
+	cld
+	rep	movsw
+	pop	di
+
+; find the first FAT entry and swap it into slot 0.  bx -> table,
+; si = slot offset, dx = drive index (for fpri)
+
+	mov	dx,bx
+	mov	bx,di
+	xor	si,si
+	xor	al,al
+fmrb1:
+	mov	ah,[bx+si].peFileSystem
+	cmp	ah,PTCsm12
+	je	fmrb2
+	cmp	ah,PTCsm16
+	je	fmrb2
+	cmp	ah,PTCdlg
+	je	fmrb2
+	cmp	ah,0eh
+	je	fmrb2
+	add	si,16
+	inc	al
+	cmp	al,4
+	jb	fmrb1
+	jmp	short fmrb9
+fmrb2:
+	push	bx
+	mov	bx,dx
+	mov	[fpri+bx],al
+	pop	bx
+	or	si,si
+	jz	fmrb9
+	mov	cx,8
+fmrb3:
+	mov	ax,[bx]
+	xchg	ax,[bx+si]
+	mov	[bx],ax
+	add	bx,2
+	loop	fmrb3
+fmrb9:
+	popset	ax,bx,cx,dx,si,di
+	ret
+
+	subttl fmptofdl - pointer to a drive's table
+	page
+;======================================================================
+;,fs
+; fmptofdl - pointer to a drive's table (UPDATE 105)
+;
+; in:	dl = drive (80h-83h)
+;
+; out:	si = offset pt0 + (dl and 3) * 64
+;
+;,fe
+;======================================================================
+fmptofdl:
+	push	cx
+	mov	si,dx
+	and	si,3
+	mov	cl,6
+	shl	si,cl
+	add	si,offset pt0
+	pop	cx
+	ret
+
 	subttl rdsec - read one partition table sector
 	page
 ;======================================================================

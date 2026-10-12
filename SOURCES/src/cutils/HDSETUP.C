@@ -51,6 +51,18 @@ rj  20261012	UPDATE 100: disks beyond 8.4 GB, write side.
 		and extended entries ending beyond cylinder 1023 are
 		written as 0eh/0fh.  ext_ndx is reset for each drive.
 
+rj  20261012	UPDATE 105: up to four hard disks (80h-83h), as the
+		kernel since UPDATE 104.  the drive probe is a loop;
+		force_dn(n) replaces force_d2(); F2 steps through the
+		drives; "drive i of j" from drDriveNum and hard_drives;
+		the /n, /d, /m and /c paths loop over all drives.
+		gen_gaps: a partition starting in the cylinder where the
+		previous one ends gave an unsigned wrap (gap of 65535
+		cylinders) and an endless loop (1992 bug; 1 MiB aligned
+		layouts made by other tools).
+		only drives the user changed are written (drDirty); an
+		untouched drive keeps its boot code and extended partition.
+
 =======================================================================
 */
 
@@ -90,6 +102,8 @@ void farcall_ah0(void __far *f);
 #define PTCl16	0x0e			// FAT16, LBA
 #define PTClext	0x0f			// extended, LBA
 #define CHSMAXC	1023			// last cylinder a CHS field can hold
+
+void force_dn(byte n);
 
 byte *c = "(c) Copyright 1992 The Software Link, Incorporated";  /* @@XLAT */
 
@@ -145,6 +159,7 @@ struct drec {
   word drHeads;			// total # of heads 
   word drSPT;			// sectors per track 
   word drCylds;			// total # of cylinders
+  byte drDirty;			// != 0 when changed: written by write_tree (UPDATE 105)
   byte drLBA;			// != 0 when int 13h extensions work
   pr_type *drPR;		// ptr to 1st pr_type 
   struct drec *drNext;		// ptr to next drive record 
@@ -236,8 +251,9 @@ byte	*insdisk_tag;
 // other globals
 
 byte	assign_letter = START_LETTER;	// used by drvltrs_work()
-byte	hard_drives;		// the number of hard drivers (0, 1 or 2)
+byte	hard_drives;		// the number of hard drives (0-4)
 byte	drive_num = 0;		// the currently selected drive number
+byte	dn;			// drive loop counter (UPDATE 105)
 byte	f1_hook_active = 0;
 byte	home_path[81];		// build home path in here
 byte	msys_file[81];		// use to check for msys/m
@@ -744,18 +760,8 @@ void display_stats(enum dstates state) {
 
   ul_clr_box(51,4,78,14,main_attr);
   ul_str2video(ST_MOD_X,ST_MOD_Y,main_attr,st_mod,0);
-  if(edit_dr == Root_dr) {
-    i = '1';
-    }
-  else {
-    i = '2';
-    }
-  if(Root_dr->drNext == NULL) {
-    j = '1';
-    }
-  else {
-    j = '2';
-    }
+  i = '1' + edit_dr->drDriveNum;	// "drive i of j" (UPDATE 105)
+  j = '0' + hard_drives;
   sprintf(xmsg,st_drv_format,st_drv_a,i,st_drv_b,j);
   ul_str2video(ST_DRV_X,ST_DRV_Y,main_attr,xmsg,0);
 
@@ -1514,8 +1520,8 @@ byte build_tree(void) {
     int86x(0x13,&regs,&regs,&sregs);
     if((regs.x.cflag & 1) == 0)	/* if carry not set */ {
       hard_drives = regs.h.dl;
-      if(hard_drives > 2)		/* not setup for > 2 */ {
-        hard_drives = 2;
+      if(hard_drives > 4)		/* up to 4 (UPDATE 105; was 2) */ {
+        hard_drives = 4;
         }
       temp_cylds = regs.h.cl & 0xc0;
       temp_cylds = temp_cylds << 2;
@@ -1561,26 +1567,24 @@ byte build_tree(void) {
   dr->drSPT = temp_spt;
   dr->drCylds = temp_cylds;
   dr->drDriveNum = 0;
+  dr->drDirty = 0;
   lba_probe(dr);
 
-  /* allocate and init a dr_type record for the second hard drive */
+  /* allocate and init a dr_type record for each further hard drive
+  (up to four, 81h-83h; UPDATE 105, was only 81h).
+  can use int13 since don't recog > 1 drive on a non-at machine. */
 
-  if(hard_drives == 2) {
-    if((dr = (dr_type *) malloc(sizeof(dr_type))) == NULL) {
+  for(t1=1;t1<hard_drives;t1++) {
+    if((dr->drNext = (dr_type *) malloc(sizeof(dr_type))) == NULL) {
       report_error(errcode_insuficmem);
       return(1);
       }
-    Root_dr->drNext = dr;
+    dr = dr->drNext;
     dr->drNext = NULL;
     dr->drPR = NULL;
-
-    /*  read data for second drive.
-    can use int13 since don't recog > 1 drive on a non-at machine. */
-
     regs.h.ah = 8;
-    regs.h.dl = 0x81;			/* second hard drive */
+    regs.h.dl = 0x80 + t1;
     int86x(0x13,&regs,&regs,&sregs);
-
     if(regs.x.cflag & 1) {
       report_error(errcode_diskread);
       return(1);
@@ -1590,7 +1594,8 @@ byte build_tree(void) {
     dr->drCylds += regs.h.ch + 1;
     dr->drHeads = regs.h.dh + 1;
     dr->drSPT = regs.h.cl & 0x3f;
-    dr->drDriveNum = 1;
+    dr->drDriveNum = t1;
+    dr->drDirty = 0;
     lba_probe(dr);
     }
 
@@ -2167,9 +2172,22 @@ byte gen_gaps(dr_type *dr) {
     first_pass = 1;
     hit = 0;
     while(lr1 != NULL) {
-      diff_cylds = lr1->lrStart - last_end;
-      if(!first_pass) {
-        diff_cylds--;
+      // a partition that starts in the cylinder where the previous
+      // one ends (other tools align to 1 MiB, not to cylinders) has
+      // no gap before it.  the unsigned subtraction used to wrap to
+      // 65535, a bogus gap was inserted and the scan never ended.
+      // (UPDATE 105)
+
+      diff_cylds = 0;
+      if(first_pass) {
+        if(lr1->lrStart > last_end) {
+          diff_cylds = lr1->lrStart - last_end;
+          }
+        }
+      else {
+        if(lr1->lrStart > last_end + 1) {
+          diff_cylds = lr1->lrStart - last_end - 1;
+          }
         }
       if(diff_cylds > 0) {
         lr2 = lr1;
@@ -2202,7 +2220,9 @@ byte gen_gaps(dr_type *dr) {
         hit = 1;
         break;
         }
-      last_end = lr1->lrEnd; 
+      if(first_pass || lr1->lrEnd > last_end) {
+        last_end = lr1->lrEnd;
+        }
       first_pass = 0;
       lr1 = lr1->lrNext;
       }
@@ -2565,7 +2585,7 @@ void update_cmd_box(void) {
 
 
   t1 = F1_FLAG;
-  if(hard_drives == 2) {
+  if(hard_drives >= 2) {
     t1 |= F2_FLAG;
     }
   if(assign_letter <= 'Z') {
@@ -3274,6 +3294,15 @@ byte write_tree(void) {
   dptr1 = Root_dr;
   drive_num = 0;
   while(dptr1 != NULL) {
+
+    // a drive the user did not change is not written at all: its
+    // boot code and extended partition stay as they are (UPDATE 105)
+
+    if(!dptr1->drDirty) {
+      dptr1 = dptr1->drNext;
+      drive_num++;
+      continue;
+      }
     pptr1 = dptr1->drPR;
     spc = (unsigned long)dptr1->drSPT * dptr1->drHeads;
 
@@ -3415,7 +3444,7 @@ byte write_tree(void) {
         }
       }
     dptr1 = dptr1->drNext;
-    drive_num = 1;
+    drive_num++;
     }
   return(0);
   }
@@ -3700,6 +3729,7 @@ byte delete_partition(void) {
   edit_pr_hold = NULL;
   edit_line = 0;
   changed_memory = 1;
+  edit_dr->drDirty = 1;
   derive_lr = 1;		
   return(yes_char); 
   }
@@ -3737,6 +3767,7 @@ void delete_all_guts(void) {
   edit_pr_hold = NULL;
   edit_line = 0;
   changed_memory = 1;
+  edit_dr->drDirty = 1;
   derive_lr = 1;		
   }
 
@@ -4130,6 +4161,7 @@ void update_cell(void) {
     edit_pr->prE[edit_pndx].PT.peFileSystem = derive_PTC(edit_dr,(ec-bc+1));
     }
   changed_memory = 1;
+  edit_dr->drDirty = 1;
   derive_lr = 1;		
   }
 
@@ -4145,30 +4177,29 @@ void update_cell(void) {
 ========================================================================*/
 void force_d1(void) {
 
-
-  edit_dr = Root_dr;		// switch to drive 1
-  drive_num = 0;
-  edit_mbrpt = edit_dr->drPR;
-  edit_line = 0;
-  edit_pr_hold = NULL;
-  derive_lr = 1;
+  force_dn(0);
   }
 
 /*======================================================================
 ;,fs
-; void force_d2(void)
-; 
-; in:	
+; void force_dn(byte n)
 ;
-; out:	
+; make drive n (0 based, 0-3) the edited drive.  (UPDATE 105; was
+; force_d2() for the second drive only)
+;
+; in:	n = drive number, < hard_drives
+;
+; out:	edit_dr, drive_num, edit_mbrpt set; new lr list due
 ;
 ;,fe
 ========================================================================*/
-void force_d2(void) {
+void force_dn(byte n) {
 
-
-  edit_dr = Root_dr->drNext;	// switch to drive 2
-  drive_num = 1;
+  edit_dr = Root_dr;
+  while(edit_dr->drDriveNum != n && edit_dr->drNext != NULL) {
+    edit_dr = edit_dr->drNext;
+    }
+  drive_num = edit_dr->drDriveNum;
   edit_mbrpt = edit_dr->drPR;
   edit_line = 0;
   edit_pr_hold = NULL;
@@ -4187,9 +4218,10 @@ void force_d2(void) {
 ========================================================================*/
 void toggle_drive(void) {
 
+  // the next drive, after the last one the first (UPDATE 105)
 
-  if(edit_dr == Root_dr) {
-    force_d2();
+  if(edit_dr->drNext != NULL) {
+    force_dn(edit_dr->drNext->drDriveNum);
     }
   else {
     force_d1();
@@ -4275,6 +4307,7 @@ void add_primary(void) {
         edit_pndx_hold = 0;
         edit_line = 0xff;
         changed_memory = 1;
+        edit_dr->drDirty = 1;
         derive_lr = 1;		
         break;
         }
@@ -4465,6 +4498,7 @@ void add_extended(void) {
       edit_pndx_hold = 0;
       edit_line = 0xff;
       changed_memory = 1;
+      edit_dr->drDirty = 1;
       derive_lr = 1;		
       }
     }
@@ -4604,6 +4638,7 @@ void add_secondary(void) {
       edit_pndx_hold = t1;
       edit_line = 0xff;
       changed_memory = 1;
+      edit_dr->drDirty = 1;
       derive_lr = 1;		
       }
     }
@@ -4630,6 +4665,7 @@ void toggle_boot(void) {
     }
   display_lr_data(edit_lr,edit_line);
   changed_memory = 1;
+  edit_dr->drDirty = 1;
   }
 
 /*======================================================================
@@ -4656,6 +4692,7 @@ void mlg2dlg(dr_type *cv_dr, lr_type *cv_lr) {
       cv_lr->lrHomeNode->prE[ndx].NeedMSYS = 1;
       cv_lr->lrHomeNode->prE[ndx].MLG = 0;
       changed_memory = 1;
+      cv_dr->drDirty = 1;
       derive_lr = 1;
       }
     }
@@ -4897,6 +4934,7 @@ byte validate_ptc(void) {
           if(dptc != cptc) {
             prptr->prE[ndx].PT.peFileSystem = dptc;
             changed_memory = 1;
+            drptr->drDirty = 1;
             derive_lr = 1;
             chng = 1;
             clr_prompt_win();
@@ -5010,12 +5048,14 @@ byte prompt_review(byte *msg_tag, byte stat_code) {
 
   any_partitions = 0;
   t1 = F1_FLAG;
-  if(hard_drives == 2) {
+  if(hard_drives >= 2) {
     t1 |= F2_FLAG;
-    force_d2();
-    gen_lr_list();
-    if(!(top_lr == bot_lr && top_lr->lrHomeNode == NULL)) {
-      any_partitions = 1;
+    for(dn=hard_drives-1;dn>=1;dn--) {
+      force_dn(dn);
+      gen_lr_list();
+      if(!(top_lr == bot_lr && top_lr->lrHomeNode == NULL)) {
+        any_partitions = 1;
+        }
       }
     }
   force_d1();
@@ -5455,6 +5495,7 @@ void mlgs2ext(pr_type *prptr, dr_type *drptr) {
 
       compress_mbrpt(prptr,t1);
       changed_memory = 1;
+      drptr->drDirty = 1;
       }
     }
 
@@ -5611,11 +5652,11 @@ int main(int argc, char *argv[]) {
       exit(0);
       }
     if(retcode != 0) {
-      if(hard_drives == 2) {
-        force_d2();
-        delete_all_guts();		// delete partitions on drive 2
-        force_d1();
+      for(dn=hard_drives-1;dn>=1;dn--) {
+        force_dn(dn);
+        delete_all_guts();		// delete partitions on drive dn+1
         }
+      force_d1();
       delete_all_guts();		// delete partitions on drive 1
       }
     lead_through = LT_NSWITCH;
@@ -5630,11 +5671,11 @@ int main(int argc, char *argv[]) {
       exit(0);
       }
     if(retcode != 0) {
-      if(hard_drives == 2) {
-        force_d2();
-        delete_all_guts();		// delete partitions on drive 2
-        force_d1();
+      for(dn=hard_drives-1;dn>=1;dn--) {
+        force_dn(dn);
+        delete_all_guts();		// delete partitions on drive dn+1
         }
+      force_d1();
       delete_all_guts();		// delete partitions on drive 1
       }
     lead_through = LT_DSWITCH;
@@ -5669,9 +5710,9 @@ int main(int argc, char *argv[]) {
     changed_memory = 0;
     force_d1();
     mlgs2ext(Root_dr->drPR,Root_dr);
-    if(Root_dr->drNext != NULL) {
-      force_d2();
-      mlgs2ext(Root_dr->drNext->drPR,Root_dr->drNext);
+    for(dn=1;dn<hard_drives;dn++) {
+      force_dn(dn);
+      mlgs2ext(edit_dr->drPR,edit_dr);
       }
     if(changed_memory) {
       gen_lr_list();
@@ -5691,20 +5732,22 @@ int main(int argc, char *argv[]) {
       }
     changed_memory = 0;
     if(found_msysm) {
-      if(hard_drives == 2) {
-        force_d2();
+      for(dn=hard_drives-1;dn>=1;dn--) {
+        force_dn(dn);
         gen_lr_list();
         if(edit_pr->prE[0].MLG) {
           changed_memory = 1;
+          edit_dr->drDirty = 1;
           edit_pr->prE[0].PT.peFileSystem = derive_PTC(edit_dr,edit_lr->lrCylds);
           edit_pr->prE[0].NeedMSYS = 1;
           edit_pr->prE[0].MLG = 0;
           }
-        force_d1();
         }
+      force_d1();
       gen_lr_list();
       if(edit_pr->prE[0].MLG) {
         changed_memory = 1;
+        edit_dr->drDirty = 1;
         edit_pr->prE[0].PT.peFileSystem = derive_PTC(edit_dr,edit_lr->lrCylds);
         edit_pr->prE[0].NeedMSYS = 1;
         edit_pr->prE[0].MLG = 0;
