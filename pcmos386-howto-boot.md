@@ -86,6 +86,14 @@ Keep C: and the virtual disk modest for a first install (8 GB or less).
 Beyond 8.4 GB PC-MOS needs a BIOS with int 13h extensions (SeaBIOS in
 QEMU has them).
 
+**FREEMEM on a real PC or VM:** C0000-C7FFF holds the video BIOS and
+E0000-FFFFF the system BIOS. A range such as `FREEMEM=C0000,F0000` (fine
+in DOSBox) used to hang the machine at the next screen output. Since
+UPDATE 106 PC-MOS leaves ROM out of a FREEMEM range and says so (`FREEMEM
+holds ROM; using ...`). On VMware, `FREEMEM=D0000,E0000` is a safe choice.
+The build leaves the XMS driver as `_XMS.SYS`; `makefloppy.sh` puts it on
+the floppy as `$XMS.SYS`.
+
 Tested end to end in DOSBox Staging with int 13h extensions: blank 2 GB
 disk, steps 1-5, boot from C:.
 

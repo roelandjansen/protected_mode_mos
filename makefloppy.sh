@@ -114,6 +114,7 @@ add_the_rest() {
 		NAME="$(basename "$F")"
 		case "$NAME" in
 		'$$MOS.SYS' | '$$SHELL.SYS' | __SHELL.SYS) continue ;;
+		_XMS.SYS) NAME='$XMS.SYS' ;;	# MAKEMOS leaves it unrenamed, like __SHELL.SYS
 		esac
 		mdir -i "$OUT" "::$NAME" >/dev/null 2>&1 && continue
 		mcopy -i "$OUT" "$F" "::$NAME" 2>/dev/null || printf 'no room: %s\n' "$NAME" >&2

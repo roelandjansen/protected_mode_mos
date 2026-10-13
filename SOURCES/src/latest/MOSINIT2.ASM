@@ -368,6 +368,9 @@ msgfree db	'FREEMEM command ignored; only 5 allowed.      ',13,10,'$'  ;@@xlat
 msgifm	 db	'Invalid FREEMEM -              '  ; pointers must be atleast ;@@xlat
 msgifm1  db	'    ,' 		;  4k apart and 'end' must be
 msgifm2  db	'    ',13,10,'$'	;  greater than 'start'
+msgcfm	 db	'FREEMEM holds ROM; using '  ;@@xlat
+msgcf1	 db	'    ,'
+msgcf2	 db	'    ',13,10,'$'
 msgmm1	db	'Invalid MEMDEV driver    ',13,10,'$'  ;@@xlat
 devfile db	'Cannot find device driver : $      '  ;@@xlat
 devnotmm db	'Use MEMDEV command for driver : $             '  ;@@xlat
@@ -5180,6 +5183,128 @@ srmemend:
 	ret
 fmsrch	endp
 
+
+	subttl dmclip - keep a FREEMEM range clear of ROM
+	page
+;======================================================================
+;,fs
+; dmclip - keep a FREEMEM range clear of ROM (UPDATE 106)
+;
+; a FREEMEM range from config.sys was used as given.  on a real or
+; virtual pc, c000-c7ff holds the video bios and e000-ffff the system
+; bios; mapping ram over them hangs the system at the next int 10h.
+; (dosbox handles int 10h itself, so a range like c000,f000 worked
+; there.)  each 4k block of the range now gets the test fmsrch uses
+; for the automatic search (fmblk), without its ram test: rom is not
+; free.  the range becomes its first run of free blocks; dmadjst
+; adds an entry for the rest, so every free run is used.
+;
+; in:	ax = start segment, bx = end segment (4k aligned, ax < bx)
+;
+; out:	nc: ax/bx = the first run of free blocks; dl != 0 if the
+;	range was reduced; di/bp = the rest of the range after the run
+;	(di = bp if none)
+;	cy: no free block in the range
+;
+;,fe
+;=====================================================================
+	assume	ds:nothing,es:nothing,ss:nothing
+dmclip	proc	near
+	push	cx
+	mov	bp,bx			; bp = end of the range as given
+	mov	cx,ax			; cx = block being tested
+	xor	dl,dl
+dmc1:					; skip leading blocks that are not free
+	cmp	cx,bp
+	jae	dmcno
+	call	fmblk
+	jnc	dmc2
+	mov	dl,1
+	add	cx,100h
+	jmp	short dmc1
+dmc2:
+	mov	ax,cx			; new start
+dmc3:					; extend over free blocks
+	add	cx,100h
+	cmp	cx,bp
+	jae	dmc4
+	call	fmblk
+	jnc	dmc3
+	mov	dl,1
+dmc4:
+	mov	bx,cx			; new end: first block not free
+	cmp	bx,bp
+	jbe	dmc5
+	mov	bx,bp
+dmc5:
+	mov	di,bx			; the rest of the range: di to bp
+	pop	cx
+	clc
+	ret
+dmcno:
+	pop	cx
+	stc
+	ret
+dmclip	endp
+
+	subttl fmblk - is a 4k block of upper memory free
+	page
+;======================================================================
+;,fs
+; fmblk - is a 4k block of upper memory free (UPDATE 106)
+;
+; the test of fmsrch: a block whose bytes all have common bits set
+; (e.g. ffh, nothing there) or whose checksum changes between two
+; reads (floating bus) is empty; a stable non-zero checksum is rom.
+; ram under a range is harmless (dosbox has its ems page frame at
+; e000), so unlike fmsrch there is no ram test here.
+;
+; in:	cx = segment of the block
+;
+; out:	nc if free, cy if rom
+;
+;,fe
+;=====================================================================
+	assume	ds:nothing,es:nothing,ss:nothing
+fmblk	proc	near
+	push	ax
+	push	cx
+	push	di
+	push	es
+	mov	es,cx
+	mov	ax,0ffh			; al = and of all bytes, ah = sum
+	mov	cx,1000h
+	xor	di,di
+fmb1:
+	add	ah,es:[di]
+	and	al,es:[di]
+	inc	di
+	loop	fmb1
+	or	al,al
+	jnz	fmb3			; common bits set: empty
+	xor	di,di			; second sum
+	mov	cx,1000h
+fmb2:
+	add	al,es:[di]
+	inc	di
+	loop	fmb2
+	cmp	al,ah
+	jne	fmb3			; changing: floating bus, empty
+	or	al,al
+	jnz	fmbno			; stable, non-zero: rom
+fmb3:
+	clc				; empty: free
+	jmp	short fmbx
+fmbno:
+	stc
+fmbx:
+	pop	es
+	pop	di
+	pop	cx
+	pop	ax
+	ret
+fmblk	endp
+
 	subttl dmadjst - data management adjustments
 	page
 ;======================================================================
@@ -5202,6 +5327,7 @@ dmadjst proc	near
 	push	cx
 	push	si
 	push	di
+	push	bp			; dmclip uses bp (UPDATE 106)
 	push	ds
 	push	es
 	mov	ds,[initmos]
@@ -5220,11 +5346,64 @@ dmaloop:				; adjustment loop
 	and	ax,0ff00h		; "  "	"
 	and	bx,0ff00h		; round end down to 4k
 	cmp	ax,bx			; check for start greater than end
-	jae	dmabad			; error, end adjustment
+	ljnc	dmabad			; error, end adjustment (jae)
+	push	dx			; leave out rom (UPDATE 106)
+	call	dmclip
+	ljc	dmanone
+	or	dl,dl
+	jz	dmaok
+	mov	[si+dmpatch],ax 	; tell the user what is used instead
+	mov	[si+dmpatch+2],bx
+	push	ds
+	push	cs
+	pop	ds
+	lea	dx,msgcf1
+	cfmos	hex2asc
+	pop	ds
+	mov	ax,[si+dmpatch+2]
+	push	ds
+	push	cs
+	pop	ds
+	lea	dx,msgcf2
+	cfmos	hex2asc
+	lea	dx,msgcfm
+	call	idispmos
+	pop	ds
+	mov	ax,[si+dmpatch]
+	mov	bx,[si+dmpatch+2]
+dmaok:
+	pop	dx
 	mov	[si+dmpatch],ax 	; save new start value
 	mov	[si+dmpatch+2],bx	; save new end value
+	cmp	di,bp			; anything after the run?  (UPDATE 106)
+	jae	dmanx
+	push	ax			; if it holds free blocks, add it as
+	push	bx			; a new entry (up to 5); it is clipped
+	push	di			; in its own turn of this loop
+	push	bp
+	mov	ax,di
+	mov	bx,bp
+	call	dmclip
+	jc	dmapx
+	mov	di,si
+dmfs:
+	add	di,4
+	cmp	di,5*4
+	jae	dmapx
+	cmp	word ptr [di+dmpatch],0
+	jne	dmfs
+	mov	[di+dmpatch],ax
+	mov	[di+dmpatch+2],bp
+dmapx:
+	pop	bp
+	pop	di
+	pop	bx
+	pop	ax
+dmanx:
 	add	si,4			; next data management pointer
 	jmp	dmaloop 		; adjust all specifed areas
+dmanone:
+	pop	dx			; no free block in it: as invalid
 dmabad: 				; invalid memory pointers
 	mov	ax,[si+dmpatch] 	; get bad freemem start
 	push	ds
@@ -5257,6 +5436,7 @@ dmaexit:
 	rep	movsw
 	pop	es
 	pop	ds
+	pop	bp
 	pop	di
 	pop	si
 	pop	cx

@@ -158,3 +158,33 @@ descriptor (exempt from `cleardti`).
 - `awk` with `RS="\r\n"` counts records differently from line numbers
   taken from a CR-stripped copy. Match on text, not line numbers, when
   editing CRLF sources.
+
+## QEMU: a second test machine with a real BIOS
+
+DOSBox handles int 10h, int 13h and int 15h inside the emulator. A real
+PC or VM has a video BIOS at C000 and a system BIOS at E000-FFFF, and
+its disk BIOS may use DMA. Two VMware-only bugs came from that
+(UPDATE 103: DMA under paging; UPDATE 106: FREEMEM over the video
+BIOS). QEMU with SeaBIOS reproduced the second one here.
+
+Setup, no sudo (Ubuntu 24.04 packages):
+
+    mkdir -p /tmp/claude-0/qemu && cd /tmp/claude-0/qemu
+    apt-get download qemu-system-x86 qemu-system-common qemu-system-data seabios ipxe-qemu \
+        libfdt1 libpmem1 librdmacm1t64 libibverbs1 libslirp0 libbpf1 liburing2 libaio1t64 \
+        libndctl6 libdaxctl1 libnl-3-200 libnl-route-3-200
+    for F in *.deb; do dpkg-deb -x $F root; done
+
+`rig/qemu.sh` (QEMU 8.2, TCG, `-machine pc`, no network):
+
+| command | use |
+| --- | --- |
+| `qemu.sh start FLOPPY [HDIMG] [MEM_MB]` | boot a floppy image (hard disk image as IDE 0), default 32 MB |
+| `qemu.sh screen` | the 80x25 text screen (read from b8000 via the monitor) |
+| `qemu.sh key KEY...` | QEMU key names (`ret`, `y`, `shift-semicolon`) |
+| `qemu.sh mon CMD` | any monitor command (`info registers`, `xp`) |
+| `qemu.sh stop` | stop |
+
+Upper memory in QEMU: video BIOS C000-CCFF, SeaBIOS from about E700
+on. In DOSBox: video BIOS and fonts at C000-C3FF and C700-C9FF; the EMS
+page frame (RAM) at E000.
