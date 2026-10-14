@@ -1,19 +1,21 @@
 # PC-MOS/386 v5.01 -- what has been improved
 
 Summary of the work recorded in `CHANGES.md`, `HANDOVER.md` and
-`UPDATE62.md` .. `UPDATE103.md` (state 20261012). Per item: the update
+`UPDATE62.md` .. `UPDATE108.md` (state 20261014). Per item: the update
 number where the detail lives. UPDATE 90 is not in the archive.
 
 Short version: PC-MOS/386 now has a **working DPMI 0.9 host** (DJGPP,
 DOS/4GW and DOS/32A run real programs, nested and in several tasks at
 once), a new **XMS 3.0 driver**, **disks up to 2 TB addressable via int
-13h extensions** with 2 GB FAT16 partitions, a set of **DOS API
+13h extensions** with 2 GB FAT16 partitions, **up to four hard disks**, a set of **DOS API
 compatibility fixes**, **Y2K fixes** in DATE and at boot, and files and
 directories made by other systems (FreeDOS, Windows, mtools) no longer
 get a random security class. PC-MOS **installs on and boots from a hard
 disk** again, verified in a VMware VM: HDSETUP rebuilt (Open Watcom) and
-fixed for big disks, and `$386.SYS` fixed for BIOSes that transfer with
-DMA.
+fixed for big disks, `$386.SYS` fixed for BIOSes that transfer with
+DMA, a `FREEMEM` range over the video BIOS no longer hangs the boot, and
+`$DPMI.SYS` no longer writes through its code segment, which hung every
+real CPU (VMware).
 
 ---
 
@@ -58,6 +60,8 @@ DMA.
 | HDSETUP shows (99) and creates, deletes and resizes (100) partitions beyond 8.4 GB; LBA I/O, 0Eh/0Fh, partitions it did not touch keep their exact place | 99-100 |
 | Primary partition may be in any slot; a disk without a FAT primary still gets its logical drives (DOS behaviour) | 101 |
 | Install on a hard disk: `makefloppy.sh` install floppy, HDSETUP / FORMAT / MSYS / COPY, boot from C: (tested in DOSBox and VMware) | 102-103 |
+| Up to four hard disks (80h-83h) in the kernel; letters in DOS order; a disk without a valid MBR no longer ends the scan | 104 |
+| HDSETUP, FORMAT and MSYS handle four disks; `F2` in HDSETUP steps through all drives | 105 |
 
 ### DOS API
 
@@ -88,6 +92,7 @@ DMA.
 - `GoProtect`: wrote through CS in protected mode, wrong selector register, no carry test after the switch (UPDATE 15-16).
 - A TSL #GP bug in exception handling (UPDATE 55).
 - **Hard disk DMA under paging:** int 13h 42h/43h (the extended read/write the kernel uses since UPDATE 93) were not staged through the bounce buffer. A BIOS that transfers with bus-master DMA (VMware, many real machines) read into and wrote from the wrong physical memory: garbage directories, "Invalid boot signature", **file system damage**. Now staged when the buffer is in remapped memory (UPDATE 103).
+- **Writes through the code segment:** `InitProtect` (`Bit32Ok`) and the resident int 31h code (`Function`, `DataSel`, `SmallestBank`) wrote their own variables through CS. A code segment is never writable; a real CPU (VMware, real hardware) answered with #GP and the boot **hung at "Dos Protected Mode Interface"**. QEMU and DOSBox do not check this. Now written through DS and a new data alias, `DrvData` (UPDATE 108).
 - Host under-reported its data size; live descriptor in a free slot (UPDATE 29-33).
 
 ### DPMI host (found with real extenders)
@@ -115,6 +120,8 @@ DMA.
 | Set device parameters re-read boot sector via CHS -> garbage BPB | 95 |
 | Directory entries written by DOS 7 / Windows / FreeDOS / mtools got a random security class from their creation-time byte -> read-only or "Access not allowed"; class now only counts with the system attribute | 97 |
 | Drive 80h had to have a FAT partition in slot 0, else **no hard disk drive letters at all** (Linux, EFI or recovery partition first) | 101 |
+| A drive 81h without a readable MBR ended the scan; drive 80h without one gave no hard disk letters at all | 104 |
+| `FREEMEM` ranges from `CONFIG.SYS` used without a ROM test: RAM mapped over the video BIOS, **hang** at the next int 10h (VMware, QEMU; DOSBox hides it). Now each 4 KB block is tested, and every ROM-free part of the range is used (106); option ROMs found by their 55AAh header, not only by checksum (107) | 106-107 |
 
 ### Shell (`$$SHELL.SYS`) and utilities
 
@@ -133,6 +140,10 @@ DMA.
 | HDSETUP: offered the whole free space for a FAT partition (20 GB on a 20 GB disk); now capped at 2 GB | 100 |
 | HDSETUP: free space before a 1 MiB aligned logical drive included the cylinder holding its EBR | 100 |
 | HDSETUP: extended partition index not reset for the second drive | 100 |
+| HDSETUP: endless loop (empty screen) on a partition starting in the cylinder where the previous one ends -- unsigned gap wrap, 1992 bug | 105 |
+| HDSETUP: rewrote every drive on exit, replacing MBR code and shrinking extended partitions on disks the user did not touch | 105 |
+| FORMAT/MSYS: partition scan differed from the kernel's; with some layouts **FORMAT formatted a different partition than the letter given** | 105 |
+| `makefloppy.sh --all`: XMS driver copied as `_XMS.SYS`, so `device=$xms.sys` failed | 106 |
 
 ---
 
@@ -158,7 +169,8 @@ DMA.
 - Project-added `DevLoadMsg` removed; original sign-on restored (UPDATE 11).
 - Stale binaries in the tree identified; builds now reproducible (same md5 in two containers).
 - HDSETUP builds from source again (Open Watcom, `-zp1` for Borland byte packing); the Borland sources stay buildable (UPDATE 99-100).
-- Rig toolkit refreshed: disk image tools (`mkpt`, `mkmbr`, `ptdump.sh`), int 13h extension patch, boot from a given floppy or from the hard disk (UPDATE 100-102).
+- Rig toolkit refreshed: disk image tools (`mkpt`, `mkmbr`, `ptdump.sh`), int 13h extension patch, boot from a given floppy or from the hard disk (UPDATE 100-102); four hard disks in DOSBox (UPDATE 104); QEMU with SeaBIOS as a second test machine with a real BIOS (UPDATE 106); Bochs as a strict CPU that faults like real hardware, `rig/bochs.sh` (UPDATE 108).
+- Hard disk init: duplicated drive 0/1 code replaced by one loop, init segment 64 bytes smaller (UPDATE 104).
 
 ---
 
@@ -166,7 +178,8 @@ DMA.
 
 - One `GO.BAT` run in twelve: DOS/4GW task stuck after banner (not attributed).
 - Four-task `GO.BAT` on the 2 vCPU rig: too slow with the debug emulator; passes with the release build (UPDATE 96-97).
-- FAT16 2 GB per partition; no FAT32, no LFN; max two hard disks (more than two: planned, `ITEM6-PLAN.md`).
+- FAT16 2 GB per partition; no FAT32, no LFN (FAT32: parked, `ITEM6-PLAN.md` 6c); max four hard disks.
+- MSYS on a primary of disk 2-4 not tested (not bootable anyway).
 - HDSETUP: first 64 GB of a disk (16-bit megabyte arithmetic); new partitions on whole cylinders, placed first-fit.
 - `mo2` has ~118 bytes before the next 8 KB per-task step (UPDATE 97).
 - #GP delivery not testable under DOSBox; needs real hardware.

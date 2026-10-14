@@ -5271,6 +5271,8 @@ fmblk	proc	near
 	push	cx
 	push	di
 	push	es
+	call	fmorom			; inside an option rom?  (UPDATE 107)
+	jc	fmbno
 	mov	es,cx
 	mov	ax,0ffh			; al = and of all bytes, ah = sum
 	mov	cx,1000h
@@ -5304,6 +5306,69 @@ fmbx:
 	pop	ax
 	ret
 fmblk	endp
+
+	subttl fmorom - does a 4k block overlap an option rom
+	page
+;======================================================================
+;,fs
+; fmorom - does a 4k block overlap an option rom (UPDATE 107)
+;
+; the checksum test of fmblk takes a rom block whose bytes add up to
+; 0 (mod 256) for empty: 1 block in 256, and blocks of zeros in a rom
+; are common.  on vmware such a block inside the video bios was mapped
+; over, and the next int 10h crashed the vm.  so option roms are found
+; by their header first: 55h aah on a 2k boundary from c000 to dfff,
+; length in 512 byte units in byte 2.
+;
+; in:	cx = segment of the block
+;
+; out:	cy if the block overlaps an option rom, else nc
+;
+;,fe
+;=====================================================================
+	assume	ds:nothing,es:nothing,ss:nothing
+fmorom	proc	near
+	push	ax
+	push	bx
+	push	dx
+	push	es
+	mov	bx,0c000h		; candidate rom segment
+fmo1:
+	mov	es,bx
+	cmp	word ptr es:[0],0aa55h
+	jne	fmo2
+	xor	ax,ax
+	mov	al,es:[2]		; length in 512 byte units
+	or	al,al
+	jz	fmo2
+	mov	dx,ax
+	add	dx,ax
+	shl	dx,1
+	shl	dx,1
+	shl	dx,1
+	shl	dx,1			; dx = length in paragraphs (* 32)
+	add	dx,bx			; dx = end of the rom
+	cmp	cx,dx			; block starts at or past the end?
+	jae	fmo2
+	mov	ax,cx
+	add	ax,100h			; ax = end of the block
+	cmp	bx,ax			; rom starts at or past the end?
+	jb	fmoyes
+fmo2:
+	add	bx,80h			; next 2k
+	cmp	bx,0e000h
+	jb	fmo1
+	clc
+	jmp	short fmox
+fmoyes:
+	stc
+fmox:
+	pop	es
+	pop	dx
+	pop	bx
+	pop	ax
+	ret
+fmorom	endp
 
 	subttl dmadjst - data management adjustments
 	page

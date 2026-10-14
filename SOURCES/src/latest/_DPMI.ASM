@@ -458,6 +458,7 @@ DataSel		dw	0		; Data Selector
 OrgProt21	dd	0		; Orginal Protected Mode INT 21h
 OrgProt2F	dd	0		; Orginal Protected Mode INT 2fh
 DriverRealCS	dw	0		; Driver's real mode code segment
+DrvData		dw	0		; data selector, driver segment (UPDATE 108)
 Selector	dw	0		; temporary storage for selector
 SmallestBank	dd	0		; smallest bank use in scans
 DPMI_Version	dw	DPMIVersion	; DPMI Version
@@ -615,8 +616,7 @@ Interupt31	proc	near
 		push	ds
 
 		mov	ebx,eax		; place orginal ax into bx for function
-		mov	ax,cs
-		mov	ds,ax
+		mov	ds,cs:[DrvData]	; writable data alias, not cs (UPDATE 108)
 		assume  ds:ddt	
 		call	GetDataSelector		; get selector
 		jc	short ErrorFun31
@@ -3885,6 +3885,8 @@ NumOfBanks	endp
 ;-----------------------------------------------------------------------;
 		assume  es:dseg
 
+		assume	ds:ddt		; SmallestBank via ds, not cs: a code
+					;  segment is never writable (UPDATE 108)
 ScanBanks	proc	near
 		push	eax
 		push	edi
@@ -3921,6 +3923,7 @@ ScanExit:
 		pop	eax
 		ret
 ScanBanks	endp
+		assume	ds:nothing	; as before ScanBanks (UPDATE 108)
 
 
 ;-----------------------------------------------------------------------;
@@ -4671,6 +4674,19 @@ Init32Code 	proc	near
 		int	6fh
 		jc	Init32Err		; no selector, no protected mode
 		mov	[scbsel],bx
+		;
+		; Data selector for the driver segment (UPDATE 108). The
+		; resident code ran with ds = cs and wrote its variables
+		; through it; a code segment is never writable, so a real
+		; CPU (VMware, Bochs) faults where emulators let it pass.
+		;
+		mov	bx,cs
+		mov	ax,SEGMENT_SELECTOR
+		int	6fh
+		jc	Init32Err
+		mov	ax,bx
+		db	67h			; 32-bit address, see DriverRealCS
+		mov	[DrvData],ax
 		mov	ax,[scboff]
 		mov	word ptr [scboffset],ax
 		mov	word ptr [scboffset+2],0
@@ -4743,7 +4759,8 @@ init16		ends
 
 	.386p
 init32	segment para public 'CODE' use32
-	assume	cs:ddt
+	assume	cs:ddt,ds:ddt	; ds, not cs:, for Bit32Ok: a code segment
+				;  is never writable, a real CPU faults (UPDATE 108)
 
 ;-------------------------------------------------------------------;
 ; InitProtect - Initial Protected mode memory, copy Use32 resident  ;

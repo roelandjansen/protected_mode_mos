@@ -188,3 +188,38 @@ Setup, no sudo (Ubuntu 24.04 packages):
 Upper memory in QEMU: video BIOS C000-CCFF, SeaBIOS from about E700
 on. In DOSBox: video BIOS and fonts at C000-C3FF and C700-C9FF; the EMS
 page frame (RAM) at E000.
+
+## Bochs: a strict CPU
+
+QEMU's TCG and DOSBox do not enforce every protection check. A write
+through a code segment, for example, passes there; a real CPU (VMware,
+real hardware) answers it with #GP. That class of bug hid in `$DPMI.SYS`
+from 1991 to UPDATE 108. Bochs checks segment types, limits and
+descriptor rules like a real CPU, so it reproduces VMware-only faults
+here, and its debugger stops at an exact instruction count.
+
+Setup, no sudo (Ubuntu 24.04 packages):
+
+    mkdir -p /tmp/claude-0/bochs && cd /tmp/claude-0/bochs
+    apt-get download bochs bochsbios vgabios bochs-x
+    for F in *.deb; do dpkg-deb -x $F root; done
+
+`rig/bochs.sh FLOPPY [INSNS] [MEM_MB]` boots the floppy for INSNS
+instructions (default 2,000,000,000), prints the text screen and lists
+every CPU error from the Bochs log with its count and the instruction
+count of its first occurrence.
+
+- To stop just before an error: `BOCHS_CMDS='r\nsreg\nu /4'
+  bochs.sh FLOPPY COUNT-1` (one less than "first at"); the registers,
+  segment descriptors and the next instructions are printed.
+- It uses the legacy BIOS (`BIOS-bochs-legacy`): the 32-bit part of
+  `BIOS-bochs-latest` crashes during POST in this build.
+- The X frontend runs on Xvfb (`:99`); `term` would take over a
+  terminal and `nogui` is not built in.
+- About 25 s per 10^9 instructions; a boot to the prompt with DPMI is
+  under 2 * 10^9.
+
+A clean run lists no CPU errors. With the `$DPMI.SYS` of UPDATE 107:
+
+    1 x  first at 366115097  write_virtual_checks(): no write access to seg
+    9293219 x  first at 366117378  read_virtual_checks(): read beyond limit
