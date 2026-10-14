@@ -12,6 +12,9 @@ set -euo pipefail
 #   INSNS    instructions to run before stopping (default 2000000000)
 #   MEM_MB   memory (default 16)
 #
+# BOCHS_HD=image attaches a hard disk image as ata0-master, geometry
+# BOCHS_HDGEOM=cyls,heads,spt (default 4161,16,63: a 2 GB VMware disk).
+#
 # Prints the 80x25 text screen at the stop, then every CPU error from
 # the Bochs log (write to a read-only segment, limit violations, ...)
 # with its count. The first error has the instruction count; rerun with
@@ -39,6 +42,10 @@ write_conf() {
 	printf 'romimage: file=%s/usr/share/bochs/BIOS-bochs-legacy\n' "$BOCHS_ROOT" >> "$WORK/bochsrc"
 	printf 'vgaromimage: file=%s/usr/share/bochs/VGABIOS-lgpl-latest\n' "$BOCHS_ROOT" >> "$WORK/bochsrc"
 	printf 'floppya: 1_44=%s, status=inserted\n' "$FLOPPY" >> "$WORK/bochsrc"
+	if [ -n "${BOCHS_HD:-}" ]; then
+		IFS=, read -r HC HH HS <<< "${BOCHS_HDGEOM:-4161,16,63}"
+		printf 'ata0-master: type=disk, path=%s, mode=flat, cylinders=%s, heads=%s, spt=%s, translation=auto\n' "$BOCHS_HD" "$HC" "$HH" "$HS" >> "$WORK/bochsrc"
+	fi
 	printf 'boot: floppy\ndisplay_library: x\nlog: %s/bochs.log\n' "$WORK" >> "$WORK/bochsrc"
 	printf 'panic: action=report\nerror: action=report\ninfo: action=ignore\ndebug: action=ignore\n' >> "$WORK/bochsrc"
 	printf 'clock: sync=none\ncpu: count=1, ips=50000000\nspeaker: enabled=0\n' >> "$WORK/bochsrc"
@@ -49,8 +56,8 @@ write_conf() {
 #
 
 start_x() {
-	if [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM#:}" ]; then
-		rm -f "/tmp/.X${DISPLAY_NUM#:}-lock"
+	if ! pgrep -x Xvfb >/dev/null; then
+		rm -f "/tmp/.X${DISPLAY_NUM#:}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM#:}"
 		setsid nohup Xvfb "$DISPLAY_NUM" -screen 0 1280x1024x24 -nolisten tcp >/dev/null 2>&1 < /dev/null &
 		sleep 2
 	fi

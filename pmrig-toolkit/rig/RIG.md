@@ -223,3 +223,18 @@ A clean run lists no CPU errors. With the `$DPMI.SYS` of UPDATE 107:
 
     1 x  first at 366115097  write_virtual_checks(): no write access to seg
     9293219 x  first at 366117378  read_virtual_checks(): read beyond limit
+
+A hard disk image: `BOCHS_HD=disk.img` (ata0-master), geometry
+`BOCHS_HDGEOM=cyls,heads,spt` (default 4161,16,63, the 2 GB disk
+VMware reports). Bochs' BIOS, like QEMU's, transfers without DMA, so
+DMA staging bugs (UPDATE 103, 109) do not show here; segment and
+descriptor faults do.
+
+## Kernel size and md5
+
+`kbuild.sh` leaves 768 bytes of the linked EXE at the end of
+`$$MOS.SYS` (DEBUG writes the stripped image without truncating the
+file). The real image is the link map's end minus the origin: up to
+`FCSEG`, 100h less (130,753 bytes in UPDATE 107-109). Compare kernels by
+`head -c 130753 '$$MOS.SYS' | md5sum`; MAKEMOS.BAT on Linux DOSBox
+produces exactly that length.

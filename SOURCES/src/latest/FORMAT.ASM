@@ -503,6 +503,11 @@ main180:
 	mov	[drvnum],bl
 	mov	ax,4409h
 	int	21h
+	jnc	main185			; no such drive: dx is left over and was
+	mov	dx,offset grp:invldrv	;  read as "network drive" (UPDATE 109)
+	mov	al,1
+	jmp	done_print
+main185:
 	test	dx,1000h
 	jz	main190
 	mov	dx,offset grp:nonetdr

@@ -779,7 +779,7 @@ x13ext0:
 x13ext1:
 	cmp	dl,80h			; ***** exit if dma not used *****
 dmajump label word			; this is nop'ed out if hard disk uses dma
-	jae	fastex13
+	jae	i13hd			; hard disk: 02h/03h staged too (UPDATE 109)
 	cmp	ah,1bh			; boundary check
 	ja	fastex13
 	mov	cs:[usercx],cx
@@ -826,6 +826,25 @@ fastex13:
 	popf
 	call	call13
 	jmp	farret13
+;
+; Hard disk reads and writes (02h/03h) into remapped memory go through
+; the staging buffer like diskette transfers (UPDATE 109). The 1992 code
+; staged hard disks only with a /D /P /M /E /X switch, which assumed a
+; PIO disk; a BIOS that transfers with bus-master DMA (VMware, every
+; modern PC) wrote to the physical address of a remapped buffer, e.g.
+; the kernel's boot-time MBR read: no partition table, no C:. Other
+; hard disk functions (verify, format) still pass straight through, and
+; a buffer below dmabank is not staged.
+;
+i13hd:
+	cmp	ah,2
+	je	i13hd1
+	cmp	ah,3
+	jne	fastex13
+i13hd1:
+	mov	cs:[usercx],cx
+	mov	cs:[userdx],dx
+	jmp	i13not46
 stage:
 	pop	cs:[userflag]
 	push	di
