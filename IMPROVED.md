@@ -1,7 +1,7 @@
 # PC-MOS/386 v5.01 -- what has been improved
 
 Summary of the work recorded in `CHANGES.md`, `HANDOVER.md` and
-`UPDATE62.md` .. `UPDATE108.md` (state 20261014). Per item: the update
+`UPDATE62.md` .. `UPDATE109.md` (state 20261014). Per item: the update
 number where the detail lives. UPDATE 90 is not in the archive.
 
 Short version: PC-MOS/386 now has a **working DPMI 0.9 host** (DJGPP,
@@ -92,7 +92,8 @@ real CPU (VMware).
 - `GoProtect`: wrote through CS in protected mode, wrong selector register, no carry test after the switch (UPDATE 15-16).
 - A TSL #GP bug in exception handling (UPDATE 55).
 - **Hard disk DMA under paging:** int 13h 42h/43h (the extended read/write the kernel uses since UPDATE 93) were not staged through the bounce buffer. A BIOS that transfers with bus-master DMA (VMware, many real machines) read into and wrote from the wrong physical memory: garbage directories, "Invalid boot signature", **file system damage**. Now staged when the buffer is in remapped memory (UPDATE 103).
-- **Writes through the code segment:** `InitProtect` (`Bit32Ok`) and the resident int 31h code (`Function`, `DataSel`, `SmallestBank`) wrote their own variables through CS. A code segment is never writable; a real CPU (VMware, real hardware) answered with #GP and the boot **hung at "Dos Protected Mode Interface"**. QEMU and DOSBox do not check this. Now written through DS and a new data alias, `DrvData` (UPDATE 108).
+- **Writes through the code segment:** `InitProtect` (`Bit32Ok`) and the resident int 31h code (`Function`, `DataSel`, `SmallestBank`) wrote their own variables through CS. A code segment is never writable; a real CPU (VMware, real hardware) answered with #GP and the boot **hung at "Dos Protected Mode Interface"**. QEMU and DOSBox do not check this. Now written through DS and a new data alias, `DrvData` (UPDATE 108; confirmed on VMware).
+- **Hard disk lost after a floppy boot:** int 13h 02h/03h to a hard disk were never staged through the bounce buffer (1992: hard disks assumed PIO unless a `/D` `/P` `/M` `/E` `/X` switch). With a DMA BIOS (VMware) the kernel's boot-time MBR read landed in the wrong physical memory after `$386.SYS` loaded: **no C:**. Now staged when the buffer is in remapped memory (UPDATE 109; confirmed on VMware).
 - Host under-reported its data size; live descriptor in a free slot (UPDATE 29-33).
 
 ### DPMI host (found with real extenders)
@@ -143,6 +144,7 @@ real CPU (VMware).
 | HDSETUP: endless loop (empty screen) on a partition starting in the cylinder where the previous one ends -- unsigned gap wrap, 1992 bug | 105 |
 | HDSETUP: rewrote every drive on exit, replacing MBR code and shrinking extended partitions on disks the user did not touch | 105 |
 | FORMAT/MSYS: partition scan differed from the kernel's; with some layouts **FORMAT formatted a different partition than the letter given** | 105 |
+| FORMAT: a drive letter that does not exist gave "Cannot FORMAT a network drive!" (IOCTL 4409h carry ignored) | 109 |
 | `makefloppy.sh --all`: XMS driver copied as `_XMS.SYS`, so `device=$xms.sys` failed | 106 |
 
 ---

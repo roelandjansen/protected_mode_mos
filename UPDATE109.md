@@ -87,6 +87,7 @@ DX. Now it says "Invalid drive specification!".
 | test | result |
 | --- | --- |
 | VMware, floppy boot, `MEMDEV=$386.SYS /D=4` (the same staging path, switched on) | second scan finds the partition, C: there |
+| VMware, floppy boot, this `$386.SYS` without a switch; your configuration (`smpsize=32`, DPMI, EMS, XMS, `FREEMEM=C0000,E0000`) | C: there (files copied from C: to A:); MEM 517K, ADDTASK max 524K |
 | QEMU, VMware-like 2 GB disk (MBR 519 cylinders × 128 heads), your configuration, new `$386.SYS` without a switch | C: there; `FORMAT C:` "Format complete", 2,142,502,912 bytes |
 | same: `COPY $$MOS.SYS C:\K.SYS`, `COPY C:\K.SYS C:\K2.SYS` | both md5 identical to the original |
 | same: `FORMAT Q:` | "Invalid drive specification!" |
@@ -95,8 +96,8 @@ DX. Now it says "Invalid drive specification!".
 
 ## Notes
 
-- **Still to confirm on VMware:** a floppy boot with this `$386.SYS`
-  and *without* `/D=4`. Then the switch can go from your CONFIG.SYS.
+- **Confirmed on VMware:** floppy boot without `/D=4`, C: present. The
+  switch is no longer needed.
 - **Kernel size, a correction:** the real kernel image is **130,753
   bytes** (map: `FCSEG` ends at 1FFC1h, origin 100h). Your build is
   right. The rig's DEBUG writes the stripped image into the linked EXE
@@ -109,5 +110,6 @@ DX. Now it says "Invalid drive specification!".
   the window is placed right behind the driver. With the small FREEMEM
   on VMware the drivers load in low memory, so the window does too.
 - **Memory on VMware:** `smpsize` counts one for one in the largest
-  program size, and FREEMEM only has C800-DC00 (80K). More upper memory
-  only by giving up the EMS page frame at E000.
+  program size (`smpsize=40`: 509K, `smpsize=32`: 517K), and FREEMEM
+  only has C800-DC00 (80K). More upper memory only by giving up the EMS
+  page frame at E000.
